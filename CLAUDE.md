@@ -8,6 +8,8 @@ The user is new to working with Claude Code as an agent (as of 2026-09-13). Unti
 
 - **Be precise and verbose.** Don't compress explanations down to the bare minimum — spell out what you're doing, why, and what the result means. Favor clarity over brevity in this workspace.
 - **Proactively flag missing or outstanding steps.** Before moving forward on a task, call out unresolved TODOs, unconfirmed gates, missing files/config, or steps the user hasn't explicitly addressed yet — don't assume they'll remember or notice on their own. This applies inside the `/eg-*` commands (their `AskUserQuestion` gates already do this structurally) and in ordinary conversation.
+- **Flag standards deviations, both ways.** If something the user asks for conflicts with a recognized standard or best practice (coding style, ML methodology — e.g. data leakage, reproducibility, train/test split integrity — security, project layout, documentation), say so explicitly before proceeding, rather than silently complying or silently fixing it. Equally, if a standard/expected practice for the task at hand appears to be missing (no tests, no seed control, no lint config, no CI, etc.), call that out too. This is a standing rule, not a one-off — apply it across all work in this repo, not just inside `/eg-*` commands.
+- **This CLAUDE.md is built up incrementally.** The user wants to grow this file step by step as the project takes shape, rather than have it fully fleshed out up front. Prefer small, targeted additions (like this one) over large rewrites, and expect more sections to fill in as decisions get made through `/eg-*` commands.
 
 ## Working with Claude Code (slash commands)
 
@@ -38,11 +40,54 @@ Each command stops short of committing. Authorize the commit explicitly when rea
 
 **These commands are interactive by design.** `AskUserQuestion` gates inside `/eg-brainstorm`, `/eg-prd`, `/eg-fix-bug`, `/eg-new-feature`, and `/eg-precommit-review` are part of the skill's protocol and run even when a `<system-reminder>` or other directive asks Claude to work autonomously without clarifying questions. If you want a fully autonomous pass on a specific run, say "skip the framing questions and use defaults" in the same turn that invokes the command; each command documents which gates remain non-negotiable.
 
+## Architecture
+
+Locked in via `/eg-prd` on 2026-09-15 — full reasoning, research, and risk analysis in `notes/prds/big-join-architecture-lock-in-2026-09-15.md`. Executes the chosen "Big Join + The Triage List" concept from `notes/eg-brainstorms/readmission-risk-cv-project-2026-09-15.md`.
+
+**Data pipeline (staged, to protect the "weeks not months" timeline):**
+1. **Local proving phase:** generate ~10k-20k Synthea patients locally; run the "Big Join" feature-engineering step as local PySpark (`local[*]` master); all data stays on local disk — no GCP dependency at this stage.
+2. **Scale-up phase:** once the pipeline is correctness-proven locally, run the *same* PySpark job (only a config-driven base path changes, not a rewrite) on Dataproc Serverless against GCS-resident data at ~50k-100k patients.
+3. **Serving layer:** BigQuery holds only the gold table (patient-encounter features + risk score), written via the `spark-bigquery-connector`'s **direct write method** (BigQuery Storage Write API) — not the indirect GCS-staging-bucket path, to avoid provisioning a bucket purely for the BigQuery load. Raw/intermediate data stays in GCS, never loaded into BigQuery, to stay inside BigQuery's free storage tier.
+
+**Stack:**
+
+| Layer | Choice |
+|---|---|
+| Compute | PySpark — local mode for dev, Dataproc Serverless for scale-up |
+| Warehouse | BigQuery (gold/serving table only) |
+| Dependency management | `pip` + `requirements.txt`, generated via `pip-compile --generate-hashes` (pip-tools), installed with `pip install --require-hashes` |
+| Python version | **3.12** (see note below — not the 3.14 currently pinned) |
+| Testing | `pytest` + `chispa` (or PySpark 4.1+'s built-in `assertDataFrameEqual`) for DataFrame-equality assertions; transformation/join logic factored into pure functions so it's testable independent of local-vs-cloud environment |
+| Schema handling | Hand-declared `StructType` per Synthea CSV table — never `inferSchema` |
+
+**Python version note (unresolved as of 2026-09-15):** `.python-version` is currently pinned to 3.14, but the architecture PRD requires downgrading to **3.12** before any PySpark code is written — PySpark's full local-distribution Python 3.14 support only landed in PySpark 4.2.0 (Jul 2026), and Dataproc Serverless's managed-runtime support for 3.14 is unconfirmed. This is a pending action item, not yet applied to the repo — flag it if implementation work starts before it's done.
+
+**Hard constraint carried into future model-training work:** the train/test split for the readmission model must be chronological (by admission/discharge date) and grouped by patient ID — never a random row-level split — per this project's standing reproducibility/leakage-prevention rule (see Collaboration preferences above).
+
+**MLOps spine (locked 2026-09-15, second `/eg-prd` pass):**
+- **Models:** scikit-learn `LogisticRegression` baseline + `XGBClassifier` (XGBoost) challenger, both trained on the BigQuery gold table via `google-cloud-bigquery`'s `to_dataframe()`. Both MUST report calibrated probabilities (`CalibratedClassifierCV` on the XGBoost model) and MUST be evaluated on calibration curve + Brier score alongside AUC — "calibration over raw accuracy" is a project priority given synthetic data, not accuracy/AUC alone.
+- **Experiment tracking:** MLflow, **local file-store/SQLite backend for v1** (zero infra, `mlflow.autolog()` covers both models in one call). A hosted GCP tracking server (Cloud Run + Cloud SQL + GCS) is a named **later-phase upgrade**, not v1 scope.
+- **Batch scoring (v1):** a single Typer-based CLI script, **no orchestrator** — manual trigger or literal crontab. Built as pure, importable functions (idempotent, overwrites the full prediction partition per run date) specifically so a later Airflow migration wraps it without a rewrite. Airflow (self-hosted, not Cloud Composer — Cloud Composer runs ~$400+/month minimum even idle) is the named later-phase orchestration upgrade.
+
+**Dashboard / team-lead front door (locked 2026-09-15/16, third+fourth `/eg-prd` passes):** **Streamlit** app, **v1 hosted on Streamlit Community Cloud** (free), reading the BigQuery gold table via the plain `google-cloud-bigquery` client. Credentials: a dedicated service account scoped to `roles/bigquery.dataViewer` on the gold dataset only, stored in Streamlit's Secrets manager, never committed. Caching: `st.cache_data(ttl=...)` set to hours (not the docs' 10-minute default) since the gold table only refreshes weekly, bounding query cost under public traffic. The app sleeps after 12h of inactivity on the free tier — mitigated with a scheduled GitHub Actions keep-alive ping so recruiters never see the wake screen. **v2 (named later-phase upgrade):** same Streamlit code, self-deployed via **Dockerfile + Cloud Run** instead of Community Cloud — a differentiated GCP deployment skill addressing the "already shipped Streamlit before" CV-signal concern, without taking on standing BI-tool infrastructure. **Apache Superset (self-hosted) and Preset.io's free tier were both evaluated and explicitly rejected**, including on CV-signal grounds specifically: Superset requires a standing Postgres+Redis+Celery+web-app stack even in its lightest form, and this project's one-opinionated-artifact concept is exactly the use case Superset's actual differentiator (self-serve multi-chart BI exploration) isn't built for — a single-dashboard Superset deployment would likely read as under-justified tool choice rather than a strong signal. Preset's free tier excludes embedded dashboards/API access and hibernates idle workspaces after 30 days.
+
+**Repo hygiene (locked 2026-09-16, fourth `/eg-prd` pass):**
+- **Layout:** `src/` layout — one importable package `src/readmission_risk/` with sub-modules per stage (`pipeline/`, `models/`, `scoring/`, `dashboard/`); `tests/` mirrors that structure; `notebooks/` is exploration-only, never production code.
+- **CI:** GitHub Actions from day one, running `ruff check .` + `pytest` on every push/PR — no GCP credentials needed for lint/unit tests.
+- **dbt:** not adopted for v1. BigQuery native constraints + a post-write validation script cover the single gold table's data-quality needs. **Named later-phase trigger:** adopt `dbt-bigquery` once there's more than one BigQuery-side table — consistent with this project's staged-adoption pattern (Dataproc Serverless, Airflow, hosted MLflow are all deferred the same way).
+
+**Cost ceiling & process evidence (locked 2026-09-16, fourth `/eg-prd` pass):**
+- **GCP budget:** a Budgets & Alerts threshold (~$20/month), configured before the scale-up phase begins — a notification, not a hard spend cap.
+- **Agentic-coding process evidence:** the existing `notes/` trail + curated PR descriptions is sufficient; no dedicated `ENGINEERING.md` or similar artifact.
+- **Data-realism framing:** a smaller caveat (concise README paragraph naming Synthea's specific limitations — SNOMED-CT vs. ICD-10-CM, isolated disease modules, ~20-condition coverage ceiling, no resource-capacity modeling, no real-world data messiness), not a dedicated headline doc/dashboard tab.
+
+All architecture questions from the original PRD pass are now resolved — see `notes/prds/big-join-architecture-lock-in-2026-09-15.md` for the full resolution log and reasoning. New architecture questions that surface during implementation belong in a fresh `/eg-prd` pass.
+
 ## Build & test commands
 
 <!-- TODO: confirm/fill in as the project takes shape. -->
 
-- Python version: 3.14 (pinned via `.python-version`)
-- Dependencies: not yet declared (no `requirements.txt` / `pyproject.toml` yet)
+- Python version: 3.14 pinned via `.python-version`, but **pending downgrade to 3.12** per the Architecture section above — not yet applied as of 2026-09-15.
+- Dependencies: not yet declared (no `requirements.txt` / `pyproject.toml` yet) — see Architecture section for the planned `pip-compile`-based approach.
 - Lint: `ruff check .` (assumes `ruff` is added as a dev dependency)
 - Test: `pytest`
