@@ -37,6 +37,10 @@ htmlcov/
 .vscode/
 .idea/
 
+# Downloaded third-party tooling (fetched by scripts/setup_synthea.sh, verified against a
+# hardcoded checksum sourced from GitHub's Releases API — not committed)
+tools/synthea/
+
 # Data and model artifacts (large / generated — track via a data pipeline, not git)
 data/
 *.csv

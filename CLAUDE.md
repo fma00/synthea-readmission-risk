@@ -56,11 +56,11 @@ Locked in via `/eg-prd` on 2026-09-15 — full reasoning, research, and risk ana
 | Compute | PySpark — local mode for dev, Dataproc Serverless for scale-up |
 | Warehouse | BigQuery (gold/serving table only) |
 | Dependency management | `pip` + `requirements.txt`, generated via `pip-compile --generate-hashes` (pip-tools), installed with `pip install --require-hashes` |
-| Python version | **3.12** (see note below — not the 3.14 currently pinned) |
+| Python version | **3.12** (downgrade landed 2026-09-17 — see note below) |
 | Testing | `pytest` + `chispa` (or PySpark 4.1+'s built-in `assertDataFrameEqual`) for DataFrame-equality assertions; transformation/join logic factored into pure functions so it's testable independent of local-vs-cloud environment |
 | Schema handling | Hand-declared `StructType` per Synthea CSV table — never `inferSchema` |
 
-**Python version note (unresolved as of 2026-09-15):** `.python-version` is currently pinned to 3.14, but the architecture PRD requires downgrading to **3.12** before any PySpark code is written — PySpark's full local-distribution Python 3.14 support only landed in PySpark 4.2.0 (Jul 2026), and Dataproc Serverless's managed-runtime support for 3.14 is unconfirmed. This is a pending action item, not yet applied to the repo — flag it if implementation work starts before it's done.
+**Python version note (resolved 2026-09-17):** `.python-version` is now pinned to **3.12.11** (landed as the first step of the local-Synthea-generation slice, `notes/eg-new-feature/local-synthea-generation-2026-09-16.md`), downgraded from 3.14 per the architecture PRD's requirement — PySpark's full local-distribution Python 3.14 support only landed in PySpark 4.2.0 (Jul 2026), and Dataproc Serverless's managed-runtime support for 3.14 is unconfirmed. `.venv/` was recreated under the new interpreter alongside the pin.
 
 **Hard constraint carried into future model-training work:** the train/test split for the readmission model must be chronological (by admission/discharge date) and grouped by patient ID — never a random row-level split — per this project's standing reproducibility/leakage-prevention rule (see Collaboration preferences above).
 
@@ -87,7 +87,7 @@ All architecture questions from the original PRD pass are now resolved — see `
 
 <!-- TODO: confirm/fill in as the project takes shape. -->
 
-- Python version: 3.14 pinned via `.python-version`, but **pending downgrade to 3.12** per the Architecture section above — not yet applied as of 2026-09-15.
-- Dependencies: not yet declared (no `requirements.txt` / `pyproject.toml` yet) — see Architecture section for the planned `pip-compile`-based approach.
+- Python version: **3.12.11**, pinned via `.python-version` (downgraded from 3.14 2026-09-17, see Architecture section).
+- Dependencies: `pyproject.toml` (package metadata, src-layout) + `requirements.in`/`requirements-dev.in` compiled to hash-pinned `requirements.txt`/`requirements-dev.txt` via `pip-compile --generate-hashes`. Install as two separate invocations: `pip install -e .` (editable, no hashes) then `pip install --require-hashes -r requirements-dev.txt`.
 - Lint: `ruff check .` (assumes `ruff` is added as a dev dependency)
 - Test: `pytest`
