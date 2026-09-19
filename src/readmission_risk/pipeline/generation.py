@@ -22,16 +22,34 @@ EXPECTED_CSV_TABLES: tuple[str, ...] = (
     "procedures.csv",
     "careplans.csv",
     "observations.csv",
+    "payers.csv",
+    "providers.csv",
+    "organizations.csv",
 )
-# Deliberately not Synthea's full ~18-table CSV output (also includes payers.csv, claims.csv,
-# providers.csv, immunizations.csv, allergies.csv, and others) -- this is the join-relevant subset
-# slice 2 is expected to need, gated for pass/fail purposes. GenerationResult.row_counts (below) is
-# NOT limited to this list -- it accounts for every CSV file Synthea actually writes.
+# Deliberately not Synthea's full ~18-table CSV output (also includes claims.csv,
+# immunizations.csv, allergies.csv, and others) -- this is the join-relevant subset slice 2's Big
+# Join reads (see src/readmission_risk/pipeline/big_join.py's TABLES_JOINED), gated for pass/fail
+# purposes. GenerationResult.row_counts (below) is NOT limited to this list -- it accounts for
+# every CSV file Synthea actually writes.
+# Extended from 7 to 10 entries (payers.csv, providers.csv, organizations.csv added) in slice 2 --
+# see notes/eg-new-feature/pyspark-big-join-2026-09-19.md Scope item 1a: the Big Join joins all 10
+# of these, and a missing/empty dimension table would otherwise go uncaught at regeneration time.
 
-REQUIRED_NONEMPTY_TABLES: tuple[str, ...] = ("patients.csv", "encounters.csv")
-# These two must never be empty even at the 500-1,000-patient dry run -- a zero-row patients.csv
-# after a 0-exit-code run means generation silently produced nothing, categorically different from
-# a rare-condition table (e.g. careplans.csv) legitimately having zero rows at small population sizes.
+REQUIRED_NONEMPTY_TABLES: tuple[str, ...] = (
+    "patients.csv",
+    "encounters.csv",
+    "payers.csv",
+    "providers.csv",
+    "organizations.csv",
+)
+# patients.csv/encounters.csv: must never be empty even at the 500-1,000-patient dry run -- a
+# zero-row patients.csv after a 0-exit-code run means generation silently produced nothing,
+# categorically different from a rare-condition table (e.g. careplans.csv) legitimately having
+# zero rows at small population sizes.
+# payers.csv/providers.csv/organizations.csv: added in slice 2 -- confirmed non-empty in every
+# real generation run so far (payers.csv has 10 rows, providers.csv/organizations.csv each
+# ~1,146 at population=10,000), and an empty one would otherwise silently produce all-null
+# dimension attributes in the Big Join's gold table (see big_join.py's join_dimension_attributes).
 
 
 @dataclass(frozen=True)
@@ -43,6 +61,11 @@ class SyntheaGenerationConfig:
     synthea_jar_path: Path = Path("tools/synthea/synthea-with-dependencies.jar")
     state: str = "Massachusetts"
     timeout_seconds: float | None = None
+    years_of_history: int = 10
+    # Default is 10 (a bounded choice), not Synthea's own "unlimited" sentinel of 0 -- defaulting
+    # to 0 would mean any future regeneration that forgets to pass this explicitly (including at
+    # the 50k-100k scale-up phase) silently reproduces the 17GB full-history blowup slice 2 exists
+    # to fix. Pass years_of_history=0 explicitly to opt back into full/unbounded history.
 
 
 class SyntheaGenerationError(RuntimeError):
@@ -89,7 +112,7 @@ def build_synthea_command(config: SyntheaGenerationConfig) -> list[str]:
         "--exporter.practitioner.fhir.export",
         "false",
         "--exporter.years_of_history",
-        "0",
+        str(config.years_of_history),
         config.state,
     ]
     # generate.database_type is deliberately NOT included -- confirmed dead/deprecated in current

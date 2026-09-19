@@ -4,3 +4,10 @@
 #
 #    pip-compile --generate-hashes --no-index --output-file=requirements.txt requirements.in
 #
+py4j==0.10.9.9 \
+    --hash=sha256:c7c26e4158defb37b0bb124933163641a2ff6e3a3913f7811b0ddbe07ed61533 \
+    --hash=sha256:f694cad19efa5bd1dee4f3e5270eb406613c974394035e5bfc4ec1aba870b879
+    # via pyspark
+pyspark==4.1.3 \
+    --hash=sha256:b600238e771e45618a58beaf9d63cfd9aa06f61ce193244cedf890a04a4409f7
+    # via -r requirements.in

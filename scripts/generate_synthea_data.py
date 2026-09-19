@@ -31,6 +31,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--state", default="Massachusetts")
     parser.add_argument("--timeout-seconds", type=float, default=None)
+    parser.add_argument("--years-of-history", type=int, default=10)
     return parser.parse_args(argv)
 
 
@@ -44,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
         synthea_jar_path=args.jar_path,
         state=args.state,
         timeout_seconds=args.timeout_seconds,
+        years_of_history=args.years_of_history,
     )
 
     try:

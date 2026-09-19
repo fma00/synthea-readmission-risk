@@ -65,9 +65,17 @@ def test_build_synthea_command_exact_argv(tmp_path):
         "--exporter.practitioner.fhir.export",
         "false",
         "--exporter.years_of_history",
-        "0",
+        "10",
         "Massachusetts",
     ]
+
+
+def test_build_synthea_command_years_of_history_threaded_through(tmp_path):
+    config = make_config(tmp_path, years_of_history=0)
+    argv = build_synthea_command(config)
+    assert "--exporter.years_of_history" in argv
+    idx = argv.index("--exporter.years_of_history")
+    assert argv[idx + 1] == "0"
 
 
 def test_build_synthea_command_excludes_dead_database_type_flag(tmp_path):
@@ -231,8 +239,13 @@ def test_run_synthea_generation_success_writes_summary_and_complete_row_counts(t
     def fake_run(*args, **kwargs):
         # Simulate Synthea actually writing its output as a side effect of the subprocess call --
         # output_dir must still be empty when run_synthea_generation's guard clause checks it.
+        # immunizations.csv (not payers.csv, which moved INTO EXPECTED_CSV_TABLES in slice 2 --
+        # see generation.py's EXPECTED_CSV_TABLES comment) stands in as a table genuinely outside
+        # EXPECTED_CSV_TABLES, to keep proving row-count accounting covers tables beyond that list.
         _populate_fixture_csv_dir(
-            config.output_dir, extra_tables={"payers.csv": 3}, empty_non_required_table="careplans.csv"
+            config.output_dir,
+            extra_tables={"immunizations.csv": 3},
+            empty_non_required_table="careplans.csv",
         )
         return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
 
@@ -241,8 +254,8 @@ def test_run_synthea_generation_success_writes_summary_and_complete_row_counts(t
 
     assert isinstance(result, GenerationResult)
     assert result.warnings == ["careplans.csv"]
-    # Complete accounting includes payers.csv even though it's outside EXPECTED_CSV_TABLES.
-    assert result.row_counts["payers.csv"] == 3
+    # Complete accounting includes immunizations.csv even though it's outside EXPECTED_CSV_TABLES.
+    assert result.row_counts["immunizations.csv"] == 3
     assert result.row_counts["patients.csv"] == 5
 
     summary_path = config.output_dir / "generation_summary.json"
@@ -250,7 +263,7 @@ def test_run_synthea_generation_success_writes_summary_and_complete_row_counts(t
     summary = json.loads(summary_path.read_text())
     assert summary["population_size"] == 1000
     assert summary["seed"] == 42
-    assert summary["row_counts"]["payers.csv"] == 3
+    assert summary["row_counts"]["immunizations.csv"] == 3
     assert summary["warnings"] == ["careplans.csv"]
 
 
