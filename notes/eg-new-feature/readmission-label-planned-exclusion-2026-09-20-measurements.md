@@ -1,0 +1,273 @@
+# Slice 2b measurements — recipes and expected values
+
+Companion to [readmission-label-planned-exclusion-2026-09-20.md](readmission-label-planned-exclusion-2026-09-20.md). Every figure the README, CLAUDE.md and the design doc cite for slice 2b is produced by the single script below (pandas only; reads encounters/patients/procedures, never observations or claims), so each number is re-derivable from the repo plus the data. The project's reproducibility rule applies to measurements too.
+
+**Run** (repo root, `.venv` active, JDK not needed; needs `data/raw/full_run/` = 10,000 patients, seed 42, `years_of_history=10`, `reference_date=20260916`, and the *pre-2b* all-cause gold table at `data/gold/full_run` for the feature columns of the prototype metrics):
+
+```sh
+MLFLOW_DISABLE_AGENT_HINT=1 python <the script below saved as measure_label.py>
+```
+
+The final `[gold]` line only prints once `data/gold/full_run_2b` exists (the Big Join has been run); it checks that the Spark-built gold table has exactly the same encounter ids and labels as this pandas implementation of the rules.
+
+**Conventions.** "Readmitting stay" for a positive index = the earliest in-window stay by `START` (all-cause for pre-2b figures, counting stays for post-2b figures); gap = time from the index `STOP` to that stay's `START`; reasons are grouped by `admission_reason_description` (a null reason is "no recorded reason"); distinct-event counts use that same earliest stay; gap bins are half-open.
+
+## Expected output (verified by running the script on 2026-09-20)
+
+| Tag | Figure | Value |
+|---|---|---|
+| `[diag]` | inpatient stays / planned / continuation / non-terminal | 13,565 / 3,320 / 682 / 682 (equal by coincidence, not identity) |
+| `[pre-2b]` | rows / positives (all-cause, slice 2) | 13,222 / 1,607 |
+| `[pre-2b]` | lung-reason inpatient stays / carrying a planned code | 3,321 / 3,315 |
+| `[pre-2b]` | positives on the two lung reasons / chemo-marked positives | 1,166 of 1,607 (72.6%) / 1,187 |
+| `[pre-2b]` | `424132000`: n, same-reason share, gap | 662, 98.5%, 28.8 ± 1.9 d |
+| `[pre-2b]` | `67811000119102`: n, same-reason share, gap | 504, 99.8%, 24.5 ± 2.1 d |
+| `[pre-2b]` | abnormal cardiac imaging `274531002` | 158 positives, all readmit as "History of CABG", median gap 1.4 d |
+| `[pre-2b]` | aortic stenosis `60573004` | 69 positives: 62 → "History of aortic valve replacement", 5 same-reason, 2 lung; 1.1 d |
+| `[pre-2b]` | aortic regurgitation `60234000` | 26 positives: 24 → "History of aortic valve replacement", 2 same-reason; 1.2 d |
+| `[funnel]` | ignore planned readmits | 13,222 rows / 423 positives |
+| `[funnel]` | + ignore continuation readmits (death/censoring re-applied) | 13,214 / 218 |
+| `[funnel]` | + drop planned index stays | 9,921 / 207 |
+| `[funnel]` | + terminal-only index rows (**final cohort**) | **9,284 / 151** |
+| `[variant]` | transplant codes added (pre-terminal cohort) | 9,651 / 202 |
+| `[prototype]` | planned index kept (pre-terminal): train / test; lookup; LR | 9,624 (131 pos) / 2,076 (67 pos); AUC 0.862, Brier 0.0298; AUC 0.868, Brier 0.0305 |
+| `[prototype]` | planned index dropped (pre-terminal) | 6,786 (121) / 1,743 (66); lookup AUC 0.849, Brier 0.0350; LR AUC 0.846, Brier 0.0359 |
+| `[prototype]` | final cohort | 6,391 (96) / 1,539 (41); lookup AUC 0.873, Brier 0.0252; LR AUC 0.869, Brier 0.0255 |
+| `[split]` | final cohort, `test_start` 2023-01-01 | n_input 9,284; censor-buffer drop 1; purge 34; patient-overlap 1,319; train 6,391 (96 pos, 1.50%); test 1,539 (41 pos, 2.66%); 4,167 / 1,295 patients |
+| `[horizon]` | train rows with an in-window stay / violating / max horizon | 118 / 0 / 2022-12-25T01:59:59Z |
+| `[concentration]` | all 151 | CABG-history 45, CHF 30, aortic stenosis 20, aortic regurgitation 17, NSTEMI 7, no recorded reason 7, dependent drug abuse 7, abnormal imaging 5 |
+| `[concentration]` | train 96 | CHF 20, aortic stenosis 18, CABG-history 17, aortic regurgitation 15, then four reasons at 4 |
+| `[concentration]` | test 41 | CABG-history 23, CHF 10, three reasons at 2 (dependent drug abuse, NSTEMI, no recorded reason), two singletons |
+| `[gaps]` | distinct first-readmit stays among the 151 positives | 151 (no duplicated event on this data) |
+| `[gaps]` | first counting readmit ≤ 48 h / < 24 h | 39 (one at exactly 48.0 h) / 13 |
+| `[gaps]` | half-open bins in hours: [1,6) [6,24) [24,48) [48,168) [168,360) [360,720] | 11, 2, 25, 31, 33, 49 |
+| `[gaps]` | CABG-history positives / same-reason repeats / median gap | 45 / 43 / 16.57 d (43 same-reason: 16.74 d) |
+| `[sensitivity]` | `--train-start-date 20170916` | 5,403 dropped before the start; 1,676 train rows, 24 positives |
+| `[cv]` | grouped calibration-fold positives, default run / sensitivity run | 15, 25, 13, 21, 22 / 8, 3, 7, 2, 4 |
+
+## The script
+
+```python
+"""Slice 2b measurement recipes (pandas). Run from the repo root with the repo .venv:  python measure_label.py
+Reads only encounters/patients/procedures (never observations/claims). Every figure printed here is quoted in the design doc,
+README or CLAUDE.md; the expected values are listed in the measurements note."""
+
+import warnings
+from datetime import date
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from readmission_risk.models.baselines import reason_code_lookup
+from readmission_risk.models.data import load_gold_table, prepare_features
+from readmission_risk.models.evaluate import evaluate_probabilities
+from readmission_risk.models.modeling import build_logistic_regression, make_grouped_cv_splits
+from readmission_risk.models.split import chronological_group_split
+
+warnings.filterwarnings("ignore")
+RAW, OLD_GOLD, NEW_GOLD = Path("data/raw/full_run/csv"), Path("data/gold/full_run"), Path("data/gold/full_run_2b")
+W = 30
+REF, TEST_START = date(2026, 9, 16), date(2023, 1, 1)
+REF_END = pd.Timestamp("2026-09-17", tz="UTC")  # reference_date + 1 day, exclusive
+CHEMO = {"703423002", "367336001", "33195004"}
+TRANSPLANT = {"70536003", "88039007", "58776007", "234336002", "58390007"}
+LUNG = ["424132000", "67811000119102"]
+
+
+def load():
+    enc = pd.read_csv(RAW / "encounters.csv", dtype={"REASONCODE": "string", "CODE": "string"},
+                      usecols=["Id", "START", "STOP", "PATIENT", "ENCOUNTERCLASS", "REASONCODE", "REASONDESCRIPTION"])
+    for col in ("START", "STOP"):
+        enc[col] = pd.to_datetime(enc[col], utc=True)
+    pat = pd.read_csv(RAW / "patients.csv", usecols=["Id", "DEATHDATE"])
+    pat["DEATHDATE"] = pd.to_datetime(pat["DEATHDATE"], utc=True)
+    proc = pd.read_csv(RAW / "procedures.csv", usecols=["ENCOUNTER", "CODE"], dtype=str)
+    return enc, pat, proc
+
+
+def stay_flags(enc):
+    """Inpatient stays, the continuation ids (START <= running max of EARLIER stays' STOP, order (START, Id)) and the
+    non-terminal ids (another same-patient stay has START <= this STOP < that stay's STOP)."""
+    inp = enc[enc.ENCOUNTERCLASS == "inpatient"].sort_values(["PATIENT", "START", "Id"]).copy()
+    inp["prev_max"] = inp.groupby("PATIENT").STOP.transform(lambda s: s.cummax().shift())
+    continuation = set(inp.loc[inp.START <= inp.prev_max, "Id"])
+    cols = ["Id", "PATIENT", "START", "STOP"]
+    x = inp[cols].add_prefix("c_").merge(inp[cols].add_prefix("s_"), left_on="c_PATIENT", right_on="s_PATIENT")
+    nonterminal = set(x[(x.c_Id != x.s_Id) & (x.s_START <= x.c_STOP) & (x.s_STOP > x.c_STOP)].c_Id)
+    return inp, continuation, nonterminal
+
+
+def in_window_pairs(inp):
+    """Every (index candidate c, later inpatient stay a) with a.START in (c.STOP, c.STOP + W days] (all-cause, pre-2b)."""
+    c = inp[inp.STOP.notna()].add_prefix("c_")
+    a = inp.add_prefix("a_")
+    m = c.merge(a, left_on="c_PATIENT", right_on="a_PATIENT")
+    return c, m[(m.a_Id != m.c_Id) & (m.a_START > m.c_STOP) & (m.a_START <= m.c_STOP + pd.Timedelta(days=W))]
+
+
+def cohort(inp, pat, planned, continuation, nonterminal, *, ignore_planned_readmit=True, ignore_continuation_readmit=True,
+           drop_planned_index=True, drop_nonterminal=True):
+    """(encounter_id, y) after the label and the death/censoring keep-rule. All four switches on = the slice-2b cohort."""
+    c, m = in_window_pairs(inp)
+    if drop_planned_index:
+        c = c[~c.c_Id.isin(planned)]
+    if drop_nonterminal:
+        c = c[~c.c_Id.isin(nonterminal)]
+    m = m[m.c_Id.isin(set(c.c_Id))]
+    if ignore_planned_readmit:
+        m = m[~m.a_Id.isin(planned)]
+    if ignore_continuation_readmit:
+        m = m[~m.a_Id.isin(continuation)]
+    c = c.merge(pat, left_on="c_PATIENT", right_on="Id", how="left")
+    deadline = c.c_STOP + pd.Timedelta(days=W)
+    c["y"] = c.c_Id.isin(set(m.c_Id)).astype(int)
+    observable = (c.DEATHDATE.isna() | (c.DEATHDATE > deadline)) & (deadline < REF_END)
+    return c[(c.y == 1) | observable][["c_Id", "y"]].rename(columns={"c_Id": "encounter_id"}), m
+
+
+def normalized_old_gold():
+    """The pre-2b gold table (no metadata) with load_gold_table's dtype contract, for prototype metrics on variant cohorts."""
+    df = pd.read_parquet(OLD_GOLD)
+    for col in ("index_start", "index_stop"):
+        df[col] = pd.to_datetime(df[col], utc=True)
+    counts = [c for c in df.columns if c.endswith("_count") or c.endswith("_window")]
+    df[counts] = df[counts].astype("int64")
+    return df
+
+
+def metrics(gold, cohort_df):
+    g = gold.merge(cohort_df, on="encounter_id")
+    g["is_readmitted"] = g.y.astype("int8")
+    sp = chronological_group_split(g.drop(columns=["y"]), reference_date=REF, test_start_date=TEST_START)
+    ytr, yte = sp.train.is_readmitted.to_numpy(), sp.test.is_readmitted.to_numpy()
+    prev = float(ytr.mean())
+    lookup = evaluate_probabilities(yte, reason_code_lookup(sp.train.admission_reason_code, ytr, sp.test.admission_reason_code), train_prevalence=prev).metrics
+    lr = build_logistic_regression(42).fit(prepare_features(sp.train), ytr)
+    lrm = evaluate_probabilities(yte, lr.predict_proba(prepare_features(sp.test))[:, 1], train_prevalence=prev).metrics
+    return sp, lookup, lrm
+
+
+def main():
+    enc, pat, proc = load()
+    inp, continuation, nonterminal = stay_flags(enc)
+    planned = set(proc.loc[proc.CODE.isin(CHEMO), "ENCOUNTER"]) & set(inp.Id)
+    print(f"[diag] inpatient {len(inp)} planned {len(planned)} continuation {len(continuation)} non-terminal {len(nonterminal)}")
+
+    # (a) pre-2b facts -----------------------------------------------------------------------------------------
+    old, _ = cohort(inp, pat, planned, continuation, nonterminal, ignore_planned_readmit=False, ignore_continuation_readmit=False,
+                    drop_planned_index=False, drop_nonterminal=False)
+    print(f"[pre-2b] rows {len(old)} positives {int(old.y.sum())}")
+    lung = inp[inp.REASONCODE.isin(LUNG)]
+    print(f"[pre-2b] lung stays {len(lung)}, with a planned code {int(lung.Id.isin(planned).sum())}")
+    c, m = in_window_pairs(inp)
+    m = m[m.c_Id.isin(set(old[old.y == 1].encounter_id))]
+    first = m.sort_values("a_START").groupby("c_Id").head(1).copy()  # the readmitting stay = the earliest in-window stay
+    first["gap_d"] = (first.a_START - first.c_STOP).dt.total_seconds() / 86400
+    print(f"[pre-2b] positives on lung reasons {int(first.c_REASONCODE.isin(LUNG).sum())} of {len(first)}; chemo-marked positives "
+          f"{int(m.groupby('c_Id').a_Id.apply(lambda s: s.isin(planned).any()).sum())}")
+    for code in LUNG:
+        x = first[first.c_REASONCODE == code]
+        print(f"[pre-2b] {code}: n {len(x)} same-reason {100 * (x.a_REASONCODE == code).mean():.1f}% gap {x.gap_d.mean():.1f} +/- {x.gap_d.std():.1f} d")
+    for code in ("274531002", "60573004", "60234000"):
+        x = first[first.c_REASONCODE == code]
+        print(f"[pre-2b] {code}: n {len(x)} readmit reasons {dict(x.a_REASONDESCRIPTION.str[:32].value_counts().head(3))} median gap {x.gap_d.median():.1f} d")
+
+    # (b) funnel and variant cohorts -----------------------------------------------------------------------------
+    steps = [("ignore planned readmits", dict(ignore_continuation_readmit=False, drop_planned_index=False, drop_nonterminal=False)),
+             ("+ ignore continuation readmits", dict(drop_planned_index=False, drop_nonterminal=False)),
+             ("+ drop planned index", dict(drop_nonterminal=False)),
+             ("+ terminal only (FINAL)", dict())]
+    for name, kw in steps:
+        co, _ = cohort(inp, pat, planned, continuation, nonterminal, **kw)
+        print(f"[funnel] {name}: rows {len(co)} positives {int(co.y.sum())}")
+    tr_planned = planned | (set(proc.loc[proc.CODE.isin(TRANSPLANT), "ENCOUNTER"]) & set(inp.Id))
+    co, _ = cohort(inp, pat, tr_planned, continuation, nonterminal, drop_nonterminal=False)
+    print(f"[variant] transplant codes added (pre-terminal cohort): rows {len(co)} positives {int(co.y.sum())}")
+    g0 = normalized_old_gold()
+    for name, kw in [("planned index KEPT (pre-terminal)", dict(drop_planned_index=False, drop_nonterminal=False)),
+                     ("planned index dropped (pre-terminal)", dict(drop_nonterminal=False)), ("FINAL", dict())]:
+        co, _ = cohort(inp, pat, planned, continuation, nonterminal, **kw)
+        sp, lk, lr = metrics(g0, co)
+        print(f"[prototype] {name}: train {sp.summary['n_train']}/{sp.summary['n_train_positive']} test {sp.summary['n_test']}/{sp.summary['n_test_positive']} "
+              f"lookup AUC {lk['roc_auc']:.3f} Brier {lk['brier_score']:.4f} | LR AUC {lr['roc_auc']:.3f} Brier {lr['brier_score']:.4f}")
+
+    # (c)(d)(e) final cohort, split, horizon, concentration, gaps, sensitivity ---------------------------------
+    final, m = cohort(inp, pat, planned, continuation, nonterminal)
+    g = g0.merge(final, on="encounter_id")
+    g["is_readmitted"] = g.y.astype("int8")
+    g = g.drop(columns=["y"])
+    sp = chronological_group_split(g, reference_date=REF, test_start_date=TEST_START)
+    print("[split]", {k: v for k, v in sp.summary.items() if k.startswith("n_") or k.endswith("rate")})
+    inp["horizon"] = inp[["STOP", "prev_max"]].max(axis=1)
+    pairs = sp.train[["encounter_id", "patient_id", "index_stop"]].merge(inp[["PATIENT", "START", "horizon"]], left_on="patient_id", right_on="PATIENT")
+    pairs = pairs[(pairs.START > pairs.index_stop) & (pairs.START <= pairs.index_stop + pd.Timedelta(days=W))]
+    test_start = pd.Timestamp(TEST_START, tz="UTC")
+    print(f"[horizon] train rows with an in-window stay {pairs.encounter_id.nunique()}, violating {pairs[pairs.horizon >= test_start].encounter_id.nunique()}, max {pairs.horizon.max()}")
+    for name, part in (("all", g), ("train", sp.train), ("test", sp.test)):
+        p = part[part.is_readmitted == 1]
+        print(f"[concentration] {name} {len(p)}:", dict(p.admission_reason_description.fillna("no recorded reason").value_counts().head(8)))
+    fm = m[m.c_Id.isin(set(g[g.is_readmitted == 1].encounter_id))].copy()
+    fm["gap_h"] = (fm.a_START - fm.c_STOP).dt.total_seconds() / 3600
+    fm = fm.sort_values("a_START").groupby("c_Id").head(1)
+    cabg = fm[fm.c_REASONCODE == "399261000"]
+    print(f"[gaps] positives {len(fm)} distinct first-readmit stays {fm.a_Id.nunique()}; <=48h {int((fm.gap_h <= 48).sum())} (exactly 48.0h {int((fm.gap_h == 48).sum())}), <24h {int((fm.gap_h < 24).sum())}")
+    print("[gaps] half-open bins (h):", dict(pd.cut(fm.gap_h, [0, 1, 6, 24, 48, 168, 360, 720.0001], right=False).value_counts().sort_index()))
+    print(f"[gaps] CABG-history positives {len(cabg)}, same-reason {int((cabg.a_REASONCODE == cabg.c_REASONCODE).sum())}, median gap {cabg.gap_h.median() / 24:.2f} d")
+    sens = chronological_group_split(g, reference_date=REF, test_start_date=TEST_START, train_start_date=date(2017, 9, 16))
+    print(f"[sensitivity] train_start 2017-09-16: dropped {sens.summary['n_dropped_before_train_start']}, train {sens.summary['n_train']}/{sens.summary['n_train_positive']}")
+    for name, part in (("default", sp.train), ("sensitivity", sens.train)):
+        y, grp = part.is_readmitted.to_numpy(), part.patient_id.to_numpy()
+        print(f"[cv] {name} calibration-fold positives:", [int(y[cal].sum()) for _, cal in make_grouped_cv_splits(y, grp, 5)])
+
+    # (g) the real gold table agrees with the pandas cohort (only after the Big Join has been run) -----------------
+    if NEW_GOLD.exists():
+        real = load_gold_table(NEW_GOLD)
+        same = set(real.encounter_id) == set(final.encounter_id) and real.set_index("encounter_id").is_readmitted.sort_index().equals(
+            final.set_index("encounter_id").y.sort_index().astype("int8").rename("is_readmitted"))
+        print(f"[gold] {NEW_GOLD}: rows {len(real)} positives {int(real.is_readmitted.sum())}; identical ids+labels to the pandas cohort: {same}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+## Additional recipe: cohort-membership horizon property (README "thin leakage margin")
+
+```python
+# non-terminal, non-planned candidates whose label window closes before test_start, and how many are dropped as non-terminal
+# ONLY because an overlapping stay ends on/after test_start (expected: 470 candidates, 0 affected)
+import pandas as pd
+RAW = "data/raw/full_run/csv/"
+enc = pd.read_csv(RAW + "encounters.csv", usecols=["Id", "START", "STOP", "PATIENT", "ENCOUNTERCLASS"])
+proc = pd.read_csv(RAW + "procedures.csv", usecols=["ENCOUNTER", "CODE"], dtype=str)
+for c in ("START", "STOP"):
+    enc[c] = pd.to_datetime(enc[c], utc=True)
+planned = set(proc.loc[proc.CODE.isin({"703423002", "367336001", "33195004"}), "ENCOUNTER"])
+inp = enc[enc.ENCOUNTERCLASS == "inpatient"]
+T = pd.Timestamp("2023-01-01", tz="UTC")
+x = inp[["Id", "PATIENT", "START", "STOP"]].add_prefix("c_").merge(inp[["Id", "PATIENT", "START", "STOP"]].add_prefix("s_"), left_on="c_PATIENT", right_on="s_PATIENT")
+nt = x[(x.c_Id != x.s_Id) & (x.s_START <= x.c_STOP) & (x.s_STOP > x.c_STOP)]
+cand = nt[~nt.c_Id.isin(planned) & (nt.c_STOP + pd.Timedelta(days=30) < T)]
+print(cand.c_Id.nunique(), cand[cand.s_STOP >= T].c_Id.nunique())
+```
+
+## Real runs (2026-09-20)
+
+Big Join: `python scripts/run_big_join.py --input-dir data/raw/full_run --output-dir data/gold/full_run_2b --reference-date 20260916` (~20 s) → **Rows 9,284; Positives 151 (1.63%); Inpatient stays 13,565 (planned 3,320, continuation 682, non-terminal 682)**; `[gold]` line of the script: identical encounter ids and labels to the pandas implementation of the rules. `gold_fingerprint` = `c05486183e2b8a4742301cb59d8d16ebd44d8bdfe0cf152d8717115929fdf7ac`.
+
+Training: `python scripts/train_models.py --gold-dir data/gold/full_run_2b --reference-date 20260916 --test-start-date 20230101 --experiment-name readmission-risk-2b` (~8 s; MLflow experiment `readmission-risk-2b`; runs were tagged `git_dirty=dirty` because the working tree was uncommitted). Split summary as pinned above; the "only 41 positive rows in the test window (< 50)" warning fired, as expected.
+
+| Model | ROC-AUC | PR-AUC | Brier | Brier skill | ECE | calibration gap |
+|---|---|---|---|---|---|---|
+| Logistic regression | 0.8692 [0.8198, 0.9191] | 0.1234 | 0.0255 [0.0184, 0.0340] | 0.0224 | 0.0131 [0.0076, 0.0228] | −0.0100 [−0.0188, −0.0020] |
+| Calibrated XGBoost | 0.8225 [0.7505, 0.8842] | 0.1134 | 0.0257 [0.0181, 0.0347] | 0.0143 | 0.0179 [0.0126, 0.0287] | −0.0122 [−0.0214, −0.0041] |
+| Reason-code lookup (point estimate) | 0.8726 | 0.1351 | 0.0252 | — | 0.0116 | −0.0087 |
+
+Paired differences (n_bootstrap 500, seed 42; `clustered_bootstrap` gives paired differences only for exactly two models, so one call per pair): XGBoost − LR: ROC-AUC −0.0467 [−0.0916, −0.0102]; Brier +0.0002 [−0.0009, +0.0013]; ECE +0.0048 [+0.0018, +0.0091]; |calibration gap| +0.0022 [+0.0007, +0.0040]. LR − lookup: ROC-AUC [−0.0361, +0.0307]; Brier [−0.0004, +0.0011]; ECE [−0.0020, +0.0060]. XGBoost − lookup: ROC-AUC [−0.0941, −0.0109]; Brier [−0.0009, +0.0020]; ECE [+0.0020, +0.0130].
+
+Sensitivity run (`--train-start-date 20170916 --experiment-name readmission-risk-2b-sensitivity`): 5,403 dropped before the start; 1,676 train rows / 24 positives; LR ROC-AUC 0.8596 [0.8049, 0.9070], Brier 0.0246; XGBoost ROC-AUC 0.7778 [0.6998, 0.8442], Brier 0.0255; paired XGBoost − LR ROC-AUC −0.0818 [−0.1438, −0.0367], Brier +0.0008 [−0.0003, +0.0020], ECE +0.0068 [+0.0011, +0.0095]. Train rows before 2017-09-16 in the default run: 6,391 − 1,676 = 4,715 (74%), of which 96 − 24 = 72 positive (1.53%) versus 24 of 1,676 (1.43%) after.
+
+Refusal checks (exit code 1, no MLflow directory created): `--gold-dir data/gold/full_run` (pre-2b) → `ERROR: Gold metadata not found: …/_gold_metadata.json -- this gold table predates slice 2b or is incomplete; rebuild it with scripts/run_big_join.py`; `--reference-date 20261231` against `full_run_2b` → `ERROR: reference_date 20261231 does not match the gold table's own reference_date 20260916 (see …/_gold_metadata.json)`.
+
+Mutation spot-check (design requirement, manual, not committed): 17 named mutants of `big_join.py` (continuation `<=`→`<`; running max → immediate predecessor; no per-patient partition; terminal self-join without patient equality / with `<` / over all encounter classes; no `.distinct()` on planned ids; candidates without the terminal filter / also dropping continuations / keeping planned stays; readmission pool without the continuation filter / including planned stays / restricted to non-null `STOP`; lower bound `>`→`>=`; upper bound `<=`→`<`; readmission join without patient equality; metadata continuation/non-terminal swap) were each applied to the production code and **every one made the test suite fail (0 survivors)**.

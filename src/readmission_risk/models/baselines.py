@@ -1,5 +1,6 @@
 """A trivial no-model reference for judging what the models add: the per-admission-reason readmission rate.
-On the real gold table this lookup alone reaches test ROC-AUC 0.933 (see the README's "Results and caveats").
+On the pre-slice-2b (all-cause label) gold table this lookup alone reached test ROC-AUC 0.933; on the slice-2b (unplanned-label) gold
+table it reaches 0.873 (see the README's "Results and caveats").
 """
 
 from __future__ import annotations

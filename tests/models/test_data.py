@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
 
+import readmission_risk
 from readmission_risk.models.data import (
     CATEGORICAL_FEATURES,
     COUNT_FEATURES,
@@ -13,12 +19,19 @@ from readmission_risk.models.data import (
     LABEL_COLUMN,
     gold_fingerprint,
     load_gold_table,
+    load_gold_table_with_metadata,
     prepare_features,
 )
-from tests.models.helpers import make_gold_frame
+from readmission_risk.pipeline.gold_metadata import (
+    LABEL_DEFINITION,
+    PLANNED_PROCEDURE_CODES,
+)
+from tests.models.helpers import make_gold_frame, write_test_gold_metadata
 
 
-def _write_parts(df: pd.DataFrame, directory, n_parts: int = 2, *, spark_like: bool = False) -> None:
+def _write_parts(
+    df: pd.DataFrame, directory, n_parts: int = 2, *, spark_like: bool = False, metadata: bool = True, **metadata_overrides
+) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     out = df.copy()
     if spark_like:
@@ -33,6 +46,8 @@ def _write_parts(df: pd.DataFrame, directory, n_parts: int = 2, *, spark_like: b
     for i in range(n_parts):
         out.iloc[bounds[i] : bounds[i + 1]].to_parquet(directory / f"part-{i:05d}.parquet", index=False)
     (directory / "_SUCCESS").write_text("")
+    if metadata:
+        write_test_gold_metadata(directory, df, **metadata_overrides)
 
 
 def test_every_gold_column_is_classified_exactly_once():
@@ -186,3 +201,57 @@ def test_gold_fingerprint():
     changed = df.copy()
     changed.loc[changed.index[0], "prior_encounter_count"] += 1
     assert gold_fingerprint(changed) != base
+
+
+# --- slice 2b: the _gold_metadata.json sidecar ---
+
+
+def test_load_gold_table_refuses_a_directory_without_metadata(tmp_path):
+    _write_parts(make_gold_frame(40, seed=3), tmp_path / "gold", metadata=False)
+    with pytest.raises(FileNotFoundError, match="rebuild"):
+        load_gold_table(tmp_path / "gold")
+
+
+def test_load_gold_table_refuses_a_different_label_definition(tmp_path):
+    _write_parts(make_gold_frame(40, seed=3), tmp_path / "gold", label_definition="all_cause_v0")
+    with pytest.raises(ValueError, match="label definition"):
+        load_gold_table(tmp_path / "gold")
+
+
+def test_load_gold_table_refuses_different_planned_procedure_codes(tmp_path):
+    _write_parts(make_gold_frame(40, seed=3), tmp_path / "gold", planned_procedure_codes=("1",))
+    with pytest.raises(ValueError, match="planned procedure codes"):
+        load_gold_table(tmp_path / "gold")
+
+
+@pytest.mark.parametrize("field, delta", [("n_rows", 1), ("n_rows", -1), ("n_positive", 1), ("n_positive", -1)])
+def test_load_gold_table_refuses_counts_that_differ_from_the_metadata_in_either_direction(tmp_path, field, delta):
+    df = make_gold_frame(60, seed=3)
+    actual = {"n_rows": len(df), "n_positive": int(df[LABEL_COLUMN].sum())}
+    assert actual["n_positive"] >= 1
+    _write_parts(df, tmp_path / "gold", **{field: actual[field] + delta})
+    with pytest.raises(ValueError, match="does not match"):
+        load_gold_table(tmp_path / "gold")
+
+
+def test_load_gold_table_with_metadata_returns_the_metadata(tmp_path):
+    df = make_gold_frame(60, seed=3)
+    _write_parts(df, tmp_path / "gold", lookback_years=2)
+    frame, metadata = load_gold_table_with_metadata(tmp_path / "gold")
+    assert metadata.lookback_years == 2
+    assert (metadata.n_rows, metadata.n_positive) == (len(frame), int(frame[LABEL_COLUMN].sum()))
+    assert metadata.label_definition == LABEL_DEFINITION
+    assert metadata.planned_procedure_codes == PLANNED_PROCEDURE_CODES
+
+
+def test_importing_the_models_data_module_never_imports_pyspark():
+    # The explicit PYTHONPATH is needed because pyproject's pythonpath = ["src"] applies only in-process.
+    src_dir = Path(readmission_risk.__file__).resolve().parents[1]
+    completed = subprocess.run(
+        [sys.executable, "-c", "import sys, readmission_risk.models.data; sys.exit(1 if 'pyspark' in sys.modules else 0)"],
+        env={**os.environ, "PYTHONPATH": str(src_dir)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr

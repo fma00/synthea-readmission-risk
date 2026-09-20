@@ -5,13 +5,21 @@ See notes/eg-new-feature/pyspark-big-join-2026-09-19.md for the design this impl
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
 import pyspark.sql.functions as F
-from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import DataFrame, SparkSession, Window
 
+from .gold_metadata import (
+    LABEL_DEFINITION,
+    PLANNED_PROCEDURE_CODES,
+    GoldMetadata,
+    parse_yyyymmdd,
+    write_gold_metadata,
+)
 from .schemas import TABLE_SCHEMAS
 
 TABLES_JOINED: tuple[str, ...] = (
@@ -35,10 +43,14 @@ TABLES_JOINED: tuple[str, ...] = (
 TABLES_MUST_BE_NONEMPTY: tuple[str, ...] = (
     "patients.csv",
     "encounters.csv",
+    "procedures.csv",
     "payers.csv",
     "providers.csv",
     "organizations.csv",
 )
+# procedures.csv (slice 2b): the planned-stay flag (PLANNED_PROCEDURE_CODES) is read from it, so an empty one would make every
+# stay unplanned and silently revert the label to (nearly) all-cause, with no error anywhere. Slice 1's own
+# REQUIRED_NONEMPTY_TABLES deliberately still allows an empty procedures.csv (named follow-up).
 # payers.csv/providers.csv/organizations.csv feed join_dimension_attributes as unconditional
 # left-join sources with no fallback -- an empty one would silently produce all-null
 # payer_ownership/provider_specialty/organization_utilization columns rather than erroring
@@ -110,24 +122,72 @@ def load_synthea_tables(spark: SparkSession, input_dir: Path) -> dict[str, DataF
     return tables
 
 
+def flag_inpatient_stays(encounters: DataFrame, procedures: DataFrame) -> DataFrame:
+    """All inpatient stays with four added columns: prev_max_stop (timestamp, nullable), is_continuation, is_planned and
+    is_terminal (all boolean, non-null). Extra input columns are preserved; one row per inpatient stay (no fan-out).
+
+    - is_planned: the stay's Id is the ENCOUNTER of a procedures row whose CODE is in PLANNED_PROCEDURE_CODES.
+    - is_continuation: ordering the patient's inpatient stays by (START, Id), the maximum STOP over ALL strictly earlier stays
+      is non-null and START <= it (so a stay starting exactly when an earlier one ends IS a continuation). Computed over every
+      inpatient stay, planned ones included. A null STOP contributes nothing to the maximum.
+    - is_terminal: NO other stay of the same patient has START <= this STOP and STOP > this STOP (both comparisons are
+      null-false, so an open stay never makes another stay non-terminal). Also computed over every inpatient stay.
+    Non-inpatient encounters take no part in any of the three."""
+    inpatient = encounters.filter(F.col("ENCOUNTERCLASS") == "inpatient")
+    w = Window.partitionBy("PATIENT").orderBy("START", "Id").rowsBetween(Window.unboundedPreceding, -1)
+    planned_ids = (
+        procedures.filter(F.col("CODE").isin(*PLANNED_PROCEDURE_CODES))
+        .select(F.col("ENCOUNTER").alias("_planned_encounter_id"))
+        .distinct()  # required: a stay has many planned procedure rows (19,666 rows / 3,320 stays on the real data)
+        .withColumn("_planned_marker", F.lit(True))
+    )
+    x, y = inpatient.alias("x"), inpatient.alias("y")
+    nonterminal_ids = (
+        x.join(
+            y,
+            (F.col("x.PATIENT") == F.col("y.PATIENT"))
+            & (F.col("x.Id") != F.col("y.Id"))
+            & (F.col("y.START") <= F.col("x.STOP"))
+            & (F.col("y.STOP") > F.col("x.STOP")),
+            "left_semi",
+        )
+        .select(F.col("x.Id").alias("_nonterminal_id"))
+        .distinct()
+        .withColumn("_nonterminal_marker", F.lit(True))
+    )
+    return (
+        inpatient.withColumn("prev_max_stop", F.max("STOP").over(w))
+        .withColumn(
+            "is_continuation", F.col("prev_max_stop").isNotNull() & (F.col("START") <= F.col("prev_max_stop"))
+        )
+        .join(planned_ids, F.col("Id") == F.col("_planned_encounter_id"), "left")
+        .withColumn("is_planned", F.coalesce(F.col("_planned_marker"), F.lit(False)))
+        .join(nonterminal_ids, F.col("Id") == F.col("_nonterminal_id"), "left")
+        .withColumn("is_terminal", ~F.coalesce(F.col("_nonterminal_marker"), F.lit(False)))
+        .drop("_planned_encounter_id", "_planned_marker", "_nonterminal_id", "_nonterminal_marker")
+    )
+
+
 def build_index_encounters(
     encounters: DataFrame,
     patients: DataFrame,
+    procedures: DataFrame,
     reference_date: date,
     readmission_window_days: int = 30,
 ) -> DataFrame:
-    """Filters encounters to inpatient index candidates, labels each with a 30-day (default)
-    all-cause readmission flag, and drops candidates whose outcome can't be observed (death or
-    administrative censoring before a readmission occurred)."""
-    candidates = encounters.filter(
-        (F.col("ENCOUNTERCLASS") == "inpatient") & F.col("STOP").isNotNull()
-    ).withColumn(
-        "readmit_deadline", F.expr(f"STOP + INTERVAL {readmission_window_days} DAYS")
-    )
-    all_inpatient = encounters.filter(F.col("ENCOUNTERCLASS") == "inpatient")
+    """Filters encounters to index candidates (inpatient, non-null STOP, not planned, terminal), labels each with a 30-day
+    (default) UNPLANNED readmission flag (a readmission is an inpatient stay that is neither planned nor a continuation,
+    starting in (STOP, STOP + W], upper bound inclusive), and drops candidates whose outcome can't be observed (death or
+    administrative censoring before a readmission occurred). See flag_inpatient_stays for the three stay flags and
+    LABEL_DEFINITION (gold_metadata.py) for the identity rule."""
+    flagged = flag_inpatient_stays(encounters, procedures)
+    candidates = flagged.filter(
+        F.col("STOP").isNotNull() & ~F.col("is_planned") & F.col("is_terminal")
+    ).withColumn("readmit_deadline", F.expr(f"STOP + INTERVAL {readmission_window_days} DAYS"))
+    readmit_pool = flagged.filter(~F.col("is_planned") & ~F.col("is_continuation"))
 
     c = candidates.alias("c")
-    a = all_inpatient.alias("a")
+    a = readmit_pool.alias("a")
 
     readmitted_ids = (
         c.join(
@@ -328,7 +388,17 @@ def join_patient_demographics(features: DataFrame, patients: DataFrame) -> DataF
 
 
 def build_big_join(spark: SparkSession, config: BigJoinConfig) -> DataFrame:
-    """Orchestrates the full join and writes the result to config.output_dir as Parquet."""
+    """Orchestrates the full join and writes the result to config.output_dir as Parquet, then (last) the
+    _gold_metadata.json sidecar that downstream code validates against."""
+    # Validated with exactly the metadata validator's strictness, before any I/O, so a bad config can never leave a Parquet
+    # directory without metadata behind. `type(...) is int` rejects bool and float.
+    if type(config.readmission_window_days) is not int or config.readmission_window_days < 1:
+        raise ValueError(f"readmission_window_days must be an int >= 1; got {config.readmission_window_days!r}")
+    if type(config.lookback_years) is not int or config.lookback_years < 1:
+        # >= 1 is a deliberate tightening: 0/negative gives an empty/inverted window in which every windowed feature is 0
+        raise ValueError(f"lookback_years must be an int >= 1; got {config.lookback_years!r}")
+    reference_date = parse_yyyymmdd(config.reference_date, "reference_date")
+
     if config.output_dir.exists():
         raise FileExistsError(f"output_dir already exists: {config.output_dir}")
 
@@ -346,15 +416,11 @@ def build_big_join(spark: SparkSession, config: BigJoinConfig) -> DataFrame:
         )
 
     tables = load_synthea_tables(spark, config.input_dir)
-    reference_date = date(
-        int(config.reference_date[:4]),
-        int(config.reference_date[4:6]),
-        int(config.reference_date[6:8]),
-    )
 
     index_encounters = build_index_encounters(
         tables["encounters.csv"],
         tables["patients.csv"],
+        tables["procedures.csv"],
         reference_date,
         config.readmission_window_days,
     )
@@ -373,5 +439,44 @@ def build_big_join(spark: SparkSession, config: BigJoinConfig) -> DataFrame:
     )
     gold = join_patient_demographics(features, tables["patients.csv"])
 
+    # Diagnostics recorded in the metadata: they make a silently non-matching PLANNED_PROCEDURE_CODES visible (n_planned_stays == 0).
+    stay_stats = (
+        flag_inpatient_stays(tables["encounters.csv"], tables["procedures.csv"])
+        .agg(
+            F.count(F.lit(1)).alias("n_inpatient_stays"),
+            F.sum(F.col("is_planned").cast("int")).alias("n_planned_stays"),
+            F.sum(F.col("is_continuation").cast("int")).alias("n_continuation_stays"),
+            F.sum((~F.col("is_terminal")).cast("int")).alias("n_nonterminal_stays"),
+        )
+        .first()
+    )
+
     gold.write.parquet(str(config.output_dir))
+    written_stats = (
+        spark.read.parquet(str(config.output_dir))
+        .agg(F.count(F.lit(1)).alias("n_rows"), F.sum("is_readmitted").alias("n_positive"))
+        .first()
+    )
+    # Written LAST, so its presence is a completion marker (like _SUCCESS). `sum` over zero rows is null -> 0.
+    metadata = GoldMetadata(
+        label_definition=LABEL_DEFINITION,
+        reference_date=config.reference_date,
+        readmission_window_days=config.readmission_window_days,
+        lookback_years=config.lookback_years,
+        planned_procedure_codes=PLANNED_PROCEDURE_CODES,
+        n_rows=int(written_stats["n_rows"]),
+        n_positive=int(written_stats["n_positive"] or 0),
+        n_inpatient_stays=int(stay_stats["n_inpatient_stays"] or 0),
+        n_planned_stays=int(stay_stats["n_planned_stays"] or 0),
+        n_continuation_stays=int(stay_stats["n_continuation_stays"] or 0),
+        n_nonterminal_stays=int(stay_stats["n_nonterminal_stays"] or 0),
+    )
+    write_gold_metadata(config.output_dir, metadata)
+    if metadata.n_planned_stays == 0 and metadata.n_inpatient_stays > 0:
+        warnings.warn(
+            "no inpatient stay matched PLANNED_PROCEDURE_CODES; the label reduces to the continuation/terminal rules only "
+            "(check procedures.csv and the code list)",
+            UserWarning,
+            stacklevel=2,
+        )
     return gold

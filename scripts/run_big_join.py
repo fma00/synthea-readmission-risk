@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 from readmission_risk.pipeline.big_join import BigJoinConfig, build_big_join
+from readmission_risk.pipeline.gold_metadata import read_gold_metadata
 from readmission_risk.pipeline.spark_session import make_spark_session
 
 
@@ -39,13 +40,20 @@ def main(argv: list[str] | None = None) -> int:
     spark = make_spark_session()
     try:
         try:
-            gold = build_big_join(spark, config)
+            build_big_join(spark, config)
+            metadata = read_gold_metadata(config.output_dir)
         except (FileNotFoundError, FileExistsError, ValueError) as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 1
 
+        rate = f"{100 * metadata.n_positive / metadata.n_rows:.2f}%" if metadata.n_rows else "n/a"
         print(f"Big Join succeeded -> {config.output_dir}")
-        print(f"Rows: {gold.count()}")
+        print(f"Rows: {metadata.n_rows}")
+        print(f"Positives: {metadata.n_positive} ({rate})")
+        print(
+            f"Inpatient stays: {metadata.n_inpatient_stays} (planned: {metadata.n_planned_stays}, "
+            f"continuation: {metadata.n_continuation_stays}, non-terminal: {metadata.n_nonterminal_stays})"
+        )
         return 0
     finally:
         spark.stop()

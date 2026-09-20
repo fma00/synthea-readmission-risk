@@ -9,6 +9,14 @@ from pathlib import Path
 
 import pandas as pd
 
+from readmission_risk.pipeline.gold_metadata import (
+    GOLD_METADATA_FILENAME,
+    LABEL_DEFINITION,
+    PLANNED_PROCEDURE_CODES,
+    GoldMetadata,
+    read_gold_metadata,
+)
+
 LABEL_COLUMN = "is_readmitted"
 GROUP_COLUMN = "patient_id"
 
@@ -41,6 +49,8 @@ EXPECTED_GOLD_COLUMNS: tuple[str, ...] = (
 # readmission_risk.pipeline.big_join.GOLD_TABLE_COLUMNS: big_join imports pyspark at module level,
 # and readmission_risk.models will be imported by slice 4's scorer and possibly the dashboard,
 # neither of which should need Spark. tests/models/test_data.py asserts the two stay in sync.
+# (readmission_risk.pipeline.gold_metadata, imported above, is stdlib-only for the same reason; a test asserts that
+# importing this module never imports pyspark.)
 
 COUNT_FEATURES: tuple[str, ...] = (
     "prior_encounter_count",
@@ -108,16 +118,31 @@ _MISSING_CATEGORY = "MISSING"
 
 
 def load_gold_table(gold_dir: Path) -> pd.DataFrame:
-    """Reads the Spark-written Parquet directory (part files + _SUCCESS) via pd.read_parquet,
-    validates it, and normalizes it to the post-load dtype contract: strings -> object, the 8 count
-    columns -> int64, age -> float64, label -> int8, timestamps -> tz-aware UTC
-    (organization_utilization is left exactly as read: it is excluded from the features, so it is
-    neither cast nor null-checked). Returns the frame sorted by (index_start, encounter_id) with a
-    fresh RangeIndex. Raises FileNotFoundError if gold_dir holds no Parquet file, ValueError (naming
-    the offending column/count) on any schema or data problem."""
+    """The gold table only; see load_gold_table_with_metadata (which this wraps) for every check it performs."""
+    return load_gold_table_with_metadata(gold_dir)[0]
+
+
+def load_gold_table_with_metadata(gold_dir: Path) -> tuple[pd.DataFrame, GoldMetadata]:
+    """Reads the Spark-written Parquet directory (part files + _SUCCESS) via pd.read_parquet, validates it AND its
+    `_gold_metadata.json` sidecar (required: a table without one is refused), and normalizes it to the post-load dtype
+    contract: strings -> object, the 8 count columns -> int64, age -> float64, label -> int8, timestamps -> tz-aware UTC
+    (organization_utilization is left exactly as read: it is excluded from the features, so it is neither cast nor
+    null-checked). Returns (frame sorted by (index_start, encounter_id) with a fresh RangeIndex, metadata). Raises
+    FileNotFoundError if gold_dir holds no Parquet file or the metadata file is absent, ValueError (naming the offending
+    column/count/file) on any schema, data or metadata problem, including a label_definition / planned_procedure_codes that
+    differ from this code's constants and row/positive counts that differ from the metadata's (an incomplete copy, or not the
+    table the metadata describes -- edits that preserve both counts are NOT detected)."""
     gold_dir = Path(gold_dir)
     if not gold_dir.is_dir() or not any(gold_dir.glob("*.parquet")):
         raise FileNotFoundError(f"No Parquet files found in gold directory: {gold_dir}")
+
+    metadata = read_gold_metadata(gold_dir)
+    if metadata.label_definition != LABEL_DEFINITION or metadata.planned_procedure_codes != PLANNED_PROCEDURE_CODES:
+        raise ValueError(
+            f"Gold table in {gold_dir} was built with label definition {metadata.label_definition!r} / planned procedure "
+            f"codes {metadata.planned_procedure_codes}, but this code trains on {LABEL_DEFINITION!r} / "
+            f"{PLANNED_PROCEDURE_CODES}; rebuild it with scripts/run_big_join.py"
+        )
 
     df = pd.read_parquet(gold_dir)
 
@@ -143,6 +168,12 @@ def load_gold_table(gold_dir: Path) -> pd.DataFrame:
             f"Gold table column {LABEL_COLUMN!r} must be 0/1; found values "
             f"{sorted(df.loc[bad_label, LABEL_COLUMN].unique().tolist())}"
         )
+    n_positive = int(df[LABEL_COLUMN].sum())
+    if len(df) != metadata.n_rows or n_positive != metadata.n_positive:
+        raise ValueError(
+            f"Gold table does not match its {GOLD_METADATA_FILENAME}: {len(df)} rows / {n_positive} positives vs "
+            f"{metadata.n_rows} / {metadata.n_positive} recorded -- an incomplete copy, or not the table this metadata describes"
+        )
 
     # .copy() so nothing below mutates a view of what pd.read_parquet returned
     df = df.copy()
@@ -163,7 +194,7 @@ def load_gold_table(gold_dir: Path) -> pd.DataFrame:
         raise ValueError(f"Gold table has {n_negative_stay} row(s) with index_stop before index_start")
 
     df = df.sort_values(["index_start", "encounter_id"], kind="stable").reset_index(drop=True)
-    return df[list(EXPECTED_GOLD_COLUMNS)]
+    return df[list(EXPECTED_GOLD_COLUMNS)], metadata
 
 
 def gold_fingerprint(df: pd.DataFrame) -> str:

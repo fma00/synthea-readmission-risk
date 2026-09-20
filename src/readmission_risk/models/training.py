@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import time
 import warnings
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
 
@@ -23,6 +23,10 @@ from mlflow.entities import Metric
 from mlflow.tracking import MlflowClient
 
 import mlflow
+from readmission_risk.pipeline.gold_metadata import (
+    GOLD_METADATA_FILENAME,
+    parse_yyyymmdd,
+)
 
 from . import tracking
 from .data import (
@@ -31,7 +35,7 @@ from .data import (
     GROUP_COLUMN,
     LABEL_COLUMN,
     gold_fingerprint,
-    load_gold_table,
+    load_gold_table_with_metadata,
     prepare_features,
 )
 from .evaluate import (
@@ -58,12 +62,12 @@ _CALIBRATION_METHODS = ("sigmoid", "isotonic")
 @dataclass(frozen=True)
 class TrainingConfig:
     gold_dir: Path
-    reference_date: str  # "YYYYMMDD"; MUST equal the reference_date of the Synthea run + Big Join that produced gold_dir
+    reference_date: str  # "YYYYMMDD"; MUST equal the reference_date of the Synthea run + Big Join that produced gold_dir (checked against _gold_metadata.json)
     test_start_date: str  # "YYYYMMDD"; no default: a modeling decision the caller must make
     train_start_date: str | None = None
     tracking_dir: Path = Path("mlflow")  # holds mlflow.db (SQLite) and artifacts/
     experiment_name: str = "readmission-risk"
-    readmission_window_days: int = 30  # MUST equal BigJoinConfig.readmission_window_days used for gold_dir
+    readmission_window_days: int = 30  # MUST equal BigJoinConfig.readmission_window_days used for gold_dir (checked against _gold_metadata.json)
     seed: int = 42
     calibration_cv_folds: int = 5
     calibration_method: str = "sigmoid"
@@ -93,20 +97,11 @@ class TrainingResult:
     comparison: PairedComparison
 
 
-def _parse_yyyymmdd(value: str, field: str) -> date:
-    if not (isinstance(value, str) and len(value) == 8 and value.isdigit()):
-        raise ValueError(f"{field} must be a YYYYMMDD string; got {value!r}")
-    try:
-        return date(int(value[:4]), int(value[4:6]), int(value[6:8]))
-    except ValueError as exc:
-        raise ValueError(f"{field} is not a valid calendar date: {value!r}") from exc
-
-
 def _validate_config(config: TrainingConfig) -> tuple[date, date, date | None]:
-    reference_date = _parse_yyyymmdd(config.reference_date, "reference_date")
-    test_start_date = _parse_yyyymmdd(config.test_start_date, "test_start_date")
+    reference_date = parse_yyyymmdd(config.reference_date, "reference_date")
+    test_start_date = parse_yyyymmdd(config.test_start_date, "test_start_date")
     train_start_date = (
-        _parse_yyyymmdd(config.train_start_date, "train_start_date") if config.train_start_date is not None else None
+        parse_yyyymmdd(config.train_start_date, "train_start_date") if config.train_start_date is not None else None
     )
     if train_start_date is not None and not train_start_date < test_start_date:
         raise ValueError("train_start_date must be before test_start_date")
@@ -150,15 +145,45 @@ def _metric(key: str, value: float) -> Metric:
     return Metric(key=key, value=float(value), timestamp=int(time.time() * 1000), step=0)
 
 
+def _warn_if_experiment_mixes_labels(experiment_id: str, experiment_name: str, label_definition: str) -> None:
+    """Runs logged before slice 2b (all-cause label) carry no `gold_label_definition` tag, and the default experiment name is
+    unchanged, so a default-argument run would land beside incomparable runs. Warn -- never refuse: the tag makes the mix
+    detectable, and reusing an experiment can be deliberate."""
+    stale = [
+        run
+        for run in MlflowClient().search_runs([experiment_id], max_results=5000)
+        if run.data.tags.get("gold_label_definition") != label_definition
+    ]
+    if stale:
+        warnings.warn(
+            f"MLflow experiment {experiment_name!r} already holds {len(stale)} run(s) whose gold_label_definition tag is "
+            f"missing or differs from {label_definition!r} (e.g. runs from before slice 2b): their metrics are NOT comparable "
+            "with this run's; use a fresh --experiment-name",
+            UserWarning,
+            stacklevel=3,
+        )
+
+
 def train_and_evaluate(config: TrainingConfig) -> TrainingResult:
     # 1. validate config
     reference_date, test_start_date, train_start_date = _validate_config(config)
 
     # 2. load
-    df = load_gold_table(config.gold_dir)
-    # (Deliberately NO hard check of reference_date against max(index_stop): slice 2 keeps censored positives
-    # whose discharge can fall AFTER the reference date. A too-early reference_date is caught instead by
-    # chronological_group_split's >1%-buffer-drop warning.)
+    df, metadata = load_gold_table_with_metadata(config.gold_dir)
+    # reference_date and readmission_window_days are checked for EXACT equality against the Big Join's own record of them
+    # (_gold_metadata.json), which closes the too-late-reference_date gap: it used to be undetectable (there is deliberately
+    # no check against max(index_stop) -- slice 2 keeps censored positives whose discharge can fall AFTER the reference date).
+    # chronological_group_split's >1%-buffer-drop warning stays as a second line of defence against a too-early date.
+    if metadata.reference_date != config.reference_date:
+        raise ValueError(
+            f"reference_date {config.reference_date} does not match the gold table's own reference_date "
+            f"{metadata.reference_date} (see {Path(config.gold_dir) / GOLD_METADATA_FILENAME})"
+        )
+    if metadata.readmission_window_days != config.readmission_window_days:
+        raise ValueError(
+            f"readmission_window_days {config.readmission_window_days} does not match the gold table's own "
+            f"readmission_window_days {metadata.readmission_window_days} (see {Path(config.gold_dir) / GOLD_METADATA_FILENAME})"
+        )
 
     # 3. split + arrays (all pure, before any MLflow side effect)
     split = chronological_group_split(
@@ -207,6 +232,8 @@ def train_and_evaluate(config: TrainingConfig) -> TrainingResult:
     if existing is None:
         mlflow.create_experiment(config.experiment_name, artifact_location=(abs_dir / "artifacts").as_uri())
     mlflow.set_experiment(config.experiment_name)
+    if existing is not None:
+        _warn_if_experiment_mixes_labels(existing.experiment_id, config.experiment_name, metadata.label_definition)
 
     records: dict[str, dict] = {}
     # autolog is process-global: leaving it on would patch every later sklearn .fit() in the process. The try
@@ -224,6 +251,7 @@ def train_and_evaluate(config: TrainingConfig) -> TrainingResult:
                     "test_start_date": config.test_start_date,
                     "train_start_date": config.train_start_date if config.train_start_date is not None else "none",
                     "readmission_window_days": config.readmission_window_days,
+                    "gold_lookback_years": metadata.lookback_years,
                     "n_bootstrap": config.n_bootstrap,
                 }
                 params.update({f"split_{k}": v for k, v in split.summary.items()})
@@ -235,6 +263,7 @@ def train_and_evaluate(config: TrainingConfig) -> TrainingResult:
                     {
                         "model_name": name,
                         "gold_fingerprint": fingerprint,
+                        "gold_label_definition": metadata.label_definition,
                         "git_dirty": _git_dirty_state(),
                         # flipped to "complete" after Phase B; a run left "pending" means Phase B failed
                         # after this run was logged, so its metrics have no intervals
@@ -259,6 +288,7 @@ def train_and_evaluate(config: TrainingConfig) -> TrainingResult:
 
                 mlflow.log_dict({"calibration_curve": result.calibration_curve}, "calibration_curve.json")
                 mlflow.log_dict(dict(split.summary), "split_summary.json")
+                mlflow.log_dict(asdict(metadata), "gold_metadata.json")
                 mlflow.log_dict(
                     {"features": list(FEATURE_COLUMNS), "excluded": dict(EXCLUDED_COLUMN_REASONS)},
                     "feature_columns.json",

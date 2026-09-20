@@ -7,7 +7,12 @@ import pytest
 from mlflow.tracking import MlflowClient
 
 from readmission_risk.models.tracking import mlflow_tracking_uri
-from tests.models.helpers import REFERENCE_DATE_STR, TEST_START_STR, make_gold_frame
+from tests.models.helpers import (
+    REFERENCE_DATE_STR,
+    TEST_START_STR,
+    make_gold_frame,
+    write_test_gold_metadata,
+)
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "train_models.py"
 
@@ -20,12 +25,13 @@ def cli():
     return module
 
 
-def _write_gold(directory: Path) -> Path:
+def _write_gold(directory: Path, **metadata_overrides) -> Path:
     directory.mkdir(parents=True)
     df = make_gold_frame(300, seed=1)
     half = len(df) // 2
     df.iloc[:half].to_parquet(directory / "part-0.parquet", index=False)
     df.iloc[half:].to_parquet(directory / "part-1.parquet", index=False)
+    write_test_gold_metadata(directory, df, **metadata_overrides)
     return directory
 
 
@@ -40,7 +46,8 @@ def _base_args(gold: Path, tracking: Path) -> list[str]:
 
 
 def test_cli_maps_flags_to_config_and_prints_report(cli, tmp_path, capsys):
-    gold, tracking = _write_gold(tmp_path / "gold"), tmp_path / "t"
+    # the CLI runs with --readmission-window-days 14, so the gold table's metadata must say 14 too
+    gold, tracking = _write_gold(tmp_path / "gold", readmission_window_days=14), tmp_path / "t"
     extra = [
         "--train-start-date", "20200101",
         "--seed", "7",
@@ -87,3 +94,12 @@ def test_cli_verbose_prints_traceback(cli, tmp_path, capsys):
             "--test-start-date", TEST_START_STR, "--tracking-dir", str(tmp_path / "t"), "--verbose"]  # fmt: skip
     assert cli.main(argv) == 1
     assert "Traceback" in capsys.readouterr().err
+
+
+def test_cli_refuses_a_gold_table_without_metadata(cli, tmp_path, capsys):
+    gold = _write_gold(tmp_path / "gold")
+    (gold / "_gold_metadata.json").unlink()
+    assert cli.main(_base_args(gold, tmp_path / "t")) == 1
+    err = capsys.readouterr().err
+    assert "ERROR:" in err and "rebuild" in err
+    assert not (tmp_path / "t").exists()

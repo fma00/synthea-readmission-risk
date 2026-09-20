@@ -29,23 +29,26 @@ from readmission_risk.models.training import (
     TrainingConfig,
     train_and_evaluate,
 )
+from readmission_risk.pipeline.gold_metadata import LABEL_DEFINITION
 from tests.models.helpers import (
     REFERENCE_DATE,
     REFERENCE_DATE_STR,
     TEST_START,
     TEST_START_STR,
     make_gold_frame,
+    write_test_gold_metadata,
 )
 
 EXPERIMENT = "readmission-risk"
 
 
-def _write_gold(directory: Path, df: pd.DataFrame) -> Path:
+def _write_gold(directory: Path, df: pd.DataFrame, **metadata_overrides) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     half = len(df) // 2
     df.iloc[:half].to_parquet(directory / "part-00000.parquet", index=False)
     df.iloc[half:].to_parquet(directory / "part-00001.parquet", index=False)
     (directory / "_SUCCESS").write_text("")
+    write_test_gold_metadata(directory, df, **metadata_overrides)
     return directory
 
 
@@ -419,3 +422,73 @@ def test_warnings_from_split_are_not_swallowed(tmp_path):
         warnings.simplefilter("always")
         train_and_evaluate(_config(gold, tmp_path / "t", calibration_cv_folds=3, n_bootstrap=0))
     assert any("reference_date" in str(w.message) for w in caught)
+
+
+# --- slice 2b: config vs the gold table's own metadata ---
+
+
+@pytest.mark.parametrize(
+    "config_overrides",
+    [
+        {"reference_date": "20261231"},  # later than the Big Join's (the gap that used to be undetectable)
+        {"reference_date": "20260101"},  # earlier
+        {"readmission_window_days": 14},
+    ],
+)
+def test_config_that_disagrees_with_the_gold_metadata_is_rejected_before_any_side_effect(tmp_path, config_overrides):
+    gold = _write_gold(tmp_path / "gold", make_gold_frame(300, seed=1))  # metadata: reference_date 20260916, window 30
+    with pytest.raises(ValueError, match="does not match the gold table"):
+        train_and_evaluate(_config(gold, tmp_path / "t", **config_overrides))
+    assert not (tmp_path / "t").exists()  # no MLflow tracking dir / experiment created
+
+
+def test_runs_record_the_gold_metadata(tmp_path):
+    gold = _write_gold(tmp_path / "gold", make_gold_frame(300, seed=1), lookback_years=2)
+    tracking_dir = tmp_path / "tracking"
+    train_and_evaluate(_config(gold, tracking_dir, n_bootstrap=0))
+    client = MlflowClient(tracking_uri=mlflow_tracking_uri(tracking_dir))
+    runs = client.search_runs([client.get_experiment_by_name(EXPERIMENT).experiment_id])
+    assert len(runs) == 2
+    for run in runs:
+        assert run.data.tags["gold_label_definition"] == LABEL_DEFINITION
+        assert run.data.params["gold_lookback_years"] == "2"
+        assert "gold_metadata.json" in {a.path for a in client.list_artifacts(run.info.run_id)}
+
+
+def _mixing_warnings(caught) -> list:
+    return [w for w in caught if "gold_label_definition" in str(w.message)]
+
+
+def test_warns_when_the_experiment_already_holds_runs_from_another_label_definition(tmp_path):
+    gold = _write_gold(tmp_path / "gold", make_gold_frame(300, seed=1))
+    tracking_dir = tmp_path / "tracking"
+    tracking_dir.mkdir()
+    client = MlflowClient(tracking_uri=mlflow_tracking_uri(tracking_dir))
+    # artifact_location inside tmp_path: without it MLflow defaults to ./mlruns in the working directory, and because the
+    # experiment already exists train_and_evaluate would not set one either (the test would leak artifacts into the repo)
+    experiment_id = client.create_experiment(EXPERIMENT, artifact_location=(tracking_dir / "artifacts").as_uri())
+    client.create_run(experiment_id)  # an untagged run, like one logged before slice 2b
+    with pytest.warns(UserWarning, match=r"1 run\(s\).*gold_label_definition"):
+        train_and_evaluate(_config(gold, tracking_dir, n_bootstrap=0))
+
+
+def test_warns_when_an_existing_run_carries_a_different_label_definition(tmp_path):
+    gold = _write_gold(tmp_path / "gold", make_gold_frame(300, seed=1))
+    tracking_dir = tmp_path / "tracking"
+    tracking_dir.mkdir()
+    client = MlflowClient(tracking_uri=mlflow_tracking_uri(tracking_dir))
+    experiment_id = client.create_experiment(EXPERIMENT, artifact_location=(tracking_dir / "artifacts").as_uri())
+    other = client.create_run(experiment_id)
+    client.set_tag(other.info.run_id, "gold_label_definition", "unplanned_readmission_v0")  # tagged, but a DIFFERENT definition
+    with pytest.warns(UserWarning, match=r"1 run\(s\).*gold_label_definition"):
+        train_and_evaluate(_config(gold, tracking_dir, n_bootstrap=0))
+
+
+def test_no_mixing_warning_for_a_fresh_experiment_or_repeat_runs_of_the_same_label(tmp_path):
+    gold = _write_gold(tmp_path / "gold", make_gold_frame(300, seed=1))
+    tracking_dir = tmp_path / "tracking"
+    for _ in range(2):  # the first creates the experiment, the second re-uses it (all runs tagged with the same definition)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            train_and_evaluate(_config(gold, tracking_dir, n_bootstrap=0))
+        assert not _mixing_warnings(caught)

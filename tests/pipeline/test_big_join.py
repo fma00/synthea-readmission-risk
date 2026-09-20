@@ -1,6 +1,9 @@
+import json
+import warnings
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+import pandas as pd
 import pytest
 from pyspark.sql.types import (
     DateType,
@@ -16,9 +19,14 @@ from readmission_risk.pipeline.big_join import (
     build_big_join,
     build_index_encounters,
     compute_lookback_features,
+    flag_inpatient_stays,
     join_dimension_attributes,
     join_patient_demographics,
     load_synthea_tables,
+)
+from readmission_risk.pipeline.gold_metadata import (
+    PLANNED_PROCEDURE_CODES,
+    read_gold_metadata,
 )
 from readmission_risk.pipeline.schemas import (
     ORGANIZATIONS_SCHEMA,
@@ -71,6 +79,15 @@ def make_encounter_row(
     return (id_, start, stop, patient, org, provider, payer, encounterclass, reasoncode, reasondescription)
 
 
+PROCEDURES_TEST_SCHEMA = StructType(
+    [StructField("ENCOUNTER", StringType(), True), StructField("CODE", StringType(), True)]
+)
+
+
+def _empty_procedures(spark):
+    return spark.createDataFrame([], PROCEDURES_TEST_SCHEMA)
+
+
 # --- load_synthea_tables ---
 
 
@@ -117,6 +134,15 @@ def test_load_synthea_tables_rejects_empty_encounters(spark, tmp_path):
         load_synthea_tables(spark, tmp_path)
 
 
+def test_load_synthea_tables_rejects_empty_procedures(spark, tmp_path):
+    """procedures.csv now feeds the planned-stay flag: an empty one would silently revert the label to (nearly) all-cause."""
+    csv_dir = tmp_path / "csv"
+    _write_all_tables(csv_dir, empty_table="procedures.csv")
+
+    with pytest.raises(ValueError, match="procedures.csv"):
+        load_synthea_tables(spark, tmp_path)
+
+
 def test_load_synthea_tables_reads_all_tables(spark, tmp_path):
     csv_dir = tmp_path / "csv"
     _write_all_tables(csv_dir)
@@ -140,7 +166,7 @@ def test_build_index_encounters_readmitted_case(spark):
     )
     patients = spark.createDataFrame([("p1", None)], PATIENTS_TEST_SCHEMA)
 
-    result = build_index_encounters(encounters, patients, date(2026, 9, 16), 30).collect()
+    result = build_index_encounters(encounters, patients, _empty_procedures(spark), date(2026, 9, 16), 30).collect()
     by_id = {row["encounter_id"]: row for row in result}
 
     # readmit1 is itself a legitimate inpatient encounter and becomes its own index row too
@@ -157,7 +183,7 @@ def test_build_index_encounters_non_readmitted_case(spark):
     )
     patients = spark.createDataFrame([("p1", None)], PATIENTS_TEST_SCHEMA)
 
-    result = build_index_encounters(encounters, patients, date(2026, 9, 16), 30).collect()
+    result = build_index_encounters(encounters, patients, _empty_procedures(spark), date(2026, 9, 16), 30).collect()
 
     assert len(result) == 1
     assert result[0]["is_readmitted"] == 0
@@ -170,7 +196,7 @@ def test_build_index_encounters_death_within_window_no_readmission_dropped(spark
     )
     patients = spark.createDataFrame([("p1", date(2020, 1, 10))], PATIENTS_TEST_SCHEMA)
 
-    result = build_index_encounters(encounters, patients, date(2026, 9, 16), 30).collect()
+    result = build_index_encounters(encounters, patients, _empty_procedures(spark), date(2026, 9, 16), 30).collect()
 
     assert len(result) == 0
 
@@ -186,7 +212,7 @@ def test_build_index_encounters_death_within_window_with_readmission_kept(spark)
     # Patient dies shortly after the readmission -- still within the 30-day window of idx1.
     patients = spark.createDataFrame([("p1", date(2020, 1, 10))], PATIENTS_TEST_SCHEMA)
 
-    result = build_index_encounters(encounters, patients, date(2026, 9, 16), 30).collect()
+    result = build_index_encounters(encounters, patients, _empty_procedures(spark), date(2026, 9, 16), 30).collect()
     by_id = {row["encounter_id"]: row for row in result}
 
     # idx1 is readmitted (readmit1 follows within 30 days) -> death never drops a positive, kept.
@@ -204,7 +230,7 @@ def test_build_index_encounters_censored_no_readmission_dropped(spark):
     patients = spark.createDataFrame([("p1", None)], PATIENTS_TEST_SCHEMA)
 
     # reference_date is only 2 days after STOP -- far short of the 30-day follow-up needed.
-    result = build_index_encounters(encounters, patients, date(2026, 9, 14), 30).collect()
+    result = build_index_encounters(encounters, patients, _empty_procedures(spark), date(2026, 9, 14), 30).collect()
 
     assert len(result) == 0
 
@@ -220,7 +246,7 @@ def test_build_index_encounters_censored_with_readmission_before_cutoff_kept(spa
     patients = spark.createDataFrame([("p1", None)], PATIENTS_TEST_SCHEMA)
 
     # reference_date is well before idx1's 30-day deadline, but the readmission already happened.
-    result = build_index_encounters(encounters, patients, date(2026, 9, 10), 30).collect()
+    result = build_index_encounters(encounters, patients, _empty_procedures(spark), date(2026, 9, 10), 30).collect()
     by_id = {row["encounter_id"]: row for row in result}
 
     # idx1 is readmitted -> kept regardless of censoring. readmit1 is itself a candidate too, but
@@ -241,7 +267,7 @@ def test_build_index_encounters_non_inpatient_excluded(spark):
     )
     patients = spark.createDataFrame([("p1", None)], PATIENTS_TEST_SCHEMA)
 
-    result = build_index_encounters(encounters, patients, date(2026, 9, 16), 30).collect()
+    result = build_index_encounters(encounters, patients, _empty_procedures(spark), date(2026, 9, 16), 30).collect()
 
     assert len(result) == 0
 
@@ -252,7 +278,7 @@ def test_build_index_encounters_null_stop_excluded(spark):
     )
     patients = spark.createDataFrame([("p1", None)], PATIENTS_TEST_SCHEMA)
 
-    result = build_index_encounters(encounters, patients, date(2026, 9, 16), 30).collect()
+    result = build_index_encounters(encounters, patients, _empty_procedures(spark), date(2026, 9, 16), 30).collect()
 
     assert len(result) == 0
 
@@ -274,7 +300,7 @@ def test_build_index_encounters_self_join_shared_lineage(spark):
     )
     patients = spark.createDataFrame([("p1", None)], PATIENTS_TEST_SCHEMA)
 
-    result = build_index_encounters(shared_encounters, patients, date(2026, 9, 16), 30).collect()
+    result = build_index_encounters(shared_encounters, patients, _empty_procedures(spark), date(2026, 9, 16), 30).collect()
     by_id = {row["encounter_id"]: row for row in result}
 
     # idx1 (readmitted) and readmit1 (itself a candidate, not further readmitted, not censored --
@@ -283,6 +309,265 @@ def test_build_index_encounters_self_join_shared_lineage(spark):
     assert by_id["idx1"]["is_readmitted"] == 1
     assert by_id["readmit1"]["is_readmitted"] == 0
     assert "amb1" not in by_id
+
+
+# --- flag_inpatient_stays / label rules (slice 2b) ---
+# In the fixtures, times are 2020-...T00:00:00Z unless stated and all encounters are inpatient unless stated.
+# Every expected output below was verified in Spark on these exact expressions, and every named mutant was executed and
+# confirmed to change it (design session scratch harness).
+
+PLANNED = "703423002"
+
+
+def _t(month_day: str, clock: str = "00:00:00") -> datetime:
+    return ts(f"2020-{month_day}T{clock}")
+
+
+def _stay(id_, start, stop, patient="p1", encounterclass="inpatient"):
+    return make_encounter_row(
+        id_,
+        _t(start) if isinstance(start, str) else start,
+        _t(stop) if isinstance(stop, str) else stop,
+        patient=patient,
+        encounterclass=encounterclass,
+    )
+
+
+def _procs(spark, pairs):
+    return spark.createDataFrame(list(pairs), PROCEDURES_TEST_SCHEMA)
+
+
+def _flags(spark, stays, procedures=()):
+    encounters = spark.createDataFrame(stays, ENCOUNTERS_TEST_SCHEMA)
+    rows = flag_inpatient_stays(encounters, _procs(spark, procedures)).collect()
+    return {r["Id"]: (r["is_continuation"], r["is_planned"], r["is_terminal"]) for r in rows}
+
+
+def _labels(spark, stays, procedures=(), deaths=None, reference=date(2026, 9, 16), window=30):
+    """{encounter_id: is_readmitted}. `stays` go into ONE createDataFrame (shared lineage for the internal self-joins)."""
+    encounters = spark.createDataFrame(stays, ENCOUNTERS_TEST_SCHEMA)
+    deaths = deaths or {}
+    patients = spark.createDataFrame([(p, deaths.get(p)) for p in sorted({s[3] for s in stays})], PATIENTS_TEST_SCHEMA)
+    rows = build_index_encounters(encounters, patients, _procs(spark, procedures), reference, window).collect()
+    return {r["encounter_id"]: r["is_readmitted"] for r in rows}
+
+
+def test_flag_max_over_all_earlier_stays_not_just_the_predecessor(spark):
+    flags = _flags(
+        spark, [_stay("L", "01-01", "01-30"), _stay("S", "01-02", "01-03"), _stay("T", "01-10", "01-12")]
+    )
+    assert flags["L"] == (False, False, True)
+    assert flags["S"] == (True, False, False)
+    assert flags["T"] == (True, False, False)  # a lag(STOP) implementation would give T a False
+
+
+def test_flag_terminal_and_continuation_boundaries(spark):
+    # each pair Ak/Bk is its OWN patient rk: the pairs reuse the same dates, so sharing a patient would change the answers
+    stays = [
+        _stay("A1", "02-01", "02-05", "r1"),
+        _stay("B1", "02-05", "02-08", "r1"),  # START == STOP
+        _stay("A2", "02-01", "02-05", "r2"),
+        _stay("B2", _t("02-05", "00:00:01"), "02-08", "r2"),  # +1 s
+        _stay("A3", "02-01", "02-05", "r3"),
+        _stay("B3", "02-03", "02-05", "r3"),  # same STOP
+        _stay("A4", "02-01", "02-05", "r4"),
+        _stay("B4", "02-03", None, "r4"),  # the other stay is open (null STOP)
+        _stay("A5", "02-01", "02-05", "r5"),
+        _stay("B5", "01-20", "02-20", "r5"),  # B5 contains A5
+    ]
+    flags = _flags(spark, stays)
+    assert flags["A1"] == (False, False, False)  # non-terminal: B1 starts exactly when A1 ends and runs on
+    assert flags["B1"] == (True, False, True)  # the continuation boundary is START <= max STOP
+    assert flags["A2"] == (False, False, True)  # +1 s: A2 is terminal
+    assert flags["B2"] == (False, False, True)  # ... and B2 is not a continuation
+    assert flags["A3"] == (False, False, True)
+    assert flags["B3"] == (True, False, True)  # same STOP: both terminal, B3 a continuation
+    assert flags["A4"] == (False, False, True)  # a null-STOP stay never makes another stay non-terminal
+    assert flags["B4"] == (True, False, True)
+    assert flags["A5"] == (True, False, False)
+    assert flags["B5"] == (False, False, True)
+
+
+def test_flag_patient_isolation(spark):
+    flags = _flags(spark, [_stay("X", "01-01", "01-10", "P"), _stay("Y", "01-05", "01-08", "Q")])
+    assert flags["X"] == (False, False, True)
+    assert flags["Y"] == (False, False, True)  # no partitionBy -> Y a continuation; no patient equality -> Y non-terminal
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_flag_tie_follows_id_order_not_row_order(spark, reverse):
+    stays = [_stay("a", "03-01", "03-04"), _stay("b", "03-01", "03-05")]
+    flags = _flags(spark, stays[::-1] if reverse else stays)
+    assert flags["a"][0] is False
+    assert flags["b"][0] is True
+
+
+def test_flag_zero_length_stays(spark):
+    flags = _flags(spark, [_stay("a1", "03-01", "03-01"), _stay("b1", "03-01", "03-01")])
+    assert flags["a1"] == (False, False, True)
+    assert flags["b1"] == (True, False, True)
+
+
+def test_flag_only_inpatient_stays_take_part(spark):
+    stays = [
+        _stay("x1", "04-01", "04-03", "w", "emergency"),
+        _stay("i1", "04-02", "04-04", "w"),
+        _stay("i2", "05-01", "05-03", "w2"),
+        _stay("x2", "05-02", "05-10", "w2", "ambulatory"),
+    ]
+    flags = _flags(spark, stays)
+    assert set(flags) == {"i1", "i2"}
+    assert flags["i1"] == (False, False, True)  # windowing over all classes would flag i1 a continuation
+    assert flags["i2"] == (False, False, True)  # a terminal self-join over all classes would flag i2 non-terminal
+
+
+def test_flag_planned_by_each_code_and_not_by_others(spark):
+    stays = [_stay(f"s{i}", f"0{i + 1}-01", f"0{i + 1}-03") for i in range(4)]
+    procedures = [
+        ("s0", PLANNED_PROCEDURE_CODES[0]),
+        ("s1", PLANNED_PROCEDURE_CODES[1]),
+        ("s2", PLANNED_PROCEDURE_CODES[2]),
+        ("s3", "123"),
+    ]
+    flags = _flags(spark, stays, procedures)
+    assert [flags[f"s{i}"][1] for i in range(4)] == [True, True, True, False]
+
+
+def test_flag_planned_has_no_fan_out_and_ignores_null_and_non_inpatient_rows(spark):
+    stays = [_stay("d1", "06-01", "06-03"), _stay("amb", "06-10", "06-11", encounterclass="ambulatory")]
+    procedures = [
+        ("d1", "703423002"),
+        ("d1", "703423002"),
+        ("d1", "367336001"),  # three listed rows on ONE stay
+        (None, "703423002"),
+        ("d1", None),
+        ("amb", "703423002"),
+        ("ghost", "703423002"),
+    ]
+    encounters = spark.createDataFrame(stays, ENCOUNTERS_TEST_SCHEMA)
+    out = flag_inpatient_stays(encounters, _procs(spark, procedures))
+    assert out.count() == 1  # without .distinct() the join fans out to 3 rows
+    assert out.collect()[0]["is_planned"] is True
+    empty = flag_inpatient_stays(encounters, _empty_procedures(spark)).collect()
+    assert [r["Id"] for r in empty] == ["d1"]
+    assert not empty[0]["is_planned"]
+
+
+def test_flag_continuation_is_judged_against_an_earlier_planned_stay(spark):
+    flags = _flags(spark, [_stay("Pp", "01-01", "01-10"), _stay("Qq", "01-05", "01-06")], [("Pp", PLANNED)])
+    assert flags["Pp"] == (False, True, True)
+    assert flags["Qq"] == (True, False, False)  # a running max over non-planned stays only would give Qq a False
+
+
+def test_flag_null_stop_pin_current_behaviour(spark):
+    flags = _flags(spark, [_stay("N", "02-01", None), _stay("M", "02-05", "02-06")])
+    assert flags["N"] == (False, False, True)
+    assert flags["M"] == (False, False, True)  # neither a continuation of, nor made non-terminal by, the open stay N
+
+
+def test_flag_planned_tail_is_kept_documented_limitation(spark):
+    stays = [_stay("b", "05-10", "05-20"), _stay("c", "05-15", "05-25")]
+    flags = _flags(spark, stays, [("b", PLANNED)])
+    assert flags["b"] == (False, True, False)
+    assert flags["c"] == (True, False, True)
+    assert _labels(spark, stays, [("b", PLANNED)]) == {"c": 0}  # the tail of a planned episode is still an index row
+
+
+def test_labels_a_planned_readmit_is_ignored_and_the_index_is_kept(spark):
+    labels = _labels(spark, [_stay("idx", "01-01", "01-03"), _stay("plan", "01-10", "01-12")], [("plan", PLANNED)])
+    assert labels == {"idx": 0}  # retained (observable, alive) with label 0; the planned stay is never an index row
+
+
+@pytest.mark.parametrize("code", PLANNED_PROCEDURE_CODES)
+def test_labels_each_planned_code_is_ignored(spark, code):
+    stays = [_stay("idx", "01-01", "01-03"), _stay("plan", "01-10", "01-12")]
+    assert _labels(spark, stays, [("plan", code)]) == {"idx": 0}
+
+
+def test_labels_a_non_listed_procedure_code_still_counts(spark):
+    stays = [_stay("idx", "01-01", "01-03"), _stay("other", "01-10", "01-12")]
+    assert _labels(spark, stays, [("other", "123")]) == {"idx": 1, "other": 0}
+
+
+def test_labels_planned_readmit_plus_a_genuine_later_readmit_is_positive(spark):
+    stays = [_stay("idx", "01-01", "01-03"), _stay("plan", "01-10", "01-12"), _stay("gen", "01-20", "01-22")]
+    assert _labels(spark, stays, [("plan", PLANNED)]) == {"idx": 1, "gen": 0}
+
+
+def test_labels_boundary_at_the_earlier_stop(spark):
+    # START == earlier STOP: the earlier stay is non-terminal, hence absent; the later stay is present with 0
+    assert _labels(spark, [_stay("c", "02-01", "02-05"), _stay("a", "02-05", "02-08")]) == {"a": 0}
+    # +1 s: the earlier stay is present and positive. (The strict `a.START > c.STOP` bound is pinned by the zero-length test.)
+    stays = [_stay("c", "02-01", "02-05"), _stay("a", _t("02-05", "00:00:01"), "02-08")]
+    assert _labels(spark, stays) == {"c": 1, "a": 0}
+
+
+@pytest.mark.parametrize(
+    "window, readmit_start, expected",
+    [
+        (30, ("02-02", "00:00:00"), 1),  # exactly STOP + 30 d (STOP is 01-03T00:00:00)
+        (30, ("02-02", "00:00:01"), 0),  # one second later
+        (7, ("01-10", "00:00:00"), 1),
+        (7, ("01-10", "00:00:01"), 0),
+    ],
+)
+def test_labels_upper_bound_of_the_window_is_inclusive(spark, window, readmit_start, expected):
+    start = _t(*readmit_start)
+    stays = [_stay("c", "01-01", "01-03"), _stay("a", start, start + (_t("01-02") - _t("01-01")))]
+    assert _labels(spark, stays, window=window)["c"] == expected
+
+
+def test_labels_reapplied_exclusion_for_a_planned_only_readmit(spark):
+    stays = [_stay("idx", "01-01", "01-03"), _stay("plan", "01-10", "01-12")]
+    procedures = [("plan", PLANNED)]
+    assert _labels(spark, stays, procedures) == {"idx": 0}  # observable -> kept as 0
+    # censored: STOP + 30 d >= reference_date + 1 d -> dropped (no longer a positive kept "despite" censoring)
+    late = [
+        make_encounter_row("idx", ts("2026-08-20T00:00:00"), ts("2026-08-22T00:00:00")),
+        make_encounter_row("plan", ts("2026-08-25T00:00:00"), ts("2026-08-27T00:00:00")),
+    ]
+    assert _labels(spark, late, procedures) == {}
+    # death within the window with no unplanned readmission -> dropped
+    assert _labels(spark, stays, procedures, deaths={"p1": date(2020, 1, 20)}) == {}
+
+
+def test_labels_empty_procedures_leaves_only_the_continuation_and_terminal_rules(spark):
+    stays = [_stay("idx", "01-01", "01-03"), _stay("later", "01-10", "01-12")]
+    assert _labels(spark, stays) == {"idx": 1, "later": 0}
+
+
+def test_labels_continuation_filter_in_the_readmit_pool(spark):
+    # c is terminal; the planned stay b starts after c; a starts INSIDE b (a continuation of a planned stay). Without
+    # `~is_continuation` in readmit_pool, c would be labeled 1 through a. Deleting that filter must make this test fail.
+    stays = [_stay("c", "01-01", "01-03"), _stay("b", "01-10", "01-20"), _stay("a", "01-15", "01-17")]
+    assert _labels(spark, stays, [("b", PLANNED)]) == {"c": 0}
+
+
+def test_labels_terminal_rule_keeps_only_the_stay_that_ends_the_episode(spark):
+    stays = [_stay("L", "01-01", "01-30"), _stay("S", "01-02", "01-03"), _stay("T", "01-10", "01-12")]
+    assert _labels(spark, stays) == {"L": 0}
+
+
+def test_labels_strict_lower_bound_is_pinned_by_zero_length_stays(spark):
+    # a `>=` lower bound would make b1 positive through a1 (same instant, smaller Id, hence not a continuation of b1)
+    assert _labels(spark, [_stay("a1", "03-01", "03-01"), _stay("b1", "03-01", "03-01")]) == {"a1": 0, "b1": 0}
+
+
+def test_labels_a_terminal_continuation_stay_is_an_index_row(spark):
+    # j starts inside i (a continuation) but ends last: it is the real discharge. Dropping continuations from the index set
+    # would give {} (on the real data that would silently remove 423 rows and 39 positives).
+    assert _labels(spark, [_stay("i", "03-01", "03-05"), _stay("j", "03-03", "03-09")]) == {"j": 0}
+
+
+def test_labels_an_open_stay_counts_as_a_readmission(spark):
+    # slice 2's behaviour, preserved: restricting the readmit pool to non-null STOP would give c=0
+    assert _labels(spark, [_stay("c", "01-01", "01-03"), _stay("n", "01-10", None)]) == {"c": 1}
+
+
+def test_labels_patient_isolation(spark):
+    # another patient's stay inside P's 30-day window must not make c positive
+    stays = [_stay("c", "01-01", "01-03", "P"), _stay("q", "01-10", "01-12", "Q")]
+    assert _labels(spark, stays) == {"c": 0, "q": 0}
 
 
 # --- compute_lookback_features ---
@@ -598,7 +883,6 @@ def test_build_big_join_rejects_missing_generation_summary(spark, tmp_path):
 
 
 def test_build_big_join_rejects_reference_date_mismatch(spark, tmp_path):
-    import json
 
     input_dir = tmp_path / "in"
     input_dir.mkdir()
@@ -612,7 +896,6 @@ def test_build_big_join_rejects_reference_date_mismatch(spark, tmp_path):
 
 
 def test_build_big_join_rejects_generation_summary_missing_reference_date_key(spark, tmp_path):
-    import json
 
     input_dir = tmp_path / "in"
     input_dir.mkdir()
@@ -626,8 +909,6 @@ def test_build_big_join_rejects_generation_summary_missing_reference_date_key(sp
 
 
 def test_build_big_join_end_to_end(spark, tmp_path):
-    import json
-
     from pyspark.testing import assertDataFrameEqual
 
     from readmission_risk.pipeline.big_join import GOLD_TABLE_COLUMNS
@@ -639,12 +920,14 @@ def test_build_big_join_end_to_end(spark, tmp_path):
     _write_all_tables(csv_dir)
     output_dir = tmp_path / "out"
 
-    gold = build_big_join(
-        spark,
-        BigJoinConfig(
-            input_dir=input_dir, output_dir=output_dir, reference_date="20260916", lookback_years=1
-        ),
-    )
+    # FIXTURE_ROWS' one procedure has CODE 123, so no inpatient stay is planned: the zero-match warning must fire
+    with pytest.warns(UserWarning, match="PLANNED_PROCEDURE_CODES"):
+        gold = build_big_join(
+            spark,
+            BigJoinConfig(
+                input_dir=input_dir, output_dir=output_dir, reference_date="20260916", lookback_years=1
+            ),
+        )
 
     assert list(gold.columns) == list(GOLD_TABLE_COLUMNS)
     assert output_dir.exists()
@@ -672,3 +955,132 @@ def test_build_big_join_end_to_end(spark, tmp_path):
 
     reread = spark.read.parquet(str(output_dir))
     assertDataFrameEqual(reread, expected)
+
+    # the _gold_metadata.json sidecar: exact content, and ignored by BOTH readers (its name starts with "_")
+    metadata = read_gold_metadata(output_dir)
+    assert metadata.reference_date == "20260916"
+    assert (metadata.readmission_window_days, metadata.lookback_years) == (30, 1)
+    assert metadata.planned_procedure_codes == PLANNED_PROCEDURE_CODES
+    assert (metadata.n_rows, metadata.n_positive) == (1, 0)
+    assert (metadata.n_inpatient_stays, metadata.n_planned_stays) == (1, 0)
+    assert (metadata.n_continuation_stays, metadata.n_nonterminal_stays) == (0, 0)
+    assert (output_dir / "_gold_metadata.json").is_file()
+    pandas_frame = pd.read_parquet(output_dir)
+    assert list(pandas_frame.columns) == list(GOLD_TABLE_COLUMNS)
+    assert len(pandas_frame) == reread.count() == 1
+    assert pandas_frame.loc[0, "encounter_id"] == "e1"
+
+
+# --- slice 2b: planned-stay wiring, metadata, config validation ---
+
+_ENCOUNTER_HEADER = (
+    "Id,START,STOP,PATIENT,ORGANIZATION,PROVIDER,PAYER,ENCOUNTERCLASS,CODE,DESCRIPTION,BASE_ENCOUNTER_COST,"
+    "TOTAL_CLAIM_COST,PAYER_COVERAGE,REASONCODE,REASONDESCRIPTION"
+)
+_PROCEDURE_HEADER = "START,STOP,PATIENT,ENCOUNTER,SYSTEM,CODE,DESCRIPTION,BASE_COST,REASONCODE,REASONDESCRIPTION"
+
+
+def _enc_csv(id_, start, stop, patient, encounterclass="inpatient"):
+    stop_text = "" if stop is None else f"2020-{stop}T00:00:00Z"
+    return f"{id_},2020-{start}T00:00:00Z,{stop_text},{patient},o1,pr1,pay1,{encounterclass},123,Desc,100.0,200.0,50.0,,"
+
+
+def _proc_csv(encounter, code, patient="p1"):
+    return f"2020-01-01T00:00:00Z,2020-01-01T01:00:00Z,{patient},{encounter},SNOMED-CT,{code},Desc,50.0,,"
+
+
+def _write_slice_2b_input(tmp_path, encounter_rows, procedure_rows, patient_ids):
+    from tests.pipeline.test_schemas import FIXTURE_ROWS
+
+    input_dir = tmp_path / "in"
+    csv_dir = input_dir / "csv"
+    input_dir.mkdir()
+    (input_dir / "generation_summary.json").write_text(json.dumps({"reference_date": "20260916"}))
+    _write_all_tables(csv_dir)
+    header, p1_row = FIXTURE_ROWS["patients.csv"]
+    _write_csv(csv_dir / "patients.csv", header, [p1_row.replace("p1,", f"{pid},", 1) for pid in patient_ids])
+    _write_csv(csv_dir / "encounters.csv", _ENCOUNTER_HEADER, encounter_rows)
+    _write_csv(csv_dir / "procedures.csv", _PROCEDURE_HEADER, procedure_rows)
+    return input_dir
+
+
+def test_build_big_join_end_to_end_label_wiring(spark, tmp_path):
+    """Fails if build_big_join passes the wrong table to build_index_encounters, if the continuation filter is dropped from
+    the readmission pool (e7 would be 1), if the terminal filter is dropped (an extra e9 row), or if the metadata's
+    continuation / non-terminal aggregates are swapped (p4 makes them 2 vs 1)."""
+    encounters = [
+        _enc_csv("e1", "01-01", "01-02", "p1"),
+        _enc_csv("e2", "01-10", "01-11", "p1"),  # planned
+        _enc_csv("e3", "03-01", "03-02", "p1"),  # planned
+        _enc_csv("e4", "03-10", "03-11", "p1"),
+        _enc_csv("e5", "03-20", "03-21", "p1"),
+        _enc_csv("e7", "05-01", "05-03", "p2"),
+        _enc_csv("e8", "05-10", "05-20", "p2"),  # planned
+        _enc_csv("e9", "05-15", "05-17", "p2"),  # inside the planned e8: a continuation, and non-terminal
+        _enc_csv("e10", "06-01", None, "p3"),  # open stay: never an index row
+        _enc_csv("e11", "06-01", "06-02", "p3", "ambulatory"),
+        _enc_csv("e12", "07-01", "07-05", "p4"),
+        _enc_csv("e13", "07-03", "07-05", "p4"),  # same STOP as e12: both terminal, e13 a continuation
+    ]
+    procedures = [_proc_csv("e2", PLANNED), _proc_csv("e3", PLANNED), _proc_csv("e8", PLANNED, "p2"), _proc_csv("e1", "123")]
+    input_dir = _write_slice_2b_input(tmp_path, encounters, procedures, ["p1", "p2", "p3", "p4"])
+    output_dir = tmp_path / "out"
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        build_big_join(spark, BigJoinConfig(input_dir=input_dir, output_dir=output_dir, reference_date="20260916"))
+    assert not [w for w in caught if "PLANNED_PROCEDURE_CODES" in str(w.message)]  # planned stays exist -> no warning
+
+    frame = pd.read_parquet(output_dir)
+    assert sorted(zip(frame["patient_id"], frame["encounter_id"], frame["is_readmitted"], strict=True)) == [
+        ("p1", "e1", 0),  # its only in-window stay e2 is planned
+        ("p1", "e4", 1),
+        ("p1", "e5", 0),
+        ("p2", "e7", 0),  # 0 only because the continuation filter removes e9 from the readmission pool
+        ("p4", "e12", 0),  # its only in-window stay e13 is a continuation
+        ("p4", "e13", 0),
+    ]
+    metadata = read_gold_metadata(output_dir)
+    assert (metadata.n_rows, metadata.n_positive) == (6, 1)
+    assert metadata.n_inpatient_stays == 11  # not 12 (ambulatory e11 excluded) and not 10 (open stay e10 included)
+    assert metadata.n_planned_stays == 3
+    assert (metadata.n_continuation_stays, metadata.n_nonterminal_stays) == (2, 1)  # 2 vs 1 pins the two fields apart
+
+
+def test_build_big_join_no_inpatient_stays(spark, tmp_path):
+    input_dir = _write_slice_2b_input(
+        tmp_path, [_enc_csv("a1", "01-01", "01-02", "p1", "ambulatory")], [_proc_csv("a1", "123")], ["p1"]
+    )
+    output_dir = tmp_path / "out"
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        build_big_join(spark, BigJoinConfig(input_dir=input_dir, output_dir=output_dir, reference_date="20260916"))
+    assert not [w for w in caught if "PLANNED_PROCEDURE_CODES" in str(w.message)]  # the n_inpatient_stays > 0 guard
+
+    assert len(pd.read_parquet(output_dir)) == spark.read.parquet(str(output_dir)).count() == 0
+    metadata = read_gold_metadata(output_dir)
+    assert (metadata.n_rows, metadata.n_positive, metadata.n_inpatient_stays) == (0, 0, 0)
+    assert (metadata.n_planned_stays, metadata.n_continuation_stays, metadata.n_nonterminal_stays) == (0, 0, 0)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"readmission_window_days": 0},
+        {"readmission_window_days": True},
+        {"readmission_window_days": 30.0},
+        {"lookback_years": 0},
+        {"lookback_years": True},
+        {"lookback_years": 1.0},
+        {"reference_date": "2026-09-16"},
+    ],
+)
+def test_build_big_join_rejects_invalid_config_before_any_io(spark, tmp_path, overrides):
+    output_dir = tmp_path / "out"
+    config = {"input_dir": tmp_path / "does-not-exist", "output_dir": output_dir, "reference_date": "20260916"}
+    config.update(overrides)
+
+    with pytest.raises(ValueError, match=next(iter(overrides))):  # ValueError, not the FileNotFoundError I/O would give
+        build_big_join(spark, BigJoinConfig(**config))
+    assert not output_dir.exists()

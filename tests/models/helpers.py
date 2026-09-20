@@ -6,11 +6,18 @@ holds fixtures only.) See notes/eg-new-feature/model-training-2026-09-19.md (Ver
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from readmission_risk.models.data import EXPECTED_GOLD_COLUMNS
+from readmission_risk.models.data import EXPECTED_GOLD_COLUMNS, LABEL_COLUMN
+from readmission_risk.pipeline.gold_metadata import (
+    LABEL_DEFINITION,
+    PLANNED_PROCEDURE_CODES,
+    GoldMetadata,
+    write_gold_metadata,
+)
 
 REFERENCE_DATE = date(2026, 9, 16)
 TEST_START = date(2023, 1, 1)
@@ -156,3 +163,28 @@ def pad_rows() -> list[dict]:
         row("pad_te_0", "2024-01-01T00:00:00Z", "2024-01-05T00:00:00Z", 0),
         row("pad_te_1", "2024-01-01T00:00:00Z", "2024-01-05T00:00:00Z", 1),
     ]
+
+
+def write_test_gold_metadata(directory: Path, df: pd.DataFrame, **overrides) -> Path:
+    """Writes a valid _gold_metadata.json for `df` via the PRODUCTION write_gold_metadata. Defaults: label_definition=LABEL_DEFINITION,
+    reference_date=REFERENCE_DATE_STR, readmission_window_days=30, lookback_years=1, planned_procedure_codes=PLANNED_PROCEDURE_CODES,
+    n_rows=len(df), n_positive=the number of label==1 rows (0 if the frame has no label column), n_planned_stays=0,
+    n_continuation_stays=0, n_nonterminal_stays=0, and n_inpatient_stays = the FINAL n_rows + the FINAL n_planned_stays (both after
+    overrides are applied, so a test planting n_rows=len(df)+1 or a nonzero n_planned_stays still yields metadata that passes
+    validation). Any keyword in `overrides` replaces the matching default (used to plant mismatches). Counts come from the frame
+    actually written, so the malformed-frame cases still reach their intended load_gold_table error."""
+    values = {
+        "label_definition": LABEL_DEFINITION,
+        "reference_date": REFERENCE_DATE_STR,
+        "readmission_window_days": 30,
+        "lookback_years": 1,
+        "planned_procedure_codes": PLANNED_PROCEDURE_CODES,
+        "n_rows": len(df),
+        "n_positive": int((df[LABEL_COLUMN] == 1).sum()) if LABEL_COLUMN in df.columns else 0,
+        "n_planned_stays": 0,
+        "n_continuation_stays": 0,
+        "n_nonterminal_stays": 0,
+    }
+    values.update(overrides)
+    values.setdefault("n_inpatient_stays", values["n_rows"] + values["n_planned_stays"])
+    return write_gold_metadata(Path(directory), GoldMetadata(**values))

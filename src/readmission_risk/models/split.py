@@ -60,14 +60,22 @@ def chronological_group_split(
 
     1. censoring buffer -- keep a row iff index_stop + W < R_end. This is slice 2's own rule for when
        a negative is observable, applied here to positives too (the only place slice 2's policy was
-       asymmetric), so within the modeling set a row exists iff its label was fully observable.
+       asymmetric), so within the modeling set a row exists only if its outcome WINDOW was fully observed.
     2. test = kept rows with index_start >= T.
     3. pre = the other kept rows; drop those before train_start_date if given.
     4. label-window purge -- drop pre rows with index_stop + W >= T. Their outcome window (stop, stop + W]
        is INCLUSIVE at the upper bound in slice 2 (`a.START <= readmit_deadline`), so a row with
        index_stop + W == T exactly could have its label set by a readmission starting AT T -- a test-period
-       event -- and must be purged too. Only rows with index_stop + W < T keep a label fully determined
-       before the test period begins.
+       event -- and must be purged too. Only rows with index_stop + W < T have every readmission START that
+       can set their label before the test period begins.
+
+       Since slice 2b two more things depend on records that are NOT covered by this purge: (a) the label
+       depends on the content of a readmitting stay (whether it carries a planned procedure) and on the stop
+       times of the patient's earlier stays (the continuation rule); (b) whether a row is in the gold table at
+       all depends on the stop times of overlapping stays (the terminal rule). Either can be dated at or after
+       T when a stay straddles it, and this split does NOT enforce that. It is a property that is measured, not
+       guaranteed, on the real data, and a different population or test_start_date can break it: see the
+       slice-2b design doc, Data handling and the "tightening slice 3's purge" follow-up.
     5. patient disjointness -- drop pre rows whose patient_id appears in ANY test row. The remainder
        is train.
 

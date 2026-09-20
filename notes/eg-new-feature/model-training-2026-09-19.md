@@ -1,5 +1,7 @@
 # DESIGN DOC — Calibrated Model Training + MLflow Tracking (Slice 3 of 4)
 
+> **Addendum, 2026-09-20 (slice 2b).** Every pinned real-data number in this document — the 13,222-row / 1,607-positive gold table, the 9,631 / 2,076 split, the metrics, the reason-code lookup's 0.933 AUC and the `gold_fingerprint` `9c10be06…a5aca` — refers to the **pre-2b, all-cause-label** gold table at `data/gold/full_run`. Slice 2b (`readmission-label-planned-exclusion-2026-09-20.md`) replaced that label, so those figures are stale by design; the current ones are in the README's "Results and caveats" and in `readmission-label-planned-exclusion-2026-09-20-measurements.md`. The "excluding planned readmissions" follow-ups in this document (Out-of-scope lists, and the reason-code-dominance discussion) have been **executed by slice 2b**. Slice 3's loader now also requires `_gold_metadata.json` (see slice 2b).
+
 **Date:** 2026-09-19
 **Workflow:** `/eg-new-feature` (elephant/goldfish)
 **Parent architecture:** `notes/prds/big-join-architecture-lock-in-2026-09-15.md` and CLAUDE.md's "Architecture" + "MLOps spine" sections (locked spec — not reopened here)
