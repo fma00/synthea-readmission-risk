@@ -256,7 +256,7 @@ print(cand.c_Id.nunique(), cand[cand.s_STOP >= T].c_Id.nunique())
 
 Big Join: `python scripts/run_big_join.py --input-dir data/raw/full_run --output-dir data/gold/full_run_2b --reference-date 20260916` (~20 s) → **Rows 9,284; Positives 151 (1.63%); Inpatient stays 13,565 (planned 3,320, continuation 682, non-terminal 682)**; `[gold]` line of the script: identical encounter ids and labels to the pandas implementation of the rules. `gold_fingerprint` = `c05486183e2b8a4742301cb59d8d16ebd44d8bdfe0cf152d8717115929fdf7ac`.
 
-Training: `python scripts/train_models.py --gold-dir data/gold/full_run_2b --reference-date 20260916 --test-start-date 20230101 --experiment-name readmission-risk-2b` (~8 s; MLflow experiment `readmission-risk-2b`; runs were tagged `git_dirty=dirty` because the working tree was uncommitted). Split summary as pinned above; the "only 41 positive rows in the test window (< 50)" warning fired, as expected.
+Training: `python scripts/train_models.py --gold-dir data/gold/full_run_2b --reference-date 20260916 --test-start-date 20230101 --experiment-name readmission-risk-2b` (~8 s; MLflow experiment `readmission-risk-2b`; the first pair of runs was tagged `git_dirty=dirty` because the working tree was uncommitted, so both experiments were deleted and re-run on commit `d7d3908`: all four runs are tagged `git_dirty=clean`, and every metric, interval and the gold fingerprint reproduced exactly). Split summary as pinned above; the "only 41 positive rows in the test window (< 50)" warning fired, as expected.
 
 | Model | ROC-AUC | PR-AUC | Brier | Brier skill | ECE | calibration gap |
 |---|---|---|---|---|---|---|
@@ -271,3 +271,68 @@ Sensitivity run (`--train-start-date 20170916 --experiment-name readmission-risk
 Refusal checks (exit code 1, no MLflow directory created): `--gold-dir data/gold/full_run` (pre-2b) → `ERROR: Gold metadata not found: …/_gold_metadata.json -- this gold table predates slice 2b or is incomplete; rebuild it with scripts/run_big_join.py`; `--reference-date 20261231` against `full_run_2b` → `ERROR: reference_date 20261231 does not match the gold table's own reference_date 20260916 (see …/_gold_metadata.json)`.
 
 Mutation spot-check (design requirement, manual, not committed): 17 named mutants of `big_join.py` (continuation `<=`→`<`; running max → immediate predecessor; no per-patient partition; terminal self-join without patient equality / with `<` / over all encounter classes; no `.distinct()` on planned ids; candidates without the terminal filter / also dropping continuations / keeping planned stays; readmission pool without the continuation filter / including planned stays / restricted to non-null `STOP`; lower bound `>`→`>=`; upper bound `<=`→`<`; readmission join without patient equality; metadata continuation/non-terminal swap) were each applied to the production code and **every one made the test suite fail (0 survivors)**.
+
+## Scaling expectations: learning curve and signal beyond the admission reason (2026-09-20)
+
+Backs the README/CLAUDE.md statement about what to expect from the 100k-200k population. Run after the Big Join has built `data/gold/full_run_2b`. The learning curve is seeded (`default_rng(0)`, 8 patient-grouped draws per fraction) and reproduces exactly. The XGBoost here uses 3 calibration folds (production uses 5), so its 100% figure (0.808) sits below the production run's 0.823.
+
+Expected output:
+
+| Share of train | Positives | Lookup | Logistic regression | XGBoost |
+|---|---|---|---|---|
+| 25% | 24 | 0.863 ± 0.008 | 0.764 ± 0.027 | 0.692 ± 0.056 |
+| 50% | 48 | 0.871 ± 0.006 | 0.837 ± 0.021 | 0.753 ± 0.032 |
+| 100% | 96 | 0.873 | 0.869 | 0.808 |
+
+Within-reason per-feature AUC (0.50 = no signal; pooled over all 9,284 rows, descriptive only, ~12 features × 4 reasons so multiple-comparison caveats apply): CABG-history (n 401, 45 positive) strongest 0.44–0.46; CHF (n 341, 30) 0.56–0.58; aortic stenosis (n 68, 20) 0.10–0.16; aortic regurgitation (n 27, 17) 0.04–0.08 for the counts and 0.82 for age. The aortic-valve rows are too small to rely on and plausibly reflect the stage of a scripted care pathway (earlier work-up visit versus the surgical admission) rather than clinical risk.
+
+Projection arithmetic (not a measurement): at the current rates, 10–20× the patients gives about 1,500–3,000 positives in total, roughly 1,000–2,000 in training and 400–800 in the test window; bootstrap intervals shrink roughly with the square root of the number of positives, i.e. about 3–4×.
+
+```python
+"""Scaling-expectation checks (slice 2b): (1) learning curve, (2) signal beyond the admission reason.
+Run from the repo root with the repo .venv, after the Big Join has built data/gold/full_run_2b."""
+import warnings
+from datetime import date
+from pathlib import Path
+
+import numpy as np
+from sklearn.metrics import roc_auc_score
+
+from readmission_risk.models.baselines import reason_code_lookup
+from readmission_risk.models.data import FEATURE_COLUMNS, load_gold_table, prepare_features
+from readmission_risk.models.modeling import build_calibrated_xgboost, build_logistic_regression, make_grouped_cv_splits
+from readmission_risk.models.split import chronological_group_split
+
+warnings.filterwarnings("ignore")
+gold = load_gold_table(Path("data/gold/full_run_2b"))
+sp = chronological_group_split(gold, reference_date=date(2026, 9, 16), test_start_date=date(2023, 1, 1))
+tr, te = sp.train, sp.test
+Xte, yte = prepare_features(te), te.is_readmitted.to_numpy()
+
+print("(1) LEARNING CURVE: test ROC-AUC vs share of the training data (patient-grouped subsamples, 8 draws, mean +/- sd)")
+rng = np.random.default_rng(0)
+patients = tr.patient_id.unique()
+for frac in (0.25, 0.5, 1.0):
+    res = {"lookup": [], "LR": [], "XGB": []}
+    for _ in range(8 if frac < 1 else 1):
+        keep = set(rng.choice(patients, int(len(patients) * frac), replace=False)) if frac < 1 else set(patients)
+        sub = tr[tr.patient_id.isin(keep)]
+        y = sub.is_readmitted.to_numpy()
+        if y.sum() < 10:
+            continue
+        res["lookup"].append(roc_auc_score(yte, reason_code_lookup(sub.admission_reason_code, y, te.admission_reason_code)))
+        res["LR"].append(roc_auc_score(yte, build_logistic_regression(42).fit(prepare_features(sub), y).predict_proba(Xte)[:, 1]))
+        cv = make_grouped_cv_splits(y, sub.patient_id.to_numpy(), 3)  # 3 calibration folds here (production uses 5)
+        res["XGB"].append(roc_auc_score(yte, build_calibrated_xgboost(42, cv, "sigmoid").fit(prepare_features(sub), y).predict_proba(Xte)[:, 1]))
+    print(f"  {int(frac * 100):3d}% ({int(tr.is_readmitted.sum() * frac):3d} positives): "
+          + "  ".join(f"{k} {np.mean(v):.3f}+/-{np.std(v):.3f}" for k, v in res.items()))
+
+print("(2) SIGNAL BEYOND THE REASON: per-feature ROC-AUC WITHIN one admission reason (0.50 = none); all 9,284 rows pooled, descriptive only")
+X, y = prepare_features(gold), gold.is_readmitted.to_numpy()
+numeric = [c for c in FEATURE_COLUMNS if X[c].dtype != object]
+for code, name in [("399261000", "CABG-history"), ("88805009", "CHF"), ("60573004", "aortic stenosis"), ("60234000", "aortic regurgitation")]:
+    m = (gold.admission_reason_code == code).to_numpy()
+    aucs = {c: roc_auc_score(y[m], X.loc[m, c]) for c in numeric if X.loc[m, c].nunique() > 1}
+    top = sorted(aucs.items(), key=lambda kv: -abs(kv[1] - 0.5))[:3]
+    print(f"  {name:22s} n={int(m.sum()):4d} pos={int(y[m].sum()):2d}  strongest 3: " + ", ".join(f"{k} {v:.2f}" for k, v in top))
+```

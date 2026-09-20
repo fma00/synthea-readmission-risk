@@ -339,7 +339,7 @@ The three ad-hoc writers keep their current parquet-writing bodies and gain a fi
 - **Big Join performance at scale.** `flag_inpatient_stays` is evaluated twice per build (once inside `build_index_encounters`, once for the metadata's stay counts) and the written Parquet is re-read once; harmless at 10,000 patients (whole run ~20 s) but worth caching/reusing the flagged frame before the 50k-100k Dataproc phase (found by the pre-commit review).
 - Adding `procedures.csv` to slice 1's `REQUIRED_NONEMPTY_TABLES` in `generation.py`.
 - Verifying the recalled CMS statements against the CMS documents before the README cites them.
-- A larger fresh-seed population: 1.63% positive rate ⇒ 41 test positives is below the reliability threshold; the planned v2 validation run must be sized for power, not just freshness.
+- A larger fresh-seed population: 1.63% positive rate ⇒ 41 test positives is below the reliability threshold; the planned v2 validation run must be sized for power, not just freshness. What to expect from it (more precision and models catching up to the lookup, but no large AUC gain beyond the reason-code ceiling) is stated in the README's results section and backed by the measurements note's scaling-expectations recipe.
 - Recording `git` commit/dirty state, Synthea seed/population, and a **content fingerprint** in the gold metadata (the row/positive-count cross-check cannot detect an edit that preserves both counts).
 - Everything in slice 3's own follow-up list (tuning, attribution, pandas 3, …).
 
