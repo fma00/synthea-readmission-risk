@@ -336,3 +336,132 @@ for code, name in [("399261000", "CABG-history"), ("88805009", "CHF"), ("6057300
     top = sorted(aucs.items(), key=lambda kv: -abs(kv[1] - 0.5))[:3]
     print(f"  {name:22s} n={int(m.sum()):4d} pos={int(y[m].sum()):2d}  strongest 3: " + ", ".join(f"{k} {v:.2f}" for k, v in top))
 ```
+
+## Label residuals and label-v2 candidates (2026-09-20)
+
+Backs the design note's "Label v2" section. Requires the first script above saved as `measure_label.py` in the same directory (it imports its loaders and `in_window_pairs`) and `data/gold/full_run_2b`; run from the repo root with that directory on `PYTHONPATH`: `PYTHONPATH=<dir> python label_residuals.py`. Each `[variant]` line relabels under the candidate definition, re-applies the death/censoring keep-rule, and then runs the same chronological split (test start 2023-01-01) as training.
+
+Expected output (verified 2026-09-20):
+
+| Tag | Figure | Value |
+|---|---|---|
+| `[ed]` | share of all inpatient stays beginning via the ED: same instant / within 1 h / within 24 h | 0.047 / 0.081 / 0.083 |
+| `[ed]` | positives with an ED-initiated counting readmission, by index reason | CHF 27 of 30; CABG-history 1 of 45; aortic stenosis 0 of 20; aortic regurgitation 0 of 17; NSTEMI 0 of 7; drug abuse 0 of 7; no recorded reason 0 of 7; abnormal imaging 0 of 5; kidney transplant 1 of 3; total **30 of 151** |
+| `[cabg]` | CABG-history index rows / lasting exactly 24 h / with procedures (positives among them) / the four bundle procedures on each | 401 / 401 / 391 (45) / 391 stays each |
+| `[cabg]` | the 45 positives: readmitting stay same reason / exactly 24 h / zero procedures / ED-initiated / gap min-median-max | 43 / 44 / 1 / 1 / 0.7–16.6–28.7 d |
+| `[cabg]` | CABG-history stays (patients) / with a later CABG-history stay / gap quantiles 10-25-50-75-90 (d) / share within 30 d | 769 (364) / 47 / 2.5, 9.3, 17.7, 24.9, 28.4 / 0.91 |
+| `[chf]` | index rows / positives / median index LOS; readmitting stays same reason / ED-initiated / median gap / median LOS | 341 / 30 / 121 h; 27 / 27 / 12.0 d / 61 h |
+| `[aortic]` | aortic-valve positives / readmitting stay is "History of aortic valve replacement" / gap min-median-max / within 72 h / ED-initiated | 37 / 30 / 3–30–648 h / 25 / 0 |
+| `[aortic]` | positives in the [24,48) h gap bin / of which aortic-valve index | 25 / 13 |
+| `[variant]` | A current | 9,284 rows, 151 positives; train 6,391 / 96, test 1,539 / 41 |
+| `[variant]` | B (option 1) ED-initiated readmission | 9,282 rows, 30 (0.32%); train 6,390 / 21, test 1,539 / 9 |
+| `[variant]` | C1 (option 2a) status-post reasons dropped as index | 8,791 rows, 106 (1.21%); train 6,188 / 80, test 1,381 / 18 |
+| `[variant]` | C2 (option 2b) … and as readmitting stays | 8,791 rows, 65 (0.74%); train 6,188 / 43, test 1,381 / 16 |
+| `[variant]` | D (option 3a) HF + AMI index cohorts | 610 rows, 37 (6.07%); train 506 / 25, test 97 / 12 |
+| `[variant]` | D′ (option 3b) HF only | 341 rows, 30 (8.80%); train 290 / 20, test 44 / 10 |
+| `[variant]` | E1 (option 4a) index must begin via the ED | 457 rows, 31 (6.78%); train 362 / 21, test 88 / 10 |
+| `[variant]` | E2 (option 4b) index and readmission both via the ED | 457 rows, 27 (5.91%); train 362 / 18, test 88 / 9 |
+
+```python
+"""Slice 2b follow-up analysis: what the 151 remaining positives are, and four candidate label-v2 definitions, each MEASURED
+(relabel -> death/censoring keep-rule -> chronological split). Needs measure_label.py (the recipe above) saved in the same
+directory, plus data/gold/full_run_2b. Run from the repo root:  python label_residuals.py"""
+import warnings
+from datetime import date
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from measure_label import CHEMO, LUNG, REF, REF_END, TEST_START, W, in_window_pairs, load, stay_flags
+from readmission_risk.models.data import load_gold_table
+from readmission_risk.models.split import chronological_group_split
+
+warnings.filterwarnings("ignore")
+CABG, CHF, AVR_HISTORY, NSTEMI = "399261000", "88805009", "1231000119100", "401314000"
+
+enc, pat, proc = load()
+inp, continuation, nonterminal = stay_flags(enc)
+planned = set(proc.loc[proc.CODE.isin(CHEMO), "ENCOUNTER"]) & set(inp.Id)
+inp["los_h"] = (inp.STOP - inp.START).dt.total_seconds() / 3600
+inp["n_proc"] = inp.Id.map(proc.ENCOUNTER.value_counts()).fillna(0).astype(int)
+gold = load_gold_table(Path("data/gold/full_run_2b"))
+
+# an inpatient stay "begins via the ED" if the same patient has an emergency encounter starting at the SAME instant
+ed = enc[enc.ENCOUNTERCLASS == "emergency"][["PATIENT", "START"]].rename(columns={"START": "ed_start"})
+x = inp[["Id", "PATIENT", "START"]].merge(ed, on="PATIENT")
+x["d_h"] = (x.START - x.ed_start).dt.total_seconds() / 3600
+via_ed = set(x[x.d_h == 0].Id)
+print(f"[ed] share of ALL inpatient stays beginning via the ED: same instant {len(via_ed) / len(inp):.3f}, "
+      f"within 1h {x[(x.d_h >= 0) & (x.d_h <= 1)].Id.nunique() / len(inp):.3f}, within 24h {x[(x.d_h >= 0) & (x.d_h <= 24)].Id.nunique() / len(inp):.3f}")
+
+pos_ids = set(gold[gold.is_readmitted == 1].encounter_id)
+c, m = in_window_pairs(inp)
+m = m[m.c_Id.isin(pos_ids) & ~m.a_Id.isin(planned) & ~m.a_Id.isin(continuation)].copy()
+m["a_ed"] = m.a_Id.isin(via_ed)
+first = m.sort_values("a_START").groupby("c_Id").head(1).copy()
+first["gap_d"] = (first.a_START - first.c_STOP).dt.total_seconds() / 86400
+first["index_reason"] = first.c_REASONDESCRIPTION.fillna("no recorded reason").str[:36]
+any_ed = m.groupby("c_Id").a_ed.any()
+first["any_ed"] = first.c_Id.map(any_ed)
+tab = first.groupby("index_reason").agg(positives=("c_Id", "size"), readmitted_via_ED=("any_ed", "sum")).sort_values("positives", ascending=False)
+print("[ed] positives whose readmitting stay begins via the ED, by index reason (top 9):"); print(tab.head(9).to_string())
+print(f"[ed] ALL positives {len(first)}; with an ED-initiated counting readmission {int(first.any_ed.sum())}")
+
+cab = gold[gold.admission_reason_code == CABG].merge(inp[["Id", "los_h", "n_proc"]], left_on="encounter_id", right_on="Id")
+print(f"[cabg] index rows {len(cab)}; LOS exactly 24h: {int((cab.los_h.round(2) == 24).sum())}; with procedures {int((cab.n_proc > 0).sum())} (positives {int(cab[cab.n_proc > 0].is_readmitted.sum())}); "
+      f"index stays containing the 4-procedure bundle: {proc[proc.ENCOUNTER.isin(set(cab.encounter_id))].groupby('CODE').ENCOUNTER.nunique().sort_values(ascending=False).head(4).tolist()}")
+fc = first[first.c_REASONCODE == CABG]
+print(f"[cabg] positives {len(fc)}: readmitting stay same reason {int((fc.a_REASONCODE == CABG).sum())}, exactly 24h {int((fc.a_los_h.round(2) == 24).sum())}, "
+      f"zero procedures {int((fc.a_n_proc == 0).sum())}, ED-initiated {int(fc.any_ed.sum())}; gap min/median/max {fc.gap_d.min():.1f}/{fc.gap_d.median():.1f}/{fc.gap_d.max():.1f} d")
+allc = inp[inp.REASONCODE == CABG].copy()
+allc["next_reason"], allc["next_start"] = allc.groupby("PATIENT").REASONCODE.shift(-1), allc.groupby("PATIENT").START.shift(-1)
+nx = allc[(allc.next_reason == CABG) & ((allc.next_start - allc.STOP).dt.total_seconds() > 0)].copy()
+nx["gap_d"] = (nx.next_start - nx.STOP).dt.total_seconds() / 86400
+print(f"[cabg] CABG-history stays {len(allc)} (patients {allc.PATIENT.nunique()}); with a LATER CABG-history stay {len(nx)}; "
+      f"gap quantiles 10/25/50/75/90 {nx.gap_d.quantile([.1, .25, .5, .75, .9]).round(1).tolist()}; share within 30 d {(nx.gap_d <= 30).mean():.2f}")
+chf = gold[gold.admission_reason_code == CHF].merge(inp[["Id", "los_h"]], left_on="encounter_id", right_on="Id")
+fh = first[first.c_REASONCODE == CHF]
+print(f"[chf] index rows {len(chf)}, positives {int(chf.is_readmitted.sum())}, median index LOS {chf.los_h.median():.0f} h; readmitting stays: same reason {int((fh.a_REASONCODE == CHF).sum())}, "
+      f"ED-initiated {int(fh.any_ed.sum())}, median gap {fh.gap_d.median():.1f} d, median LOS {fh.a_los_h.median():.0f} h")
+
+av = first[first.c_REASONCODE.isin(["60573004", "60234000"])]
+print(f"[aortic] positives {len(av)}: readmitting stay is 'History of aortic valve replacement' {int(av.a_REASONDESCRIPTION.fillna('').str.startswith('History of aortic valve').sum())}, "
+      f"gap min/median/max {av.gap_d.min() * 24:.0f}/{av.gap_d.median() * 24:.0f}/{av.gap_d.max() * 24:.0f} h, within 72 h {int((av.gap_d * 24 < 72).sum())}, ED-initiated {int(av.any_ed.sum())}")
+b = first[(first.gap_d * 24 >= 24) & (first.gap_d * 24 < 48)]
+print(f"[aortic] positives in the [24,48) h gap bin: {len(b)}, of which aortic-valve index {int(b.c_REASONCODE.isin(['60573004', '60234000']).sum())}")
+
+
+def variant(name, *, pool_exclude=frozenset(), index_exclude=frozenset(), index_only=None, require_ed=False, index_require_ed=False):
+    """Relabel under a candidate definition, re-apply the death/censoring keep-rule, then split and count."""
+    cand, pairs = in_window_pairs(inp)
+    cand = cand[~cand.c_Id.isin(planned) & ~cand.c_Id.isin(nonterminal) & ~cand.c_REASONCODE.isin(index_exclude)]
+    if index_only is not None:
+        cand = cand[cand.c_REASONCODE.isin(index_only)]
+    if index_require_ed:
+        cand = cand[cand.c_Id.isin(via_ed)]
+    pairs = pairs[pairs.c_Id.isin(set(cand.c_Id)) & ~pairs.a_Id.isin(planned) & ~pairs.a_Id.isin(continuation) & ~pairs.a_REASONCODE.isin(pool_exclude)]
+    if require_ed:
+        pairs = pairs[pairs.a_Id.isin(via_ed)]
+    cand = cand.merge(pat, left_on="c_PATIENT", right_on="Id", how="left")
+    deadline = cand.c_STOP + pd.Timedelta(days=W)
+    cand["y"] = cand.c_Id.isin(set(pairs.c_Id)).astype(int)
+    keep = cand[(cand.y == 1) | ((cand.DEATHDATE.isna() | (cand.DEATHDATE > deadline)) & (deadline < REF_END))]
+    g = gold.drop(columns=["is_readmitted"]).merge(keep[["c_Id", "y"]].rename(columns={"c_Id": "encounter_id"}), on="encounter_id")
+    g["is_readmitted"] = g.y.astype("int8")
+    try:
+        s = chronological_group_split(g.drop(columns=["y"]), reference_date=REF, test_start_date=TEST_START).summary
+        print(f"[variant] {name:62s} rows {len(g):5d} positives {int(g.is_readmitted.sum()):3d} ({100 * g.is_readmitted.mean():.2f}%) | train {s['n_train']}/{s['n_train_positive']} test {s['n_test']}/{s['n_test_positive']}")
+    except ValueError as e:
+        print(f"[variant] {name:62s} rows {len(g):5d} positives {int(g.is_readmitted.sum()):3d} | split impossible: {str(e)[:60]}")
+
+
+variant("A  current label (slice 2b)")
+variant("B  a readmission must begin via the ED", require_ed=True)
+variant("C1 drop 'history of ...' status reasons as INDEX", index_exclude={CABG, AVR_HISTORY})
+variant("C2 drop them as index AND as readmission stays", index_exclude={CABG, AVR_HISTORY}, pool_exclude={CABG, AVR_HISTORY})
+variant("D  index restricted to HF + AMI cohorts (CHF, NSTEMI)", index_only={CHF, NSTEMI})
+variant("D' HF cohort only (CHF)", index_only={CHF})
+variant("E1 index must itself begin via the ED (acute-admission cohort)", index_require_ed=True)
+variant("E2 index AND readmission both begin via the ED", index_require_ed=True, require_ed=True)
+```
