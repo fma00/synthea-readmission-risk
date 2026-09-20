@@ -22,7 +22,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -e .
-          pip install --require-hashes -r requirements.txt
+          pip install --require-hashes -r requirements.txt -r requirements-linux-extras.txt
           pip install --require-hashes -r requirements-dev.txt
 
       - name: Lint

@@ -1,1 +1,12 @@
 pyspark==4.1.3
+scikit-learn==1.9.1
+xgboost==3.4.1
+mlflow==3.16.1
+# pandas/numpy are deliberately NOT at their newest (3.0.x / 2.5.x): pyspark 4.1.3's pyspark.pandas cannot import under
+# pandas 3 (breaks assertDataFrameEqual in tests/pipeline/test_big_join.py), and numpy 2.5 + pandas 2.3 warns on pd.Timedelta.
+# TODO: re-check whether upgrading to pandas 3 / numpy 2.5 is possible once PySpark supports pandas 3 (see CLAUDE.md).
+pandas==2.3.3
+pyarrow==25.0.1
+matplotlib==3.11.2
+numpy==2.4.4
+greenlet==3.5.6

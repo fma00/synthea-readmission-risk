@@ -42,9 +42,19 @@ htmlcov/
 tools/synthea/
 
 # Data and model artifacts (large / generated — track via a data pipeline, not git)
-data/
+# /data/ is anchored to the repo root like /models/ below: an unanchored `data/` would silently ignore any future
+# src/readmission_risk/data/ package or tests/**/data/ fixture directory.
+/data/
 *.csv
 *.parquet
-models/
+/models/
 *.pkl
 *.joblib
+
+# MLflow local tracking store (SQLite DB + artifacts) -- anchored to the repo root, like /models/ above
+# (an unanchored `models/` also matched src/readmission_risk/models/ and tests/models/).
+# *.db also catches the stray ./mlflow.db that any unconfigured MLflow call creates in the cwd.
+/mlflow/
+/mlruns/
+/mlartifacts/
+*.db

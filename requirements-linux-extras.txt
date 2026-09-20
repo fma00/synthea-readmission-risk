@@ -1,0 +1,9 @@
+# Linux-only dependencies that pip-compile cannot see when run on macOS (it evaluates
+# environment markers for the host only). Required by --require-hashes installs on Linux/CI;
+# skipped on macOS by the marker. Hand-maintained: if a future xgboost/sqlalchemy bump adds or
+# changes a platform-conditional dependency, the Linux install fails loudly with a "hashes
+# missing" error -- re-check with the procedure in notes/eg-new-feature/model-training-2026-09-19.md.
+# Hashes: sha256 of every wheel PyPI lists for this exact version (no sdist; the package is wheel-only).
+nvidia-nccl-cu13==2.31.2 ; platform_system == "Linux" \
+    --hash=sha256:0bcaf0308854cb55fcc35af72e2c83143f3b71e65a4e865e2c586b1cdcdb5ae0 \
+    --hash=sha256:b5563f8e2534f363d93ace022670ba016d3717e190ac4eba564d05fbbe8495b1
