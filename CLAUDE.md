@@ -1,6 +1,8 @@
 # synthea-readmission-risk
 
-<!-- TODO: fill in a real project overview — e.g. what the model predicts, what data it trains on (Synthea-generated synthetic patient records), and the intended consumer of the predictions. -->
+Predicts unplanned 30-day hospital readmission from Synthea-generated synthetic patient records: a PySpark "Big Join"
+builds a per-encounter gold table, a leakage-controlled pipeline trains and calibrates two models, and a Top-N triage
+CLI ranks held-out discharges for a clinical team lead. See [README.md](README.md) for the public overview.
 
 ## Collaboration preferences
 
@@ -83,7 +85,8 @@ Locked in via `/eg-prd` on 2026-09-15 — full reasoning, research, and risk ana
 
 **Repo hygiene (locked 2026-09-16, fourth `/eg-prd` pass):**
 - **Layout:** `src/` layout — one importable package `src/readmission_risk/` with sub-modules per stage (`pipeline/`, `models/`, `scoring/`, `dashboard/`); `tests/` mirrors that structure; `notebooks/` is exploration-only, never production code.
-- **CI:** GitHub Actions from day one, running `ruff check .` + `pytest` on every push/PR — no GCP credentials needed for lint/unit tests.
+- **CI:** GitHub Actions from day one, running `ruff check .` + `pytest` on every push/PR — no GCP credentials needed for lint/unit tests. A `concurrency` group cancels superseded runs (and de-duplicates the push+PR double trigger), and `setup-python`'s pip cache is keyed on the three lockfiles. **Still missing (flagged, not fixed): no CI check that `requirements.txt` still matches `requirements.in`.** Note that CI had never actually executed before the first public push on 2026-09-21 — it was written from day one but no remote existed.
+- **Lint configuration (added 2026-09-21, public-release pass):** `[tool.ruff.lint]` in `pyproject.toml` now names the enabled rule set explicitly (`E`, `W`, `F`, `I`, `B`, `UP`, `SIM`, `S`, `BLE`, `TRY`, `RUF`) instead of inheriting ruff's defaults, which shift between ruff versions. Four documented `ignore`s, each a deliberate house-style decision, not a waiver of convenience: `E501` (long single-line explanatory comments are the house style; the longest line is ~320 characters), `RUF001` (`docs/results.md` and `tests/test_docs.py` deliberately contain en-dash/minus characters — normalising them is what those tests check), `S603`/`S607` (`pipeline/generation.py` invokes `java` on purpose with a fixed argv list), and `TRY003` (long, specific exception messages are the CLIs' user-facing diagnostics). `tests/**` additionally ignores `S101`, `S108` and `E402`. `ruff format` is deliberately NOT adopted — it would reformat 50 of 76 files and fight the long-line house style. Adopting the explicit set required 15 small real fixes (escaped `pytest.raises` patterns, `zip(strict=True)`, a `def` instead of an assigned lambda, iterable unpacking), all in tests.
 - **dbt:** not adopted for v1. BigQuery native constraints + a post-write validation script cover the single gold table's data-quality needs. **Named later-phase trigger:** adopt `dbt-bigquery` once there's more than one BigQuery-side table — consistent with this project's staged-adoption pattern (Dataproc Serverless, Airflow, hosted MLflow are all deferred the same way).
 - **Documentation layout (2026-09-21):** the README is the front page; detail lives in `docs/` (`setup.md`, `results.md`, `scoring.md`), moved from the README. `tests/test_docs.py` (at the `tests/` root, a deliberate exception to "tests mirror `src/`" because it tests documentation, not a package) keeps README/docs links valid and the README results table equal to `docs/results.md`.
 
@@ -95,8 +98,6 @@ Locked in via `/eg-prd` on 2026-09-15 — full reasoning, research, and risk ana
 All architecture questions from the original PRD pass are now resolved — see `notes/prds/big-join-architecture-lock-in-2026-09-15.md` for the full resolution log and reasoning. New architecture questions that surface during implementation belong in a fresh `/eg-prd` pass.
 
 ## Build & test commands
-
-<!-- TODO: confirm/fill in as the project takes shape. -->
 
 - Python version: **3.12.11**, pinned via `.python-version` (downgraded from 3.14 2026-09-17, see Architecture section).
 - Dependencies: `pyproject.toml` (package metadata, src-layout) + `requirements.in`/`requirements-dev.in` compiled to hash-pinned `requirements.txt`/`requirements-dev.txt` via `pip-compile --generate-hashes --output-file=requirements.txt requirements.in` (do NOT run the `--no-index` command printed in the lockfile headers literally — it fails; that flag is only a record of how pip-compile was invoked). Install as three separate invocations: `pip install -e .` (editable, no hashes), `pip install --require-hashes -r requirements.txt -r requirements-linux-extras.txt` (runtime deps: `pyspark`, and since slice 3 `scikit-learn`, `xgboost`, `mlflow`, `pandas`, `pyarrow`, `matplotlib`, `numpy`, `greenlet`, and since slice 4 `typer`), then `pip install --require-hashes -r requirements-dev.txt`. `requirements-linux-extras.txt` is hand-maintained: `pip-compile` on macOS cannot see Linux-only dependencies (`nvidia-nccl-cu13`, required by XGBoost on Linux), so they are listed there with hashes and an `; platform_system == "Linux"` marker (skipped on macOS). Also requires a JDK (17+) on `PATH` for PySpark's local mode, and on macOS `brew install libomp` for XGBoost.

@@ -84,7 +84,7 @@ def test_load_gold_table_reads_spark_style_directory(tmp_path, spark_like):
     assert loaded[LABEL_COLUMN].dtype == np.int8
     for col in ("index_start", "index_stop"):
         assert isinstance(loaded[col].dtype, pd.DatetimeTZDtype) and str(loaded[col].dt.tz) == "UTC"
-    keys = list(zip(loaded["index_start"], loaded["encounter_id"]))
+    keys = list(zip(loaded["index_start"], loaded["encounter_id"], strict=True))
     assert keys == sorted(keys)
     expected = src.sort_values(["index_start", "encounter_id"]).reset_index(drop=True)
     pd.testing.assert_frame_equal(

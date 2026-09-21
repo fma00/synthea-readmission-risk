@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+# A push to a branch that also has an open PR would otherwise run this workflow twice; and a new push
+# makes an in-flight run for the same ref obsolete.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
@@ -22,6 +28,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          # The install pulls pyspark, mlflow and xgboost (hundreds of MB); cache the wheels, keyed on the
+          # lockfiles so a dependency change invalidates the cache automatically.
+          cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+            requirements-linux-extras.txt
 
       - name: Install dependencies
         run: |

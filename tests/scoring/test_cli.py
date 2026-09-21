@@ -116,7 +116,9 @@ def test_cli_reports_user_errors_with_exit_1(cli, scoring_env, tmp_path):
 def test_cli_help_shows_the_notice(cli):
     result = CliRunner().invoke(cli.app, ["--help"])
     assert result.exit_code == 0
-    squash = lambda text: re.sub(r"\s+", "", text)
+    def squash(text: str) -> str:
+        return re.sub(r"\s+", "", text)
+
     # ALL whitespace is removed: a whitespace-normalised comparison fails because Click wraps "development-set" at the hyphen
     assert squash(DEMO_NOTICE) in squash(result.stdout)
     assert "--no-verbose" not in result.stdout and "--no-show-observed-outcomes" not in result.stdout

@@ -3,8 +3,9 @@ import os
 # MLflow prints an informational "agent hint" line on import; silence it so test output stays readable.
 os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")
 
-import mlflow
 import pytest
+
+import mlflow
 
 
 @pytest.fixture(autouse=True)

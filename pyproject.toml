@@ -6,6 +6,11 @@ build-backend = "setuptools.build_meta"
 name = "readmission-risk"
 version = "0.1.0"
 requires-python = ">=3.12,<3.13"
+# Deliberately empty, not an oversight: runtime dependencies live in requirements.in -> requirements.txt, compiled by
+# pip-compile --generate-hashes and installed with pip install --require-hashes (see docs/setup.md). Declaring them
+# here too would create a second, unhashed source of truth that could drift from the lockfile. The trade-off is that
+# `pip install -e .` alone does NOT give a working environment, and tools that read only this file (GitHub's dependency
+# graph, Dependabot) see nothing; run the three install commands in docs/setup.md instead.
 dependencies = []
 
 [tool.setuptools.packages.find]
@@ -13,3 +18,38 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+
+# Pinned explicitly rather than relying on ruff's defaults, which change between ruff versions: this states the bar the
+# code is held to, and keeps a ruff upgrade from silently widening or narrowing it. The code passes this set today.
+[tool.ruff.lint]
+select = [
+    "E", "W",          # pycodestyle errors and warnings
+    "F",               # pyflakes
+    "I",               # import sorting
+    "B",               # bugbear (mutable defaults, unused loop vars, ...)
+    "UP",              # pyupgrade
+    "SIM",             # simplifications
+    "S",               # bandit security checks
+    "BLE",             # blind except
+    "TRY",             # exception-handling antipatterns (the code carries deliberate `# noqa: TRY004` waivers)
+    "RUF",             # ruff's own rules
+]
+ignore = [
+    # House style: this project writes long explanatory comments and docstrings on one line (the longest is ~320
+    # characters) rather than wrapping them, so no line-length limit is enforced.
+    "E501",
+    # docs/results.md and tests/test_docs.py deliberately contain en dash and minus-sign characters -- the dash
+    # normalisation they test is the point, so the "ambiguous unicode" warning is wrong here.
+    "RUF001",
+    # pipeline/generation.py invokes the Synthea `java` process on purpose, with a fixed argv list (never a shell
+    # string) built by a pure, unit-tested function. See generation.py for the reasoning.
+    "S603", "S607",
+    # This project deliberately raises with long, specific messages naming the offending value: the CLIs turn them
+    # straight into "ERROR: ..." output, so the message IS the user-facing diagnostic.
+    "TRY003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert (S101), build temp paths (S108), and tests/scoring/helpers.py must set MLflow's environment before
+# importing anything that reads it at import time (E402).
+"tests/**" = ["S101", "S108", "E402"]

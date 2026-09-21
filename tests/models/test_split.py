@@ -62,7 +62,8 @@ def test_no_warning_at_or_below_one_percent():
 
 
 def test_test_partition_is_on_or_after_test_start():
-    rows = pad_rows() + [
+    rows = [
+        *pad_rows(),
         row("on_boundary", "2023-01-01T00:00:00Z", "2023-01-03T00:00:00Z", 0),
         row("just_before", "2022-12-31T23:59:59Z", "2023-01-03T00:00:00Z", 0),
     ]
@@ -76,7 +77,8 @@ def test_test_partition_is_on_or_after_test_start():
 def test_label_window_purge_boundary():
     # Slice 2's readmission window is (stop, stop + W] -- INCLUSIVE at the upper bound -- so a row with
     # stop + W == T exactly could be labeled by a readmission starting exactly at T (a test-period event).
-    rows = pad_rows() + [
+    rows = [
+        *pad_rows(),
         row("just_inside", "2022-11-28T00:00:00Z", "2022-12-01T23:59:59Z", 0),  # stop + 30d == T - 1s -> kept
         row("exact", "2022-11-28T00:00:00Z", "2022-12-02T00:00:00Z", 0),  # stop + 30d == T exactly -> purged
         row("late", "2022-11-28T00:00:00Z", "2022-12-02T00:00:01Z", 0),  # +1s -> purged
@@ -93,7 +95,8 @@ def test_readmission_window_days_reaches_both_the_purge_and_the_buffer(window, p
     """A hard-coded 30 in either step would pass every default-window test. The "pre" row ends 20 days before the
     test start, so its label window clears the cutoff at W=14 (kept) but not at W=30 (purged); the "late" row ends
     22 days before the reference date, so it survives the censoring buffer at W=14 but not at W=30."""
-    rows = pad_rows() + [
+    rows = [
+        *pad_rows(),
         row("pre", "2022-12-05T00:00:00Z", "2022-12-12T00:00:00Z", 0),  # 20 days before T = 2023-01-01
         row("late", "2026-08-20T00:00:00Z", "2026-08-25T00:00:00Z", 0),  # 22 days before the reference date
     ]
@@ -106,7 +109,8 @@ def test_readmission_window_days_reaches_both_the_purge_and_the_buffer(window, p
 
 
 def test_patient_disjoint_drops_overlapping_patients_from_train():
-    rows = pad_rows() + [
+    rows = [
+        *pad_rows(),
         row("both", "2020-06-01T00:00:00Z", "2020-06-05T00:00:00Z", 0),
         row("both", "2024-06-01T00:00:00Z", "2024-06-05T00:00:00Z", 1),
     ]

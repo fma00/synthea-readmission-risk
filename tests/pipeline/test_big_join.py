@@ -111,7 +111,7 @@ def test_load_synthea_tables_missing_table(spark, tmp_path):
     _write_all_tables(csv_dir)
     (csv_dir / "organizations.csv").unlink()
 
-    with pytest.raises(FileNotFoundError, match="organizations.csv"):
+    with pytest.raises(FileNotFoundError, match=r"organizations\.csv"):
         load_synthea_tables(spark, tmp_path)
 
 
@@ -119,7 +119,7 @@ def test_load_synthea_tables_rejects_empty_dimension_table(spark, tmp_path):
     csv_dir = tmp_path / "csv"
     _write_all_tables(csv_dir, empty_table="payers.csv")
 
-    with pytest.raises(ValueError, match="payers.csv"):
+    with pytest.raises(ValueError, match=r"payers\.csv"):
         load_synthea_tables(spark, tmp_path)
 
 
@@ -130,7 +130,7 @@ def test_load_synthea_tables_rejects_empty_encounters(spark, tmp_path):
     csv_dir = tmp_path / "csv"
     _write_all_tables(csv_dir, empty_table="encounters.csv")
 
-    with pytest.raises(ValueError, match="encounters.csv"):
+    with pytest.raises(ValueError, match=r"encounters\.csv"):
         load_synthea_tables(spark, tmp_path)
 
 
@@ -139,7 +139,7 @@ def test_load_synthea_tables_rejects_empty_procedures(spark, tmp_path):
     csv_dir = tmp_path / "csv"
     _write_all_tables(csv_dir, empty_table="procedures.csv")
 
-    with pytest.raises(ValueError, match="procedures.csv"):
+    with pytest.raises(ValueError, match=r"procedures\.csv"):
         load_synthea_tables(spark, tmp_path)
 
 
@@ -876,7 +876,7 @@ def test_build_big_join_rejects_missing_generation_summary(spark, tmp_path):
     input_dir.mkdir()
     output_dir = tmp_path / "out"
 
-    with pytest.raises(FileNotFoundError, match="generation_summary.json"):
+    with pytest.raises(FileNotFoundError, match=r"generation_summary\.json"):
         build_big_join(
             spark, BigJoinConfig(input_dir=input_dir, output_dir=output_dir, reference_date="20260916")
         )

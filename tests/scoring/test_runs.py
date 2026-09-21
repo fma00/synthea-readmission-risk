@@ -80,9 +80,9 @@ def test_missing_tracking_db_is_refused_without_creating_it(scoring_env, loaded_
     empty_dir = tmp_path / "empty-store"
     empty_dir.mkdir()
     for directory in (absent, empty_dir):
-        with pytest.raises(FileNotFoundError, match="mlflow.db"):
+        with pytest.raises(FileNotFoundError, match=r"mlflow\.db"):
             resolve_run_id(directory, SCORING_EXPERIMENT, "logistic_regression")
-        with pytest.raises(FileNotFoundError, match="mlflow.db"):
+        with pytest.raises(FileNotFoundError, match=r"mlflow\.db"):
             validate_run(directory, scoring_env.lr_run_id, gold=gold, metadata=metadata)
     assert not absent.exists()  # nothing created: no directory ...
     assert list(empty_dir.iterdir()) == []  # ... and no empty MLflow database

@@ -95,7 +95,7 @@ def test_cluster_resample_indices_returns_whole_patients_and_is_deterministic():
     idx = cluster_resample_indices(groups, np.random.default_rng(7))
     sizes = {"a": 5, "b": 2, "c": 3, "d": 1}
     drawn_groups, counts = np.unique(groups[idx], return_counts=True)
-    for g, n in zip(drawn_groups, counts):
+    for g, n in zip(drawn_groups, counts, strict=True):
         assert n % sizes[g] == 0  # only WHOLE patients' rows, possibly repeated
         # and the repeated copies are exactly that patient's own row positions
         assert set(idx[groups[idx] == g]) == set(np.flatnonzero(groups == g))

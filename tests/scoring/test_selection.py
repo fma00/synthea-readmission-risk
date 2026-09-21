@@ -97,7 +97,7 @@ def test_completeness_guard_counts_an_all_train_window_as_in_sample():
 
 
 def test_empty_window_refused():
-    with pytest.raises(ValueError, match="^no held-out discharges"):
+    with pytest.raises(ValueError, match=r"^no held-out discharges"):
         select_held_out_window(_gold(_THREE), pd.Series({"t1": "test"}), run_date=date(2026, 4, 10), window_days=1)
 
 
