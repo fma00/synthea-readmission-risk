@@ -6,6 +6,7 @@ import subprocess
 import warnings
 from pathlib import Path
 
+import mlflow
 import numpy as np
 import pandas as pd
 import pytest
@@ -13,7 +14,6 @@ from mlflow.exceptions import MlflowException
 from mlflow.tracking import MlflowClient
 from sklearn.linear_model import LogisticRegression
 
-import mlflow
 from readmission_risk.models import training as training_module
 from readmission_risk.models.data import (
     FEATURE_COLUMNS,

@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
 
+import mlflow
 import mlflow.models
 import mlflow.sklearn
 import numpy as np
@@ -22,7 +23,6 @@ import xgboost
 from mlflow.entities import Metric
 from mlflow.tracking import MlflowClient
 
-import mlflow
 from readmission_risk.pipeline.gold_metadata import (
     GOLD_METADATA_FILENAME,
     parse_yyyymmdd,

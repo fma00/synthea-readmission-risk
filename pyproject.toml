@@ -49,6 +49,13 @@ ignore = [
     "TRY003",
 ]
 
+[tool.ruff.lint.isort]
+# mlflow is a third-party package. Without this pin ruff classifies `import mlflow` by whether a top-level ./mlflow/
+# directory exists: the gitignored local MLflow store (see .gitignore) makes it look first-party on a developer machine,
+# while a clean CI checkout has no such directory -- so the same file sorted differently in the two places and CI's
+# `ruff check .` failed while the local one passed.
+known-third-party = ["mlflow"]
+
 [tool.ruff.lint.per-file-ignores]
 # Tests assert (S101), build temp paths (S108), and tests/scoring/helpers.py must set MLflow's environment before
 # importing anything that reads it at import time (E402).

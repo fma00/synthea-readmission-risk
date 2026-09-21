@@ -7,10 +7,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import mlflow
 import mlflow.sklearn
 from mlflow.tracking import MlflowClient
-
-import mlflow
 
 
 def mlflow_tracking_uri(tracking_dir: Path) -> str:

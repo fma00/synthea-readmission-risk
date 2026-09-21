@@ -14,6 +14,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import mlflow
 import mlflow.models
 import numpy as np
 import pandas as pd
@@ -22,7 +23,6 @@ import xgboost
 from mlflow.exceptions import MlflowException
 from mlflow.tracking import MlflowClient
 
-import mlflow
 from readmission_risk.models.data import FEATURE_COLUMNS, gold_fingerprint
 from readmission_risk.models.tracking import mlflow_tracking_uri
 from readmission_risk.models.training import MODEL_NAMES

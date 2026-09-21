@@ -66,12 +66,12 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+import mlflow
 import mlflow.sklearn
 import numpy as np
 from mlflow.models import infer_signature
 from mlflow.tracking import MlflowClient
 
-import mlflow
 from readmission_risk.models.data import (
     FEATURE_COLUMNS,
     prepare_features,
