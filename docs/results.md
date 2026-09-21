@@ -1,6 +1,6 @@
 # Results and caveats (Slice 3, on the slice-2b gold table)
 
-> Terminology: "slice N" names the build stages in the [README Status table](../README.md#status) (1 Synthea generation, 2 Big Join, 2b unplanned label, 3 models, 4 Top-N CLI); "v2 population" is the planned scale-up cohort (see the README Roadmap).
+> Terminology: "slice N" names the build stages in the [README Status table](../README.md#status) (1 Synthea generation, 2 PySpark feature join, 2b unplanned label, 3 models, 4 Top-N CLI); "v2 population" is the planned scale-up cohort (see the README Roadmap).
 
 Measured on `data/gold/full_run_2b` (10,000-patient Synthea population; **unplanned**-readmission label from slice 2b — see [notes/eg-new-feature/readmission-label-planned-exclusion-2026-09-20.md](../notes/eg-new-feature/readmission-label-planned-exclusion-2026-09-20.md); `--test-start-date 20230101`): 6,391 training rows / 96 positives (1.50%), 1,539 test rows / **41 positives (2.66%)**; 95% patient-clustered bootstrap intervals in brackets. Every figure here (and the recipe to re-derive it) is in [notes/eg-new-feature/readmission-label-planned-exclusion-2026-09-20-measurements.md](../notes/eg-new-feature/readmission-label-planned-exclusion-2026-09-20-measurements.md).
 

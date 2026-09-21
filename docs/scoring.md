@@ -1,6 +1,6 @@
 # Batch scoring (Slice 4: Top-N triage list)
 
-> Terminology: "slice N" names the build stages in the [README Status table](../README.md#status) (1 Synthea generation, 2 Big Join, 2b unplanned label, 3 models, 4 Top-N CLI); "v2 population" is the planned scale-up cohort (see the README Roadmap).
+> Terminology: "slice N" names the build stages in the [README Status table](../README.md#status) (1 Synthea generation, 2 PySpark feature join, 2b unplanned label, 3 models, 4 Top-N CLI); "v2 population" is the planned scale-up cohort (see the README Roadmap).
 
 `scripts/score_discharges.py` ranks discharges by predicted risk and prints the Top-N. **It is a demo, not as-of scoring:** it scores discharges that already exist in the gold table, restricted to the rows the chosen model's own MLflow run recorded as its held-out `test` partition (`split_assignment.csv`), never the rows it was trained on. Building features for unlabelled recent discharges is a named follow-up. The design, its measurements and its 5-round design check are in [notes/eg-new-feature/batch-scoring-cli-2026-09-20.md](../notes/eg-new-feature/batch-scoring-cli-2026-09-20.md).
 

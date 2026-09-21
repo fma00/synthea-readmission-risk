@@ -2,9 +2,7 @@
 
 [![CI](https://github.com/fma00/synthea-readmission-risk/actions/workflows/ci.yml/badge.svg)](https://github.com/fma00/synthea-readmission-risk/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](.python-version)
 
-An end-to-end, tested pipeline for predicting **unplanned** 30-day hospital readmission from [Synthea](https://synthea.mitre.org/)-generated synthetic patient data. A PySpark "Big Join" builds a per-encounter feature table and an explicit planned-versus-unplanned readmission label; a leakage-controlled training pipeline — chronological, patient-disjoint split with a censoring buffer and a label-window purge — fits a logistic regression baseline and a calibrated XGBoost challenger, both tracked in MLflow; and a Top-N triage CLI ranks held-out discharges behind a set of provenance guards that refuse any model/data mismatch.
-
-The headline model result is a negative one, and is reported as such: on the development-set test window (not a virgin holdout) logistic regression reaches ROC-AUC 0.869, statistically indistinguishable from a reason-code-only baseline that uses no patient features at all (a per-admission-reason rate table fitted on the training rows; 0.873), so the models add little on this small, synthetic sample. The pipeline, the leakage controls and the evaluation discipline are what this repo is for; the model number is a finding, not a headline.
+An end-to-end, tested pipeline for predicting **unplanned** 30-day hospital readmission from [Synthea](https://synthea.mitre.org/)-generated synthetic patient data. A PySpark job joins ten Synthea tables into a per-encounter feature table and an explicit planned-versus-unplanned readmission label; a leakage-controlled training pipeline — chronological, patient-disjoint split with a censoring buffer and a label-window purge — fits a logistic regression baseline and a calibrated XGBoost challenger, both tracked in MLflow; and a Top-N triage CLI ranks held-out discharges behind a set of provenance guards that refuse any model/data mismatch.
 
 > [!NOTE]
 > **Work in progress.**
@@ -19,7 +17,7 @@ The headline model result is a negative one, and is reported as such: on the dev
 | Slice | Stage | Status |
 |---|---|---|
 | 1 | [Local Synthea generation](notes/eg-new-feature/local-synthea-generation-2026-09-16.md) | Done |
-| 2 | [PySpark Big Join feature engineering](notes/eg-new-feature/pyspark-big-join-2026-09-19.md) | Done |
+| 2 | [PySpark multi-table join (feature engineering)](notes/eg-new-feature/pyspark-big-join-2026-09-19.md) | Done |
 | 2b | [Unplanned-readmission label and gold-table provenance](notes/eg-new-feature/readmission-label-planned-exclusion-2026-09-20.md) | Done |
 | 3 | [Logistic regression and calibrated XGBoost, tracked in MLflow](notes/eg-new-feature/model-training-2026-09-19.md) ([results](docs/results.md)) | Done |
 | 4 | [Top-N triage CLI (a demo over held-out rows)](notes/eg-new-feature/batch-scoring-cli-2026-09-20.md) ([usage](docs/scoring.md)) | Done |
@@ -33,7 +31,7 @@ Full architecture rationale lives in [notes/prds/big-join-architecture-lock-in-2
 
 ```mermaid
 flowchart LR
-  A["Synthea generator"] --> B["PySpark Big Join (local)"]
+  A["Synthea generator"] --> B["PySpark feature join (local)"]
   B --> C["Gold table (Parquet + metadata)"]
   C --> D["LR + XGBoost training, MLflow (local)"]
   D --> E["Top-N triage CLI (demo)"]
@@ -82,12 +80,12 @@ Full tables, paired intervals, how the label was built and the remaining caveats
 
 ## Roadmap
 
-Ordered by intent, not by date, and in dependency order: the larger run (item 2) targets the cloud setup of item 1 (Dataproc Serverless on GCS), and the billing alert comes first. For scale: the Big Join reads about a third of the raw export (2.3 GB of 7.5 GB per 10,000 patients), so roughly 23-46 GB at 100k-200k patients (arithmetic, not a measurement).
+Ordered by intent, not by date, and in dependency order: the larger run (item 2) targets the cloud setup of item 1 (Dataproc Serverless on GCS), and the billing alert comes first. For scale: the PySpark join reads about a third of the raw export (2.3 GB of 7.5 GB per 10,000 patients), so roughly 23-46 GB at 100k-200k patients (arithmetic, not a measurement).
 
 1. **Cloud (not started):** the enabling infrastructure: a ~$20/month billing alert first, then Dataproc Serverless on GCS and the BigQuery gold table via the direct write method (Storage Write API).
 2. **Scale-up (not started):** 100k-200k patients, run on the cloud setup of item 1, with a NEW seed and fresh `reference_date` as the untouched validation, sized for power (about 1,000-2,000 train / 400-800 test positives; arithmetic, not a measurement); the same PySpark job with only the config-driven base path changed. This raises the architecture PRD's original 50k-100k figure so the test window holds enough positives (see [docs/results.md](docs/results.md)).
 3. **Dashboard (not started):** a Streamlit dashboard reading BigQuery (Streamlit Community Cloud first, Cloud Run later).
-4. **Smaller follow-ups:** label v2 after scale-up, as-of scoring, hyperparameter tuning, feature attribution, hosted MLflow, Airflow, dbt once there is more than one BigQuery table.
+4. **Smaller follow-ups:** label v2 after scale-up, as-of scoring, hyperparameter tuning, feature attribution, hosted MLflow, dbt once there is more than one BigQuery table.
 
 ## What this shows
 
@@ -108,7 +106,7 @@ pip install --require-hashes -r requirements-dev.txt
 ruff check . && pytest
 ```
 
-Needs a JDK 17+ on `PATH` (PySpark local mode) and, on macOS, `brew install libomp` (XGBoost). The tests need no downloaded data. The full pipeline (Synthea generation, Big Join, training, scoring) is in [docs/setup.md](docs/setup.md) and [docs/scoring.md](docs/scoring.md).
+Needs a JDK 17+ on `PATH` (PySpark local mode) and, on macOS, `brew install libomp` (XGBoost). The tests need no downloaded data. The full pipeline (Synthea generation, feature join, training, scoring) is in [docs/setup.md](docs/setup.md) and [docs/scoring.md](docs/scoring.md).
 
 ## How this was built
 
@@ -121,7 +119,7 @@ Commands to regenerate the data and re-derive the reported numbers are given in 
 ## Repository layout
 
 ```
-src/readmission_risk/pipeline/  # Synthea generation wrapper, PySpark Big Join, gold-table metadata
+src/readmission_risk/pipeline/  # Synthea generation wrapper, PySpark feature join, gold-table metadata
 src/readmission_risk/models/    # split, features, training, evaluation, MLflow tracking
 src/readmission_risk/scoring/   # Top-N triage scorer (pure functions)
 scripts/                        # command-line entry points
