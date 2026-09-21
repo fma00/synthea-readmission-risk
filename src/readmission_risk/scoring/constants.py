@@ -10,7 +10,7 @@ DEFAULT_TOP_N = 10
 PARTITION_TRAIN = "train"
 PARTITION_TEST = "test"
 
-# Qualitative on purpose: model metrics live in the README and go stale on retraining. It is dataset-specific -- it
+# Qualitative on purpose: model metrics live in docs/results.md and go stale on retraining. It is dataset-specific -- it
 # says the rows are a development set -- so it must be revisited before this scorer is pointed at the untouched v2
 # population or used for real as-of scoring (design note, limit (e) and follow-up 11).
 DEMO_NOTICE = (

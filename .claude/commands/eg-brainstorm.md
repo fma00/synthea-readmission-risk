@@ -231,7 +231,7 @@ If **Another round, tighter framing**: capture the user's refinements in chat, u
 
 If **Another round, different lenses**: present the lens kit (Step 2's list) via `AskUserQuestion` with `multiSelect: true` and let the user pick. Re-run from Step 2 with the new selection.
 
-If **Save brief and stop**: write the concepts brief to `notes/eg-brainstorms/<slug>-<YYYY-MM-DD>.md` (no `docs/` tree exists yet in this repo) ONLY if the user confirms via one more `AskUserQuestion`:
+If **Save brief and stop**: write the concepts brief to `notes/eg-brainstorms/<slug>-<YYYY-MM-DD>.md` (`docs/` holds the public documentation; design docs go to `notes/`) ONLY if the user confirms via one more `AskUserQuestion`:
 
 **Q8 — Save location:**
 - `question`: "Where should I save the brief?"

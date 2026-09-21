@@ -48,7 +48,7 @@ Three questions in sequence (one `AskUserQuestion` call each):
 - `header`: `"Output"`
 - `multiSelect`: `true`
 - `options`:
-  1. **Save as `notes/prds/<slug>-<YYYY-MM-DD>.md`** (no `docs/` tree exists yet in this repo) — "Durable artifact. Recommended for anything Standard or Comprehensive."
+  1. **Save as `notes/prds/<slug>-<YYYY-MM-DD>.md`** (`docs/` holds the public documentation; design docs go to `notes/`) — "Durable artifact. Recommended for anything Standard or Comprehensive."
   2. **Print and chat only** — "PRD lives in this conversation. Good for Lightweight or throwaway exploration."
   3. **Hand off to `/eg-new-feature` after** — "Once the PRD is approved, end with the literal `/eg-new-feature <one-line summary>` so the next step is one command away."
   4. **Save to memory** — "Persist as a durable note (e.g. CLAUDE.md or your memory system) for future sessions to recall. Prefer this for cross-cutting policies the PRD discovers, not the full doc."
@@ -286,4 +286,4 @@ Print to the user:
 - Where the PRD lives now (file path, memory entry, both, or chat-only)
 - Next action (e.g. "Run `/eg-new-feature ...` when ready" or "Open questions need user input before this is shippable")
 
-**STOP.** Do NOT commit; auto mode does not override the project's commit policy. If the PRD was saved to disk, it's a new file the user will commit themselves when ready. No commit convention is established yet (repo has zero commits) — use a plain, imperative subject line unless the user specifies otherwise.
+**STOP.** Do NOT commit; auto mode does not override the project's commit policy. If the PRD was saved to disk, it's a new file the user will commit themselves when ready. No commit convention is established yet — use a plain, imperative subject line unless the user specifies otherwise.

@@ -125,4 +125,4 @@ Print to the user:
 - `/eg-precommit-review` outcome (rounds, fixes, rebuttals verbatim)
 - Test gate status
 
-**STOP.** Do NOT commit; auto mode does not override the project's commit policy. Wait for the user's literal commit instruction. No commit convention is established yet (repo has zero commits) — use a plain, imperative subject line (e.g. "Fix off-by-one in readmission window calculation") unless the user specifies otherwise.
+**STOP.** Do NOT commit; auto mode does not override the project's commit policy. Wait for the user's literal commit instruction. No commit convention is established yet — use a plain, imperative subject line (e.g. "Fix off-by-one in readmission window calculation") unless the user specifies otherwise.

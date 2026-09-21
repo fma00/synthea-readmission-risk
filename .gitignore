@@ -17,6 +17,7 @@ env*/
 # Environment variables / secrets
 .env
 .env.*
+!.env.example
 
 # Testing / coverage
 .pytest_cache/
@@ -58,3 +59,33 @@ tools/synthea/
 /mlruns/
 /mlartifacts/
 *.db
+
+# Personal / local-only Claude Code state. Only .claude/commands/ (the /eg-* workflow) is tracked on purpose; everything
+# else under .claude/ (settings.local.json, scheduled_tasks.*, worktrees/, agent-memory*, checkpoints/, ...) stays local.
+# If shared project files (settings.json, agents/, skills/) are ever added, un-ignore them explicitly, e.g. `!.claude/skills/`.
+.claude/*
+!.claude/commands/
+
+# GCP / Streamlit credentials (the roadmap adds a service account and Streamlit secrets). Never commit keys.
+# Best-effort safety net for common file names, NOT a substitute for keeping key files outside this directory.
+**/.streamlit/secrets.toml
+*service[-_]account*.json
+*serviceaccount*.json
+gha-creds-*.json
+*-adminsdk-*.json
+key.json
+keyfile.json
+token.json
+secrets.toml
+*.env
+*-credentials.json
+credentials.json
+application_default_credentials.json
+client_secret*.json
+*-key.json
+# Google's default name for a downloaded service-account key: <project-id>-<12 hex characters>.json
+*-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json
+*.pem
+*.key
+*.p12
+*.pfx

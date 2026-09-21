@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+# Least privilege: this workflow only checks out code, lints and tests.
+permissions:
+  contents: read
+
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest

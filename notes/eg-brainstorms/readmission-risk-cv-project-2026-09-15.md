@@ -11,7 +11,7 @@
 ## Seed v1
 
 - **The thought:** Build an end-to-end ML system predicting a patient's 30-day readmission risk from synthetic Synthea EHR data (demographics, conditions, medications, procedures, prior utilization), demonstrating SQL/Spark, visualization/dashboarding, ML model training, MLOps, and agentic coding, with production ML practices on Google Cloud — as a clean, well-documented CV/portfolio project.
-- **What I think the user is really asking:** A portfolio project that functions as a credible hiring signal — proof of hands-on breadth across the modern data/ML/MLOps stack — not just a working model, with the repo itself holding up to scrutiny from a technical reviewer.
+- **What I think the user is really asking:** A portfolio project that functions as a credible demonstration — proof of hands-on breadth across the modern data/ML/MLOps stack — not just a working model, with the repo itself holding up to scrutiny from a technical reviewer.
 - **Stage:** Raw concept
 - **Breadth target:** ~10 concepts
 - **Web research:** Off
@@ -23,7 +23,7 @@
 - **Agent-in-the-Loop Pipeline** (technical) — an LLM agent as an actual running pipeline stage, paired with real Dataproc Serverless/PySpark for ingestion.
 
 ### Reviewer-facing front door
-- **The Zero-Clone Live Demo** (reviewer experience) — primary artifact is a hosted, zero-setup live URL, optimized for a 90-second recruiter skim.
+- **The Zero-Clone Live Demo** (reviewer experience) — primary artifact is a hosted, zero-setup live URL, optimized for a 90-second reviewer skim.
 - **The Show-Your-Work Decision Trail** (reviewer experience) — primary artifact is 3-5 curated PRs narrating design doc → goldfish critique → precommit review.
 
 ### Structural risk warnings
@@ -49,7 +49,7 @@
 
 ## User refinements (after round 1)
 
-- **Target job family:** data engineer / data scientist, not ML engineer.
+- **Target job family:** data engineer / data scientist, not ML engineer (widened later: the published README also shows ML-engineering evidence).
 - **Timeline:** weeks — "show a pipeline, not do research."
 - **Agentic coding framing:** dev-process evidence only, never a runtime pipeline component.
 - **Reviewer front doors:** wants **both** — an engineer (docs/code) and a team lead (visual, clickable) — simultaneously, not a choice between them.

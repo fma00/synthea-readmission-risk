@@ -25,7 +25,7 @@ Surface-area sanity-check for this project: "Pure feature-engineering / modeling
 
 ## Step 1: Write the design doc
 
-Print the design doc to the user. For most features this lives in chat; for substantial features (new domain area, new pipeline stage, new subsystem) propose writing it to `notes/` (no `docs/` tree exists yet) and ask the user via `AskUserQuestion` before creating the file:
+Print the design doc to the user. For most features this lives in chat; for substantial features (new domain area, new pipeline stage, new subsystem) propose writing it to `notes/` (`docs/` holds the public documentation; design docs go to `notes/`) and ask the user via `AskUserQuestion` before creating the file:
 
 - `question`: "Save the design doc to disk for durability?"
 - `header`: `"Save doc?"`
@@ -242,4 +242,4 @@ Print to the user:
 - Sanity-check summary (what sample data you ran it against, what you observed)
 - Out-of-scope follow-ups noted in the design doc
 
-**STOP.** Do NOT commit; auto mode does not override the project's commit policy. Wait for the user's literal commit instruction. No commit convention is established yet (repo has zero commits) — use a plain, imperative subject line unless the user specifies otherwise.
+**STOP.** Do NOT commit; auto mode does not override the project's commit policy. Wait for the user's literal commit instruction. No commit convention is established yet — use a plain, imperative subject line unless the user specifies otherwise.

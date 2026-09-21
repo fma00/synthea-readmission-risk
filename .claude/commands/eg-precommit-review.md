@@ -162,4 +162,4 @@ Once the loop exits, print to the user:
 - Findings rebutted (with the **verbatim** one-line reason each, not summarized)
 - Whether any pre-existing lint/test errors were noted as out-of-scope
 
-**STOP at this step.** Do NOT run `git commit`, do NOT run `git add`, and do NOT prompt "want me to commit?" — even in auto mode. Wait for the user's literal commit instruction. No commit convention is established yet (repo has zero commits) — use a plain, imperative subject line unless the user specifies otherwise.
+**STOP at this step.** Do NOT run `git commit`, do NOT run `git add`, and do NOT prompt "want me to commit?" — even in auto mode. Wait for the user's literal commit instruction. No commit convention is established yet — use a plain, imperative subject line unless the user specifies otherwise.
