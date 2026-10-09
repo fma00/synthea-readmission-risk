@@ -4,11 +4,11 @@
 
 ## Setup
 
-Requires Python 3.12 (pinned via [.python-version](../.python-version)).
+Developed on Python 3.14 (pinned via [.python-version](../.python-version)); CI also tests Python 3.12, the Python of the Dataproc Serverless runtime the scale-up phase targets. The same hash-pinned lockfiles install on both.
 
 ```sh
 # Create and activate the virtualenv
-python3.12 -m venv .venv
+python3.14 -m venv .venv
 source .venv/bin/activate
 
 # Install: three separate invocations, since a local editable install can't carry

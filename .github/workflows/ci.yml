@@ -16,6 +16,12 @@ concurrency:
 
 jobs:
   lint-and-test:
+    # 3.14 is the development interpreter (.python-version); 3.12 is the Python of the Dataproc Serverless runtime the
+    # scale-up phase targets, so both stay tested. fail-fast off: one leg failing should not hide the other's result.
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.14"]
     # Pinned, not ubuntu-latest: GitHub moves that label to Ubuntu 26 on 2026-10-19, and a runner-image change should not
     # turn CI red unannounced in a project whose dependencies are hash-pinned. Move it deliberately, after a green run.
     runs-on: ubuntu-24.04
@@ -29,7 +35,7 @@ jobs:
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           # The install pulls pyspark, mlflow and xgboost (hundreds of MB); cache the wheels, keyed on the
           # lockfiles so a dependency change invalidates the cache automatically.
           cache: "pip"

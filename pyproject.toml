@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "readmission-risk"
 version = "0.1.0"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12,<3.15"  # developed on 3.14 (.python-version); CI also tests 3.12, the planned Dataproc runtime's Python
 license = "MIT"  # SPDX identifier; matches LICENSE (MIT, Copyright (c) 2026 Florence Aellen)
 license-files = ["LICENSE"]
 # Deliberately empty, not an oversight: runtime dependencies live in requirements.in -> requirements.txt, compiled by
