@@ -10,6 +10,7 @@ An end-to-end, tested pipeline for predicting **unplanned** 30-day hospital read
 > - **Built:** local pipeline, models and demo scorer, unit-tested.
 > - **Not built yet:** cloud (GCP / BigQuery), scale-up and dashboard — see the [Roadmap](#roadmap).
 > - **Limits:** synthetic data, small sample, development-set numbers — see [Limitations](#limitations).
+> - **Release:** [v1.0](https://github.com/fma00/synthea-readmission-risk/releases/tag/v1.0) is the local-only milestone (everything marked Done below); the Planned items are v2 work, developed on the `v2` branch.
 > - **Read next:** [Status](#status) · [Results so far](#results-so-far) · [Limitations](#limitations) · [Roadmap](#roadmap)
 
 ## Status
@@ -80,7 +81,7 @@ Full tables, paired intervals, how the label was built and the remaining caveats
 
 ## Roadmap
 
-Ordered by intent, not by date, and in dependency order: the larger run (item 2) targets the cloud setup of item 1 (Dataproc Serverless on GCS), and the billing alert comes first. For scale: the PySpark join reads about a third of the raw export (2.3 GB of 7.5 GB per 10,000 patients), so roughly 23-46 GB at 100k-200k patients (arithmetic, not a measurement).
+These items make up v2 (the `v2` branch); v1.0 is the tagged local-only release. Ordered by intent, not by date, and in dependency order: the larger run (item 2) targets the cloud setup of item 1 (Dataproc Serverless on GCS), and the billing alert comes first. For scale: the PySpark join reads about a third of the raw export (2.3 GB of 7.5 GB per 10,000 patients), so roughly 23-46 GB at 100k-200k patients (arithmetic, not a measurement).
 
 1. **Cloud (not started):** the enabling infrastructure: a ~$20/month billing alert first, then Dataproc Serverless on GCS and the BigQuery gold table via the direct write method (Storage Write API).
 2. **Scale-up (not started):** 100k-200k patients, run on the cloud setup of item 1, with a NEW seed and fresh `reference_date` as the untouched validation, sized for power (about 1,000-2,000 train / 400-800 test positives; arithmetic, not a measurement); the same PySpark job with only the config-driven base path changed. This raises the architecture PRD's original 50k-100k figure so the test window holds enough positives (see [docs/results.md](docs/results.md)).
