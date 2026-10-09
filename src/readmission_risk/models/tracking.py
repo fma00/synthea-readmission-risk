@@ -5,6 +5,7 @@ Imports mlflow only -- no training code. See notes/eg-new-feature/model-training
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import mlflow
@@ -17,6 +18,14 @@ def mlflow_tracking_uri(tracking_dir: Path) -> str:
     slashes, the correct absolute-path form). The SINGLE definition of the tracking URI: train_and_evaluate
     uses it to set the URI, and any consumer must use it to read."""
     return f"sqlite:///{Path(tracking_dir).resolve()}/mlflow.db"
+
+
+def current_python_version() -> str:
+    """'X.Y.Z' of the running interpreter -- sys.version_info's major, minor and micro, the same format MLflow writes into
+    a logged model's MLmodel (flavors.python_function.python_version). The single definition of the format: training
+    records it as the run tag `python_version` and the scorer's guard 14 compares against it."""
+    v = sys.version_info
+    return f"{v.major}.{v.minor}.{v.micro}"
 
 
 def load_logged_model(tracking_dir: Path, run_id: str):

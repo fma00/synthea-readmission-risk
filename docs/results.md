@@ -49,4 +49,6 @@ The README's reliability diagram plots both models' calibration curves on the he
 python scripts/make_readme_assets.py --experiment-name readmission-risk-2b --predictions data/predictions/run_date=20250630/predictions.parquet
 ```
 
+Regenerating the `predictions.parquet` it reads requires scoring; the `readmission-risk-2b` runs were trained on Python 3.12.11, so that needs a Python 3.12 environment (see [scoring.md](scoring.md), Python version). The figure itself reads MLflow artifacts only and works under 3.14.
+
 The command writes `docs/img/reliability_light.svg`, `docs/img/reliability_dark.svg` and `docs/img/sample_topn.md`, plus low-resolution PNG previews in the gitignored `docs/img/preview/`. It refuses curves that do not sum to the run's test rows and positives, runs that do not share the same test encounters, and a predictions file from a different run. Design: [notes/eg-new-feature/readme-reliability-plot-and-sample-table-2026-10-09.md](../notes/eg-new-feature/readme-reliability-plot-and-sample-table-2026-10-09.md).

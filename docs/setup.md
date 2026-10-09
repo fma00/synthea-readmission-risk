@@ -60,6 +60,8 @@ Trains a `LogisticRegression` baseline and a calibrated `XGBClassifier` challeng
 python scripts/run_big_join.py --input-dir data/raw/full_run --output-dir data/gold/full_run_2b --reference-date 20260916
 
 # Train + evaluate. --reference-date MUST equal the value used for the Synthea run and the feature join.
+# In a store that already holds runs under this experiment name (e.g. the 3.12-trained reference runs), pass a fresh
+# --experiment-name, or --model becomes ambiguous for the scorer (docs/scoring.md).
 python scripts/train_models.py --gold-dir data/gold/full_run_2b --reference-date 20260916 --test-start-date 20230101 --experiment-name readmission-risk-2b
 
 # Browse runs, metrics, calibration diagrams

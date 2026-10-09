@@ -23,7 +23,11 @@ from readmission_risk.models.data import (
 )
 from readmission_risk.models.evaluate import BOOTSTRAP_METRICS
 from readmission_risk.models.split import chronological_group_split
-from readmission_risk.models.tracking import load_logged_model, mlflow_tracking_uri
+from readmission_risk.models.tracking import (
+    current_python_version,
+    load_logged_model,
+    mlflow_tracking_uri,
+)
 from readmission_risk.models.training import (
     MODEL_NAMES,
     TrainingConfig,
@@ -129,8 +133,9 @@ def test_end_to_end_two_runs_and_metrics_logged(e2e):
             assert f"test_{m}_ci_lower" in metrics and f"test_{m}_ci_upper" in metrics, (name, m)
         assert {"seed", "test_start_date", "split_n_train"} <= set(params)
         for tag in ("gold_fingerprint", "model_uri", "sklearn_version", "xgboost_version", "mlflow_version",
-                    "pandas_version", "numpy_version"):
+                    "pandas_version", "numpy_version", "python_version"):
             assert tags.get(tag), (name, tag)
+        assert tags["python_version"] == current_python_version()
         assert tags["git_dirty"] in {"clean", "dirty", "unknown"}
         assert expected_artifacts <= {a.path for a in client.list_artifacts(run.info.run_id)}
 
@@ -140,6 +145,20 @@ def test_end_to_end_two_runs_and_metrics_logged(e2e):
     assert "test_diff_vs_logistic_regression_roc_auc_ci_upper" in challenger
     assert "calibration_method" in by_name["xgboost_calibrated"].data.params
     assert "calibration_method" not in by_name["logistic_regression"].data.params
+
+
+def test_python_version_tag_matches_logged_mlmodel(e2e):
+    """The scorer's guard 14 refuses a run whose python_version tag disagrees with the version MLflow wrote into the
+    logged model's MLmodel; on a freshly trained run the two must agree (this also catches an MLflow format change)."""
+    _, runs = _runs(e2e)
+    original_uri = mlflow.get_tracking_uri()
+    mlflow.set_tracking_uri(mlflow_tracking_uri(e2e["tracking_dir"]))  # models:/ URIs resolve only against their store
+    try:
+        for run in runs:
+            info = mlflow.models.get_model_info(run.data.tags["model_uri"])
+            assert run.data.tags["python_version"] == info.flavors["python_function"]["python_version"]
+    finally:
+        mlflow.set_tracking_uri(original_uri)
 
 
 def test_bootstrap_status_tag_marks_completed_runs(e2e):

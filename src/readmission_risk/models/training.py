@@ -273,6 +273,8 @@ def train_and_evaluate(config: TrainingConfig) -> TrainingResult:
                         "mlflow_version": mlflow.__version__,
                         "pandas_version": pd.__version__,
                         "numpy_version": np.__version__,
+                        # the models are cloudpickles: the scorer's guard 14 refuses another Python major.minor
+                        "python_version": tracking.current_python_version(),
                     }
                 )
 

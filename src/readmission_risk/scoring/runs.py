@@ -1,6 +1,7 @@
 """Locating a logged model run and refusing every run/gold mismatch BEFORE the model is unpickled (a cloudpickle can
 execute arbitrary code on load; the tracking store is trusted local input, as slice 3 documents). Reads MLflow, never
 writes to it, and never loads a model. See notes/eg-new-feature/batch-scoring-cli-2026-09-20.md (Interfaces > runs.py).
+Guard 14 (Python version): notes/eg-new-feature/python-version-guard-2026-10-09.md.
 
 Uniform rule for absent or malformed run metadata: anything absent or unparseable is a ValueError carrying the guard's
 key, never a KeyError / MlflowException / JSON or pandas parse error (the CLI convention would turn those into
@@ -10,6 +11,7 @@ tracebacks instead of "ERROR:" and exit 1).
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,13 +26,15 @@ from mlflow.exceptions import MlflowException
 from mlflow.tracking import MlflowClient
 
 from readmission_risk.models.data import FEATURE_COLUMNS, gold_fingerprint
-from readmission_risk.models.tracking import mlflow_tracking_uri
+from readmission_risk.models.tracking import current_python_version, mlflow_tracking_uri
 from readmission_risk.models.training import MODEL_NAMES
 from readmission_risk.pipeline.gold_metadata import GoldMetadata, parse_yyyymmdd
 
 from .constants import PARTITION_TEST, PARTITION_TRAIN
 
 _MAX_RUNS_SEARCHED = 5000  # the bound train_and_evaluate's own mixed-label warning uses
+_PYTHON_VERSION_TAG = "python_version"
+_PYTHON_VERSION_RE = re.compile(r"([0-9]+)\.([0-9]+)(?:\.([0-9]+))?")  # [0-9], not \d: \d also matches non-ASCII digits
 
 
 def installed_versions() -> dict[str, str]:
@@ -42,6 +46,76 @@ def installed_versions() -> dict[str, str]:
         "pandas_version": pd.__version__,
         "numpy_version": np.__version__,
     }
+
+
+def parse_python_major_minor(value: object) -> tuple[int, int] | None:
+    """(major, minor) of an 'X.Y' or 'X.Y.Z' string (re.fullmatch, ASCII digits 0-9 only); None for anything else,
+    including non-strings (a hand-edited MLmodel can hold a YAML float such as 3.12)."""
+    if not isinstance(value, str):
+        return None
+    match = _PYTHON_VERSION_RE.fullmatch(value)
+    return (int(match.group(1)), int(match.group(2))) if match else None
+
+
+def _mlmodel_python_version(info) -> object | None:
+    """info.flavors['python_function'].get('python_version'), or None if flavors / the python_function flavor / the key
+    is absent, or if either level is not a dict (a hand-edited MLmodel: treated as absent, never an AttributeError).
+    Returns the raw value, not necessarily a str."""
+    flavors = getattr(info, "flavors", None)
+    if not isinstance(flavors, dict):
+        return None
+    pyfunc = flavors.get("python_function")
+    if not isinstance(pyfunc, dict):
+        return None
+    return pyfunc.get("python_version")
+
+
+def _check_python_version(tags: dict[str, str], info, run_id: str) -> None:
+    """Guard 14: the Python major.minor the model was cloudpickled under (run tag, or for runs trained before the tag
+    existed the version MLflow wrote into the logged model's MLmodel) must equal the running interpreter's. The steps run
+    in this order; (vi) relies on (iii)/(iv) having rejected anything unparseable."""
+    # (i)
+    tag = tags.get(_PYTHON_VERSION_TAG)
+    mlmodel = _mlmodel_python_version(info)
+    running = current_python_version()
+    running_mm_t = parse_python_major_minor(running)
+    tag_mm = parse_python_major_minor(tag) if tag is not None else None
+    mlmodel_mm = parse_python_major_minor(mlmodel) if mlmodel is not None else None
+    # (ii)
+    if tag is None and mlmodel is None:
+        raise ValueError(
+            f"python version: MLflow run {run_id} has no 'python_version' tag and its logged model's MLmodel records no "
+            "python_version, so the interpreter its cloudpickle was written by is unknown"
+        )
+    # (iii)
+    if tag is not None and tag_mm is None:
+        raise ValueError(
+            f"python version: MLflow run {run_id} tag 'python_version' is {tag!r}, not a version of the form X.Y or X.Y.Z"
+        )
+    # (iv)
+    if mlmodel is not None and mlmodel_mm is None:
+        raise ValueError(
+            f"python version: the logged model of MLflow run {run_id} records MLmodel python_version {mlmodel!r}, not a "
+            "version of the form X.Y or X.Y.Z"
+        )
+    # (v)
+    if tag is not None and mlmodel is not None and tag_mm != mlmodel_mm:
+        raise ValueError(
+            f"python version: MLflow run {run_id} has tag python_version {tag!r} but its logged model's MLmodel records "
+            f"{mlmodel!r} (inconsistent provenance)"
+        )
+    # (vi)
+    if tag is not None:
+        recorded, recorded_mm_t, source = tag, tag_mm, "run tag"
+    else:
+        recorded, recorded_mm_t, source = mlmodel, mlmodel_mm, "logged model's MLmodel"
+    if recorded_mm_t != running_mm_t:
+        recorded_mm, running_mm = "{}.{}".format(*recorded_mm_t), "{}.{}".format(*running_mm_t)
+        raise ValueError(
+            f"python version mismatch for MLflow run {run_id}: trained under Python {recorded} (from the {source}), "
+            f"running Python {running}; a cloudpickled model is only loaded under the Python major.minor it was written "
+            f"by. Retrain under Python {running_mm} or score with Python {recorded_mm}"
+        )
 
 
 @dataclass(frozen=True, eq=False)  # eq=False: it holds a Series, so the generated __eq__/__hash__ would raise
@@ -152,7 +226,7 @@ def _check_split_consistency(partition_of: pd.Series, test_start_date: str | Non
 
 
 def validate_run(tracking_dir: Path, run_id: str, *, gold: pd.DataFrame, metadata: GoldMetadata) -> ModelRun:
-    """Runs guards 1-13 in the documented order, raising ValueError (message contains the guard's key) on the first failure.
+    """Runs guards 1-14 in the documented order, raising ValueError (message contains the guard's key) on the first failure.
     Does NOT load the model. Sets the MLflow tracking URI (global, like load_logged_model). Writes nothing to the store; the
     two artifacts it needs are downloaded into a temporary directory that is deleted on return."""
     _require_store(tracking_dir)
@@ -256,6 +330,9 @@ def validate_run(tracking_dir: Path, run_id: str, *, gold: pd.DataFrame, metadat
         raise ValueError(
             f"model provenance: the model_uri tag of MLflow run {run_id} points at a model logged by run {info.run_id!r}"
         )
+
+    # 14
+    _check_python_version(tags, info, run_id)
 
     return ModelRun(
         run_id=run_id,

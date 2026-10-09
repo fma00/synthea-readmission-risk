@@ -61,14 +61,18 @@ def make_predictions(ids=("e", "c", "a", "b", "d"), scores=(0.2, 0.5, 0.5, 0.5, 
 # Real-store fixtures: one trained store per test session, plus cloned (tampered) runs.
 # ---------------------------------------------------------------------------------------------------------------
 import json
+import sys
 import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import mlflow
 import mlflow.sklearn
 import numpy as np
+import yaml
 from mlflow.models import infer_signature
 from mlflow.tracking import MlflowClient
 
@@ -77,6 +81,7 @@ from readmission_risk.models.data import (
     prepare_features,
 )
 from readmission_risk.models.tracking import (
+    current_python_version,
     load_logged_model,
     mlflow_tracking_uri,
 )
@@ -192,13 +197,19 @@ def clone_run(
     status: str = "FINISHED",
     drop_tags: Sequence[str] = (),
     drop_artifacts: Sequence[str] = (),
+    mlmodel_python_version: object = None,
+    drop_mlmodel_python_version: bool = False,
+    mlmodel_python_function_flavor: object = None,
 ) -> str:
     """A tampered copy of a trained run, in `experiment` of the same store (created with an explicit artifact location under
     the temp tracking dir: a SQLite store otherwise defaults to ./mlruns under the CWD). Copies the source's params and
     non-mlflow.* tags, re-logs the same fitted model under its own run, sets its OWN model_uri tag, and only THEN applies the
     caller's `tags` / `params` overrides (so a caller-supplied model_uri wins) and `drop_tags`. Every override is tested
     with `is not None`, never truthiness. MLflow params cannot be edited after the fact, which is why tampering uses clones;
-    `params={"x": None}` means "do not copy x"."""
+    `params={"x": None}` means "do not copy x". The three mlmodel_* keywords (at most one) rewrite the clone's own MLmodel
+    file right after it is logged: set flavors.python_function.python_version to any YAML value, delete it, or replace the
+    whole python_function flavor (guard 14's legacy fallback reads that file)."""
+    assert sum([mlmodel_python_version is not None, drop_mlmodel_python_version, mlmodel_python_function_flavor is not None]) <= 1
     tracking_dir = Path(tracking_dir)
     original_uri = mlflow.get_tracking_uri()
     mlflow.set_tracking_uri(mlflow_tracking_uri(tracking_dir))
@@ -237,6 +248,8 @@ def clone_run(
             info = mlflow.sklearn.log_model(
                 model, name="model", signature=signature, serialization_format=mlflow.sklearn.SERIALIZATION_FORMAT_CLOUDPICKLE
             )
+            if mlmodel_python_version is not None or drop_mlmodel_python_version or mlmodel_python_function_flavor is not None:
+                _edit_mlmodel(info.model_id, mlmodel_python_version, drop_mlmodel_python_version, mlmodel_python_function_flavor)
             mlflow.set_tag("model_uri", info.model_uri)  # the clone's own tag ...
             for key, value in (tags or {}).items():  # ... which a caller-supplied tag then overrides
                 mlflow.set_tag(key, value)
@@ -247,6 +260,20 @@ def clone_run(
         return run.info.run_id
     finally:
         mlflow.set_tracking_uri(original_uri)
+
+
+def _edit_mlmodel(model_id: str, version: object, drop_version: bool, flavor: object) -> None:
+    """Rewrites a logged model's MLmodel YAML in place (url2pathname: the artifact location is a percent-encoded file URI)."""
+    location = MlflowClient().get_logged_model(model_id).artifact_location
+    path = Path(url2pathname(urlparse(location).path)) / "MLmodel"
+    document = yaml.safe_load(path.read_text())
+    if flavor is not None:
+        document["flavors"]["python_function"] = flavor
+    elif drop_version:
+        del document["flavors"]["python_function"]["python_version"]
+    else:
+        document["flavors"]["python_function"]["python_version"] = version
+    path.write_text(yaml.safe_dump(document))
 
 
 def forbid_model_loading(monkeypatch) -> None:
@@ -263,7 +290,7 @@ def forbid_model_loading(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------------------------------------------
-# GUARD_CASES: one per defect, each breaking exactly one guard of runs.validate_run (38 in total).
+# GUARD_CASES: one per defect, each breaking exactly one guard of runs.validate_run (48 in total).
 # ---------------------------------------------------------------------------------------------------------------
 @dataclass(frozen=True)
 class GuardCase:
@@ -349,6 +376,17 @@ def _source_model_uri(env: ScoringEnv, experiment: str):
     return _clone(env, experiment, tags={"model_uri": uri}), ()
 
 
+# Guard 14 versions, derived from the running interpreter so the cases hold on every CI leg (3.12 and 3.14).
+RUNNING_PYTHON = current_python_version()
+OTHER_MINOR_PYTHON = f"{sys.version_info.major}.{sys.version_info.minor + 1}.0"
+OTHER_PATCH_PYTHON = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro + 1}"
+NO_PYTHON_TAG = ("python_version",)
+
+
+def _python_case(extras: tuple[str, ...], **kwargs):
+    return lambda env, experiment: (_clone(env, experiment, **kwargs), extras)
+
+
 _REV = list(reversed(FEATURE_COLUMNS))
 GUARD_CASES: list[GuardCase] = [
     GuardCase("1-bogus-run-id", "run not found", _bogus),
@@ -389,6 +427,58 @@ GUARD_CASES: list[GuardCase] = [
     GuardCase("12-no-test-start-date", "split consistency", _simple(params={"test_start_date": None})),
     GuardCase("12-bad-test-start-date", "split consistency", _simple(params={"test_start_date": "not-a-date"})),
     GuardCase("13-model-of-another-run", "model provenance", _source_model_uri, ("signature",)),
+    GuardCase(
+        "14-other-minor", "python version",
+        _python_case((f"trained under Python {OTHER_MINOR_PYTHON} (from the run tag)", f"running Python {RUNNING_PYTHON}"),
+                     tags={"python_version": OTHER_MINOR_PYTHON}, mlmodel_python_version=OTHER_MINOR_PYTHON),
+        ("library version", "inconsistent provenance"),
+    ),
+    GuardCase(
+        "14-legacy-other-minor", "python version",
+        _python_case((f"trained under Python {OTHER_MINOR_PYTHON} (from the logged model's MLmodel)",),
+                     drop_tags=NO_PYTHON_TAG, mlmodel_python_version=OTHER_MINOR_PYTHON),
+        ("library version", "inconsistent provenance"),
+    ),
+    GuardCase(
+        "14-tag-vs-mlmodel", "python version",
+        _python_case(("inconsistent provenance",), tags={"python_version": OTHER_MINOR_PYTHON}),
+        ("library version", "mismatch"),
+    ),
+    GuardCase(
+        "14-malformed-tag", "python version",
+        _python_case(("tag 'python_version' is '3.x'",), tags={"python_version": "3.x"}),
+        ("library version", "MLmodel python_version"),
+    ),
+    GuardCase(
+        "14-malformed-mlmodel", "python version",
+        _python_case(("MLmodel python_version 'garbage'",), drop_tags=NO_PYTHON_TAG, mlmodel_python_version="garbage"),
+        ("library version", "tag 'python_version'"),
+    ),
+    GuardCase(
+        "14-no-version-anywhere", "python version",
+        _python_case(("is unknown",), drop_tags=NO_PYTHON_TAG, drop_mlmodel_python_version=True),
+        ("library version", "not a version of the form"),
+    ),
+    GuardCase(
+        "14-empty-tag", "python version",
+        _python_case(("tag 'python_version' is ''",), tags={"python_version": ""}),
+        ("library version", "MLmodel python_version"),
+    ),
+    GuardCase(  # a float: how an unquoted `3.10` parses in YAML
+        "14-mlmodel-yaml-float", "python version",
+        _python_case(("MLmodel python_version 3.1,",), drop_tags=NO_PYTHON_TAG, mlmodel_python_version=3.1),
+        ("library version", "tag 'python_version'"),
+    ),
+    GuardCase(  # mirror of 14-tag-vs-mlmodel: a correct tag in front of a foreign MLmodel; only step (v) refuses it
+        "14-mlmodel-vs-tag", "python version",
+        _python_case(("inconsistent provenance", f"records '{OTHER_MINOR_PYTHON}'"), mlmodel_python_version=OTHER_MINOR_PYTHON),
+        ("library version", "mismatch"),
+    ),
+    GuardCase(  # a scalar python_function flavor: treated as absent, never an AttributeError
+        "14-non-dict-python-function-flavor", "python version",
+        _python_case(("is unknown",), drop_tags=NO_PYTHON_TAG, mlmodel_python_function_flavor="x"),
+        ("library version", "not a version of the form"),
+    ),
 ]
 
 
