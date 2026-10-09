@@ -1,11 +1,13 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]  # 77 is the first release that understands an SPDX `license` expression (PEP 639)
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "readmission-risk"
 version = "0.1.0"
 requires-python = ">=3.12,<3.13"
+license = "MIT"  # SPDX identifier; matches LICENSE (MIT, Copyright (c) 2026 Florence Aellen)
+license-files = ["LICENSE"]
 # Deliberately empty, not an oversight: runtime dependencies live in requirements.in -> requirements.txt, compiled by
 # pip-compile --generate-hashes and installed with pip install --require-hashes (see docs/setup.md). Declaring them
 # here too would create a second, unhashed source of truth that could drift from the lockfile. The trade-off is that

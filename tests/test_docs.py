@@ -26,6 +26,7 @@ import os
 import re
 import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -241,6 +242,17 @@ def test_license_is_mit_with_copyright_line():
     assert "Copyright (c) 2026 Florence Aellen" in text
     assert "Permission is hereby granted, free of charge" in text
     assert 'THE SOFTWARE IS PROVIDED "AS IS"' in text
+
+
+def test_pyproject_declares_the_license_and_a_setuptools_that_understands_it():
+    """An SPDX `license` expression (PEP 639) needs setuptools >= 77; the expression must match the LICENSE file."""
+    config = tomllib.loads(_read(ROOT / "pyproject.toml"))
+    assert config["project"]["license"] == "MIT"
+    assert config["project"]["license-files"] == ["LICENSE"]
+    assert _read(ROOT / "LICENSE").startswith("MIT License")
+    requirement = next(r for r in config["build-system"]["requires"] if r.startswith("setuptools"))
+    floor = re.search(r">=\s*(\d+)", requirement)
+    assert floor is not None and int(floor.group(1)) >= 77, requirement
 
 
 # ---------------------------------------------------------------- (b) links
