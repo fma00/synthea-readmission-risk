@@ -39,6 +39,7 @@ EXPECTED_H2 = [
     "Status",
     "Architecture",
     "Results so far",
+    "Example output",
     "Limitations",
     "About the data",
     "Roadmap",
@@ -72,6 +73,8 @@ MUST_BE_IGNORED = [
     "id.key",
     "data/raw/x.csv",
     "mlflow/mlflow.db",
+    "docs/img/preview/reliability_light.png",
+    "docs/img/.tmp-abc123/reliability_light.svg",
     ".env",
     ".env.local",
 ]
@@ -80,6 +83,7 @@ MUST_NOT_BE_IGNORED = [
     ".env.example",
     "src/readmission_risk/models/split.py",
     "docs/setup.md",
+    "docs/img/reliability_light.svg",
     "LICENSE",
     "README.md",
     "tests/test_docs.py",
@@ -469,3 +473,26 @@ def test_no_tracked_file_matches_an_ignore_rule():
     result = _git("ls-files", "-ci", "--exclude-per-directory=.gitignore")
     assert result.returncode == 0, f"git ls-files failed: {result.stderr.strip()}"
     assert result.stdout.split() == []
+
+
+# ---------------------------------------------------------------- figure and sample table
+
+
+def test_readme_figure_files_exist_and_use_both_themes():
+    text = _read(README)
+    sources = re.findall(r'(?:srcset|src)="(docs/img/[^"]+)"', text)
+    assert sorted(sources) == ["docs/img/reliability_dark.svg", "docs/img/reliability_light.svg"]
+    assert all(exact_case_exists(ROOT / p, ROOT) for p in sources)
+    assert 'media="(prefers-color-scheme: dark)"' in text
+    assert 'alt="' in text
+
+
+def test_readme_sample_table_is_verbatim_from_the_generated_file():
+    generated = _read(ROOT / "docs" / "img" / "sample_topn.md").strip("\n")
+    section = "\n".join(split_sections(_read(README))["Example output"])
+    assert generated in section, "README 'Example output' must contain docs/img/sample_topn.md verbatim; regenerate or re-paste"
+
+
+def test_sample_table_rank_one_agrees_with_the_scoring_docs():
+    top_row = next(line for line in _read(ROOT / "docs" / "img" / "sample_topn.md").splitlines() if line.startswith("| 1 |"))
+    assert top_row.split("|")[2].strip() in _read(ROOT / "docs" / "scoring.md")

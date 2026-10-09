@@ -60,6 +60,12 @@ tools/synthea/
 /mlartifacts/
 *.db
 
+# Review-only low-resolution PNG previews of the README figures (scripts/make_readme_assets.py); the SVGs next to them are the
+# published artifacts and stay tracked.
+/docs/img/preview/
+# Scratch directory of an interrupted scripts/make_readme_assets.py run.
+/docs/img/.tmp-*/
+
 # Personal / local-only Claude Code state. Only .claude/commands/ (the /eg-* workflow) is tracked on purpose; everything
 # else under .claude/ (settings.local.json, scheduled_tasks.*, worktrees/, agent-memory*, checkpoints/, ...) stays local.
 # If shared project files (settings.json, agents/, skills/) are ever added, un-ignore them explicitly, e.g. `!.claude/skills/`.

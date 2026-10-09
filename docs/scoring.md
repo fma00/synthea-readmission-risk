@@ -35,3 +35,5 @@ The `--run-id` value in the last command is a local MLflow run id from the autho
 - **Simulated run date.** Patients already readmitted before the run date still appear, and the same discharge appears in up to W consecutive run-date partitions.
 - **`--show-observed-outcomes` counts are tiny** (the real batch has 1 readmission in 42 discharges): they are a sanity check, not evidence.
 - The notice text is specific to this dataset and must be revisited before the untouched v2 population or real as-of scoring is used with this scorer.
+
+A five-row sample of this output (with the same demo caveats) is in the [README](../README.md#example-output); `scripts/make_readme_assets.py` regenerates it from a saved predictions file.
