@@ -71,3 +71,29 @@ mlflow ui --backend-store-uri sqlite:///$(pwd)/mlflow/mlflow.db
 MLflow's autolog also writes in-sample `training_*` metrics into each run; only the `test_*` metrics are results.
 
 The MLflow store records absolute artifact paths, so moving the repository directory invalidates the paths stored in `mlflow/mlflow.db`.
+
+## Cloud project and cost guard (prepared for the scale-up phase)
+
+Nothing runs in the cloud yet; this records the account-level setup done on 2026-10-09 ahead of the scale-up, so it can be reproduced and later adopted by Terraform (`terraform import`). Replace `<BILLING_ACCOUNT_ID>` with your own (`gcloud billing accounts list`).
+
+```sh
+gcloud projects create synthea-readmission-risk --labels=purpose=portfolio,repo=synthea-readmission-risk
+gcloud billing projects link synthea-readmission-risk --billing-account=<BILLING_ACCOUNT_ID>
+
+# Budget alert: a notification to the billing account's admins, NOT a spend cap. The amount must be in the billing
+# account's currency (CHF here, so CHF 20 rather than USD 20).
+gcloud services enable billingbudgets.googleapis.com --project=synthea-readmission-risk
+gcloud billing budgets create --billing-account=<BILLING_ACCOUNT_ID> --billing-project=synthea-readmission-risk \
+  --display-name="synthea-readmission-risk monthly" --budget-amount=20CHF --calendar-period=month \
+  --filter-projects=projects/synthea-readmission-risk \
+  --threshold-rule=percent=0.5 --threshold-rule=percent=0.9 --threshold-rule=percent=1.0 \
+  --threshold-rule=percent=1.0,basis=forecasted-spend
+
+# Quota check for us-central1 (the chosen region)
+gcloud services enable compute.googleapis.com dataproc.googleapis.com --project=synthea-readmission-risk
+gcloud compute regions describe us-central1 --project=synthea-readmission-risk --format="table(quotas.metric,quotas.limit,quotas.usage)"
+gcloud compute project-info describe --project=synthea-readmission-risk --format="table(quotas.metric,quotas.limit,quotas.usage)"
+```
+
+Quotas found on 2026-10-09 (a new project; Google can change defaults): `CPUS` 200 in us-central1, `CPUS_ALL_REGIONS` 32, `DISKS_TOTAL_GB` 4,096, `INSTANCES` 24. A Serverless for Apache Spark batch on the standard tier consumes `CPUS` and `DISKS_TOTAL_GB`; its default footprint is a 4-vCPU driver plus two 4-vCPU executors (12 vCPUs) with 100 GiB of disk per core (1,200 GiB), and it autoscales. The binding limit is therefore `CPUS_ALL_REGIONS` = 32 vCPUs, i.e. a driver plus 7 executors, so the scale-up job should set `spark.dynamicAllocation.maxExecutors=7` rather than let autoscaling run into the quota. No increase was requested; revisit only if the first real run is too slow.
+
