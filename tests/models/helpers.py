@@ -32,12 +32,15 @@ def make_gold_frame(
     planted_signal: bool = True,
     first_admission: str = "2018-01-01",
     last_admission: str = "2026-06-30",
+    readmission_window_days: int = 30,
 ) -> pd.DataFrame:
-    """Schema-exact 23-column gold frame. ONE rng, drawn in a pinned order (each draw vectorized over all rows):
+    """Schema-exact 24-column gold frame. ONE rng, drawn in a pinned order (each draw vectorized over all rows):
     admission counts per patient, index_start offsets, LOS, the numeric features in spec order, the categoricals,
     and the label LAST. planted_signal=True: readmission probability rises with prior_inpatient_count and depends
     on the reason code (a null reason strongly implies negative), mirroring the real data; False: label is
-    Bernoulli(0.2) independent of every feature."""
+    Bernoulli(0.2) independent of every feature. label_horizon is set WITHOUT any rng draw to index_stop +
+    readmission_window_days (the label deadline), so the split's label-horizon purge drops a row only if its
+    label-window purge already did: every seeded draw and split count is the same as before the column existed."""
     rng = np.random.default_rng(seed)
     k = 1 + np.minimum(rng.poisson(1.2, size=n_patients), 5)
     patient_index = np.repeat(np.arange(n_patients), k)
@@ -88,6 +91,7 @@ def make_gold_frame(
             "index_start": starts,
             "index_stop": stops,
             "is_readmitted": label,
+            "label_horizon": stops + pd.Timedelta(days=readmission_window_days),
             "admission_reason_code": pd.Series(code, dtype=object),
             "admission_reason_description": pd.Series(
                 [None if c is None else f"desc {c}" for c in code], dtype=object
@@ -114,16 +118,24 @@ def make_gold_frame(
 
 
 def row(
-    patient_id: str, start: str, stop: str, label: int = 0, encounter_id: str | None = None
+    patient_id: str,
+    start: str,
+    stop: str,
+    label: int = 0,
+    encounter_id: str | None = None,
+    *,
+    label_horizon: str | None = None,
 ) -> dict:
-    """One hand-written gold row (dict of ALL 23 columns). start/stop are ISO-8601 UTC strings with a trailing
-    "Z". encounter_id defaults to f"e-{patient_id}-{start}" (unique per patient and start instant)."""
+    """One hand-written gold row (dict of ALL 24 columns). start/stop/label_horizon are ISO-8601 UTC strings with a
+    trailing "Z". encounter_id defaults to f"e-{patient_id}-{start}" (unique per patient and start instant).
+    label_horizon=None means "the 30-day deadline" (filled in by frame())."""
     return {
         "patient_id": patient_id,
         "encounter_id": encounter_id if encounter_id is not None else f"e-{patient_id}-{start}",
         "index_start": start,
         "index_stop": stop,
         "is_readmitted": label,
+        "label_horizon": label_horizon,
         "admission_reason_code": "R_LOW",
         "admission_reason_description": "desc R_LOW",
         "payer_ownership": "PRIVATE",
@@ -146,10 +158,13 @@ def row(
 
 
 def frame(rows: list[dict]) -> pd.DataFrame:
-    """Builds a gold-shaped frame from row() dicts, converting the timestamps to tz-aware UTC."""
+    """Builds a gold-shaped frame from row() dicts, converting the timestamps to tz-aware UTC. A None label_horizon
+    becomes index_stop + 30 days (the default readmission window's deadline)."""
     df = pd.DataFrame(rows)[list(EXPECTED_GOLD_COLUMNS)]
     for col in ("index_start", "index_stop"):
         df[col] = pd.to_datetime(df[col], utc=True)
+    horizon = pd.to_datetime(df["label_horizon"], utc=True)
+    df["label_horizon"] = horizon.where(horizon.notna(), df["index_stop"] + pd.Timedelta(days=30))
     return df
 
 

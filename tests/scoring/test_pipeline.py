@@ -14,6 +14,7 @@ import pytest
 
 from readmission_risk.models.data import (
     LABEL_COLUMN,
+    LABEL_SIDE_COLUMNS,
     gold_fingerprint,
     load_gold_table,
     prepare_features,
@@ -86,7 +87,7 @@ def _sha(path: Path) -> str:
 def _independent_scores(env, run_id: str, run_date: str = DEFAULT_RUN_DATE, window_days: int = DEFAULT_WINDOW_DAYS) -> dict:
     batch = env.expected_batch(run_date, window_days)
     model = load_logged_model(env.tracking_dir, run_id)
-    scores = model.predict_proba(prepare_features(batch.drop(columns=[LABEL_COLUMN])))[:, 1]
+    scores = model.predict_proba(prepare_features(batch.drop(columns=list(LABEL_SIDE_COLUMNS))))[:, 1]
     return dict(zip(batch["encounter_id"], scores, strict=True))
 
 

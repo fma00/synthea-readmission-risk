@@ -11,7 +11,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from readmission_risk.models.data import LABEL_COLUMN, load_gold_table_with_metadata
+from readmission_risk.models.data import (
+    LABEL_COLUMN,
+    LABEL_SIDE_COLUMNS,
+    load_gold_table_with_metadata,
+)
 from readmission_risk.models.tracking import load_logged_model
 from readmission_risk.models.training import MODEL_NAMES
 from readmission_risk.pipeline.gold_metadata import parse_yyyymmdd
@@ -96,8 +100,8 @@ def score_run_date(config: ScoringConfig, *, loader=load_logged_model, writer=wr
     # 6. ONLY NOW load the model
     model = loader(config.tracking_dir, run.run_id)
 
-    # 7. score a label-free frame (the same one goes to both calls, which both refuse a frame that still has the label)
-    label_free = batch.drop(columns=[LABEL_COLUMN])
+    # 7. score a label-free frame: the label AND label_horizon are dropped (both calls refuse a frame that still has either)
+    label_free = batch.drop(columns=list(LABEL_SIDE_COLUMNS))
     scores = score_batch(model, label_free)
     predictions = build_predictions(
         label_free,

@@ -436,6 +436,7 @@ def test_warnings_from_split_are_not_swallowed(tmp_path):
     idx = df.index[:5]
     df.loc[idx, "index_start"] = pd.Timestamp("2026-08-10T00:00:00Z")
     df.loc[idx, "index_stop"] = pd.Timestamp("2026-08-18T00:00:00Z")
+    df.loc[idx, "label_horizon"] = df.loc[idx, "index_stop"] + pd.Timedelta(days=30)  # keep it at the moved deadline
     gold = _write_gold(tmp_path / "gold", df)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")

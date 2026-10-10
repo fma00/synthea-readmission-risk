@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import warnings
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pyspark.sql.functions as F
@@ -71,6 +71,7 @@ GOLD_TABLE_COLUMNS: tuple[str, ...] = (
     "index_start",
     "index_stop",
     "is_readmitted",
+    "label_horizon",
     "admission_reason_code",
     "admission_reason_description",
     "payer_ownership",
@@ -168,6 +169,63 @@ def flag_inpatient_stays(encounters: DataFrame, procedures: DataFrame) -> DataFr
     )
 
 
+def compute_label_horizons(
+    candidates: DataFrame,
+    flagged: DataFrame,
+    procedures: DataFrame,
+    reference_date: date,
+) -> DataFrame:
+    """Pure. One row per candidate: (Id, label_horizon), the latest timestamp of any record the candidate's label depends on.
+    See notes/eg-new-feature/label-horizon-purge-2026-10-09.md (Interfaces) for the definition and why each term is there.
+
+    candidates needs Id, PATIENT, STOP (non-null) and readmit_deadline; flagged is flag_inpatient_stays' output; procedures
+    needs ENCOUNTER, CODE, START, STOP. With R_end = (reference_date + 1 day) at 00:00Z, for each inpatient stay a:
+        stay_horizon(a) = greatest(a.START, coalesce(a.STOP, R_end), a.prev_max_stop, planned_record_max(a))
+        planned_record_max(a) = max over a's planned-code procedures of coalesce(greatest(p.START, p.STOP), R_end)
+    and label_horizon(c) = greatest(c.readmit_deadline, max stay_horizon over c's in-window stays), where an in-window stay is
+    ANY inpatient stay of the same patient (whatever its flags) with c.STOP < a.START <= c.readmit_deadline -- the label
+    window's own bounds. An open stay, and a planned record with no usable date, contribute R_end, so a row that depends on
+    one is purged by the split for every test_start_date before the reference date. Not covered: index-row MEMBERSHIP (the
+    terminal rule and the planned-index exclusion), a named follow-up."""
+    reference_end = F.to_timestamp(F.lit((reference_date + timedelta(days=1)).isoformat()))
+    planned_record_max = (
+        procedures.filter(F.col("CODE").isin(*PLANNED_PROCEDURE_CODES))
+        .groupBy(F.col("ENCOUNTER").alias("_hz_encounter_id"))
+        .agg(F.max(F.coalesce(F.greatest(F.col("START"), F.col("STOP")), reference_end)).alias("_hz_planned_max"))
+    )
+    stays = flagged.join(planned_record_max, F.col("Id") == F.col("_hz_encounter_id"), "left").withColumn(
+        "stay_horizon",
+        F.greatest(
+            F.col("START"),
+            F.coalesce(F.col("STOP"), reference_end),
+            F.col("prev_max_stop"),
+            F.col("_hz_planned_max"),
+        ),
+    )
+
+    c = candidates.alias("c")
+    a = stays.alias("a")
+    return (
+        c.join(
+            a,
+            (F.col("c.PATIENT") == F.col("a.PATIENT"))
+            & (F.col("a.Id") != F.col("c.Id"))
+            & (F.col("a.START") > F.col("c.STOP"))
+            & (F.col("a.START") <= F.col("c.readmit_deadline")),
+            "left",
+        )
+        .groupBy(F.col("c.Id").alias("_hz_id"))
+        .agg(
+            F.max(F.col("a.stay_horizon")).alias("_hz_max_stay"),
+            F.first(F.col("c.readmit_deadline")).alias("_hz_deadline"),  # constant per c.Id
+        )
+        .select(
+            F.col("_hz_id").alias("Id"),
+            F.greatest(F.col("_hz_deadline"), F.col("_hz_max_stay")).alias("label_horizon"),
+        )
+    )
+
+
 def build_index_encounters(
     encounters: DataFrame,
     patients: DataFrame,
@@ -179,12 +237,16 @@ def build_index_encounters(
     (default) UNPLANNED readmission flag (a readmission is an inpatient stay that is neither planned nor a continuation,
     starting in (STOP, STOP + W], upper bound inclusive), and drops candidates whose outcome can't be observed (death or
     administrative censoring before a readmission occurred). See flag_inpatient_stays for the three stay flags and
-    LABEL_DEFINITION (gold_metadata.py) for the identity rule."""
+    LABEL_DEFINITION (gold_metadata.py) for the identity rule. Each kept row also carries label_horizon (see
+    compute_label_horizons), which the split's label-horizon purge reads."""
     flagged = flag_inpatient_stays(encounters, procedures)
     candidates = flagged.filter(
         F.col("STOP").isNotNull() & ~F.col("is_planned") & F.col("is_terminal")
     ).withColumn("readmit_deadline", F.expr(f"STOP + INTERVAL {readmission_window_days} DAYS"))
     readmit_pool = flagged.filter(~F.col("is_planned") & ~F.col("is_continuation"))
+    horizons = compute_label_horizons(candidates, flagged, procedures, reference_date).withColumnRenamed(
+        "Id", "_horizon_id"
+    )
 
     c = candidates.alias("c")
     a = readmit_pool.alias("a")
@@ -206,6 +268,8 @@ def build_index_encounters(
         c.join(readmitted_ids, F.col("c.Id") == F.col("readmitted_id"), "left")
         .withColumn("is_readmitted", F.when(F.col("readmitted_id").isNotNull(), 1).otherwise(0))
         .drop("readmitted_id")
+        .join(horizons, F.col("c.Id") == F.col("_horizon_id"), "left")
+        .drop("_horizon_id")
     )
 
     reference_date_exclusive_end = F.lit(reference_date) + F.expr("INTERVAL 1 DAY")
@@ -232,6 +296,7 @@ def build_index_encounters(
         F.col("c.PROVIDER").alias("PROVIDER"),
         F.col("c.ORGANIZATION").alias("ORGANIZATION"),
         F.col("is_readmitted"),
+        F.col("label_horizon"),
     )
 
 
@@ -366,6 +431,7 @@ def join_patient_demographics(features: DataFrame, patients: DataFrame) -> DataF
         F.col("index_start"),
         F.col("index_stop"),
         F.col("is_readmitted"),
+        F.col("label_horizon"),
         F.col("REASONCODE").alias("admission_reason_code"),
         F.col("REASONDESCRIPTION").alias("admission_reason_description"),
         F.col("payer_ownership"),

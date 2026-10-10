@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import warnings
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -100,7 +101,9 @@ def test_readmission_window_days_reaches_both_the_purge_and_the_buffer(window, p
         row("pre", "2022-12-05T00:00:00Z", "2022-12-12T00:00:00Z", 0),  # 20 days before T = 2023-01-01
         row("late", "2026-08-20T00:00:00Z", "2026-08-25T00:00:00Z", 0),  # 22 days before the reference date
     ]
-    result = _split(frame(rows), readmission_window_days=window)
+    df = frame(rows)
+    df["label_horizon"] = df["index_stop"] + pd.Timedelta(days=window)  # the deadline for THIS window (validation 4)
+    result = _split(df, readmission_window_days=window)
     assert ("pre" not in set(result.train["patient_id"])) is purged
     assert ("late" not in set(result.test["patient_id"])) is buffered
     assert result.summary["censor_buffer_cutoff"] == (
@@ -127,6 +130,75 @@ def test_split_postconditions_hold_property():
         assert not (_ids(result.train) & _ids(result.test))
         test_start = pd.Timestamp("2023-01-01", tz="UTC")
         assert result.train["index_start"].max() < test_start <= result.test["index_start"].min()
+        assert (result.train["label_horizon"] < test_start).all()
+
+
+def test_split_postconditions_hold_property_with_planted_late_horizons():
+    T = pd.Timestamp("2023-01-01", tz="UTC")
+    floor = T + pd.Timedelta(days=1)
+    for seed in range(5):
+        df = make_gold_frame(400, seed=seed)
+        pushed = np.asarray(df.index % 7 == 0)
+        df["label_horizon"] = df["label_horizon"].where(~pushed | (df["label_horizon"] >= floor), floor)
+        with pytest.warns(UserWarning, match="label-horizon purge"):
+            result = _split(df)
+        assert result.summary["n_dropped_label_horizon_purge"] >= 1, seed
+        assert (result.train["label_horizon"] < T).all()
+        pushed_pre = set(df.loc[pushed & np.asarray(df["index_start"] < T), "encounter_id"])
+        assert not (pushed_pre & _ids(result.train)), seed
+
+
+def test_label_horizon_purge_boundary():
+    # strictly `<`, like step 4: a classifying record dated exactly AT T is a test-period record
+    rows = [
+        *pad_rows(),
+        row("hz_inside", "2020-03-01T00:00:00Z", "2020-03-05T00:00:00Z", 0, label_horizon="2022-12-31T23:59:59Z"),
+        row("hz_exact", "2020-03-01T00:00:00Z", "2020-03-05T00:00:00Z", 1, label_horizon="2023-01-01T00:00:00Z"),
+        row("hz_late", "2020-03-01T00:00:00Z", "2020-03-05T00:00:00Z", 1, label_horizon="2023-01-01T00:00:01Z"),
+    ]
+    with pytest.warns(UserWarning, match="label-horizon purge dropped 2 training row"):
+        result = _split(frame(rows))
+    assert "hz_inside" in set(result.train["patient_id"])
+    assert not ({"hz_exact", "hz_late"} & set(result.train["patient_id"]))
+    assert result.summary["n_dropped_label_horizon_purge"] == 2
+    assert result.summary["n_dropped_label_window_purge"] == 0  # 4b, not step 4, removed them
+
+
+def test_label_horizon_purge_does_not_touch_test_rows():
+    rows = [*pad_rows(), row("te_late", "2024-03-01T00:00:00Z", "2024-03-05T00:00:00Z", 0, label_horizon="2030-01-01T00:00:00Z")]
+    result = _split(frame(rows))
+    assert "te_late" in set(result.test["patient_id"])
+    assert result.summary["n_dropped_label_horizon_purge"] == 0
+
+
+def test_no_label_horizon_warning_when_nothing_is_purged():
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        result = _split(frame(pad_rows()))
+    assert result.summary["n_dropped_label_horizon_purge"] == 0
+
+
+@pytest.mark.parametrize(
+    "case, match",
+    [
+        ("missing", "no 'label_horizon' column"),
+        ("naive", "label_horizon must be a tz-aware"),
+        ("null", "label_horizon has 1 null"),
+        ("before_deadline", "before index_stop \\+ 30 days"),
+    ],
+)
+def test_split_rejects_bad_label_horizon(case, match):
+    df = frame(pad_rows())
+    if case == "missing":
+        df = df.drop(columns=["label_horizon"])
+    elif case == "naive":
+        df["label_horizon"] = df["label_horizon"].dt.tz_localize(None)
+    elif case == "null":
+        df.loc[df.index[0], "label_horizon"] = pd.NaT
+    elif case == "before_deadline":
+        df.loc[df.index[0], "label_horizon"] = df.loc[df.index[0], "index_stop"] + pd.Timedelta(days=29)
+    with pytest.raises(ValueError, match=match):
+        _split(df)
 
 
 def _every_drop_reason_frame() -> pd.DataFrame:
@@ -136,6 +208,7 @@ def _every_drop_reason_frame() -> pd.DataFrame:
             row("buf", "2026-08-10T00:00:00Z", "2026-08-18T00:00:00Z", 1),  # censoring buffer
             row("early", "2018-06-01T00:00:00Z", "2018-06-05T00:00:00Z", 0),  # before train_start_date
             row("purge", "2022-11-28T00:00:00Z", "2022-12-02T00:00:01Z", 0),  # label-window purge
+            row("hz", "2020-03-01T00:00:00Z", "2020-03-05T00:00:00Z", 0, label_horizon="2023-01-02T00:00:00Z"),  # 4b
             row("both", "2020-06-01T00:00:00Z", "2020-06-05T00:00:00Z", 0),  # patient overlap (train side)
             row("both", "2024-06-01T00:00:00Z", "2024-06-05T00:00:00Z", 1),
         ]
@@ -144,6 +217,7 @@ def _every_drop_reason_frame() -> pd.DataFrame:
 
 
 @pytest.mark.filterwarnings("ignore:The censoring buffer dropped:UserWarning")
+@pytest.mark.filterwarnings("ignore:The label-horizon purge:UserWarning")
 def test_summary_accounting_identity():
     result = _split(_every_drop_reason_frame(), train_start_date=pd.Timestamp("2019-01-01").date())
     s = result.summary
@@ -151,6 +225,7 @@ def test_summary_accounting_identity():
         "n_dropped_censor_buffer",
         "n_dropped_before_train_start",
         "n_dropped_label_window_purge",
+        "n_dropped_label_horizon_purge",
         "n_dropped_patient_overlap",
     ):
         assert s[key] >= 1, key
@@ -159,12 +234,14 @@ def test_summary_accounting_identity():
         + s["n_test"]
         + s["n_dropped_before_train_start"]
         + s["n_dropped_label_window_purge"]
+        + s["n_dropped_label_horizon_purge"]
         + s["n_dropped_patient_overlap"]
         + s["n_train"]
     )
 
 
 @pytest.mark.filterwarnings("ignore:The censoring buffer dropped:UserWarning")
+@pytest.mark.filterwarnings("ignore:The label-horizon purge:UserWarning")
 def test_train_start_date_only_filters_train():
     df = _every_drop_reason_frame()
     without = _split(df)

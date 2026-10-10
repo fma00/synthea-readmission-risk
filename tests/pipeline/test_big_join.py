@@ -18,6 +18,7 @@ from readmission_risk.pipeline.big_join import (
     BigJoinConfig,
     build_big_join,
     build_index_encounters,
+    compute_label_horizons,
     compute_lookback_features,
     flag_inpatient_stays,
     join_dimension_attributes,
@@ -80,7 +81,12 @@ def make_encounter_row(
 
 
 PROCEDURES_TEST_SCHEMA = StructType(
-    [StructField("ENCOUNTER", StringType(), True), StructField("CODE", StringType(), True)]
+    [
+        StructField("ENCOUNTER", StringType(), True),
+        StructField("CODE", StringType(), True),
+        StructField("START", TimestampType(), True),
+        StructField("STOP", TimestampType(), True),
+    ]
 )
 
 
@@ -333,8 +339,9 @@ def _stay(id_, start, stop, patient="p1", encounterclass="inpatient"):
     )
 
 
-def _procs(spark, pairs):
-    return spark.createDataFrame(list(pairs), PROCEDURES_TEST_SCHEMA)
+def _procs(spark, rows):
+    """rows: (encounter, code) pairs (undated) or (encounter, code, start, stop) 4-tuples."""
+    return spark.createDataFrame([r if len(r) == 4 else (*r, None, None) for r in rows], PROCEDURES_TEST_SCHEMA)
 
 
 def _flags(spark, stays, procedures=()):
@@ -570,6 +577,154 @@ def test_labels_patient_isolation(spark):
     assert _labels(spark, stays) == {"c": 0, "q": 0}
 
 
+# --- label_horizon (compute_label_horizons, via build_index_encounters and directly) ---
+# Horizons are formatted IN SPARK (session time zone UTC): collect() would return naive LOCAL-time datetimes, which differ
+# between a non-UTC laptop and UTC CI.
+
+CANDIDATES_TEST_SCHEMA = StructType(
+    [StructField("Id", StringType()), StructField("PATIENT", StringType()), StructField("STOP", TimestampType())]
+)
+_FMT = "yyyy-MM-dd'T'HH:mm:ss"
+
+
+def _horizons(spark, stays, procedures=(), deaths=None, reference=date(2026, 9, 16), window=30):
+    """{encounter_id: label_horizon as a UTC 'YYYY-MM-DDTHH:MM:SS' string}; mirrors _labels."""
+    import pyspark.sql.functions as F
+
+    encounters = spark.createDataFrame(stays, ENCOUNTERS_TEST_SCHEMA)
+    deaths = deaths or {}
+    patients = spark.createDataFrame([(p, deaths.get(p)) for p in sorted({s[3] for s in stays})], PATIENTS_TEST_SCHEMA)
+    rows = (
+        build_index_encounters(encounters, patients, _procs(spark, procedures), reference, window)
+        .select("encounter_id", F.date_format("label_horizon", _FMT).alias("h"))
+        .collect()
+    )
+    return {r["encounter_id"]: r["h"] for r in rows}
+
+
+def _direct(spark, candidates, stays, procedures=(), reference=date(2026, 9, 16), window=30):
+    """compute_label_horizons on a hand-built candidate frame (bypasses the terminal/planned filters). The candidate frame
+    does NOT share lineage with `flagged`, so these tests check the definition only; the production self-join aliasing is
+    covered by the _horizons tests."""
+    import pyspark.sql.functions as F
+
+    flagged = flag_inpatient_stays(spark.createDataFrame(stays, ENCOUNTERS_TEST_SCHEMA), _procs(spark, procedures))
+    cands = spark.createDataFrame(candidates, CANDIDATES_TEST_SCHEMA).withColumn(
+        "readmit_deadline", F.expr(f"STOP + INTERVAL {window} DAYS")
+    )
+    return compute_label_horizons(cands, flagged, _procs(spark, procedures), reference)
+
+
+def _direct_horizons(spark, candidates, stays, procedures=(), reference=date(2026, 9, 16), window=30):
+    import pyspark.sql.functions as F
+
+    rows = (
+        _direct(spark, candidates, stays, procedures, reference, window)
+        .select("Id", F.date_format("label_horizon", _FMT).alias("h"))
+        .collect()
+    )
+    return {r["Id"]: r["h"] for r in rows}
+
+
+def test_horizon_without_in_window_stay_is_the_deadline(spark):
+    assert _horizons(spark, [_stay("c", "01-01", "01-02")]) == {"c": "2020-02-01T00:00:00"}
+
+
+def test_horizon_extends_to_an_in_window_stay_that_ends_after_the_deadline(spark):
+    h = _horizons(spark, [_stay("c", "01-01", "01-02"), _stay("a", "01-20", "03-15")])
+    assert h["c"] == "2020-03-15T00:00:00"
+
+
+def test_horizon_ignores_an_in_window_stay_that_ends_before_the_deadline(spark):
+    h = _horizons(spark, [_stay("c", "01-01", "01-02"), _stay("a", "01-10", "01-12")])
+    assert h["c"] == "2020-02-01T00:00:00"
+
+
+def test_horizon_window_bounds_match_the_label(spark):
+    # c.STOP = 03-01 -> deadline 03-31. Strict lower bound: a stay starting AT c.STOP is not in-window.
+    candidate = [("c", "p1", _t("03-01"))]
+    at_stop = [_stay("c", "02-28", "03-01"), _stay("a", "03-01", "06-01")]
+    assert _direct_horizons(spark, candidate, at_stop) == {"c": "2020-03-31T00:00:00"}
+    # Inclusive upper bound: a stay starting exactly AT the deadline is in-window.
+    at_deadline = [_stay("c", "02-28", "03-01"), _stay("a", "03-31", "06-01")]
+    assert _direct_horizons(spark, candidate, at_deadline) == {"c": "2020-06-01T00:00:00"}
+
+
+def test_horizon_includes_a_late_planned_procedure(spark):
+    stays = [_stay("c", "01-01", "01-02"), _stay("a", "01-10", "01-12")]
+    dated = [("a", PLANNED, _t("05-01"), _t("05-03"))]
+    assert _horizons(spark, stays, dated)["c"] == "2020-05-03T00:00:00"  # greatest(START, STOP)
+    start_only = [("a", PLANNED, _t("05-01"), None)]
+    assert _horizons(spark, stays, start_only)["c"] == "2020-05-01T00:00:00"  # a null procedure STOP: its START
+
+
+def test_horizon_undated_planned_procedure_reaches_the_observation_end(spark):
+    stays = [_stay("c", "01-01", "01-02"), _stay("a", "01-10", "01-12")]
+    undated = [("a", PLANNED, None, None)]
+    assert _horizons(spark, stays, undated)["c"] == "2026-09-17T00:00:00"  # R_end for reference 2026-09-16
+    assert _labels(spark, stays, undated) == {"c": 0}  # the undated record still makes `a` planned
+
+
+def test_horizon_ignores_a_late_non_planned_procedure(spark):
+    stays = [_stay("c", "01-01", "01-02"), _stay("a", "01-10", "01-12")]
+    assert _horizons(spark, stays, [("a", "410006001", _t("05-01"), _t("05-03"))])["c"] == "2020-02-01T00:00:00"
+
+
+def test_horizon_ignores_procedures_of_out_of_window_stays(spark):
+    stays = [_stay("c", "01-01", "01-02"), _stay("far", "06-01", "06-03")]
+    h = _horizons(spark, stays, [("far", PLANNED, _t("12-01"), _t("12-02"))])
+    assert h["c"] == "2020-02-01T00:00:00"
+
+
+def test_horizon_open_in_window_stay_reaches_the_observation_end(spark):
+    h = _horizons(spark, [_stay("c", "01-01", "01-02"), _stay("a", "01-10", None)])
+    assert h["c"] == "2026-09-17T00:00:00"
+
+
+def test_horizon_includes_prev_max_stop(spark):
+    # e overlaps c (the terminal rule would drop c; the direct call bypasses it) and ends after both a.STOP and c's deadline:
+    # only a.prev_max_stop carries e.STOP into c's horizon (e itself starts before c.STOP, so it is not in-window).
+    stays = [_stay("e", "02-20", "05-01"), _stay("c", "03-01", "03-02"), _stay("a", "03-10", "03-12")]
+    assert _direct_horizons(spark, [("c", "p1", _t("03-02"))], stays) == {"c": "2020-05-01T00:00:00"}
+
+
+def test_horizon_patient_isolation(spark):
+    stays = [_stay("c", "01-01", "01-02", "P"), _stay("q", "01-10", "06-01", "Q")]
+    assert _horizons(spark, stays)["c"] == "2020-02-01T00:00:00"
+
+
+def test_horizon_is_independent_of_flags(spark):
+    planned = [_stay("c", "01-01", "01-02"), _stay("a", "01-10", "03-15")]
+    assert _horizons(spark, planned, [("a", PLANNED, _t("01-11"), _t("01-12"))])["c"] == "2020-03-15T00:00:00"
+    # `a` starts inside `b` (a continuation) and ends after it: it extends the horizon on its own
+    continuation = [_stay("c", "01-01", "01-02"), _stay("b", "01-10", "01-20"), _stay("a", "01-15", "03-15")]
+    assert _flags(spark, continuation)["a"][0] is True
+    assert _horizons(spark, continuation)["c"] == "2020-03-15T00:00:00"
+
+
+def test_compute_label_horizons_one_row_per_candidate(spark):
+    stays = [
+        _stay("c1", "01-01", "01-02", "P1"), _stay("a1", "01-10", "01-12", "P1"), _stay("b1", "01-15", "03-01", "P1"),
+        _stay("c2", "01-01", "01-02", "P2"),
+        _stay("c3", "01-01", "01-02", "P3"), _stay("a3", "01-10", None, "P3"),
+    ]  # fmt: skip
+    candidates = [("c1", "P1", _t("01-02")), ("c2", "P2", _t("01-02")), ("c3", "P3", _t("01-02"))]
+    result = _direct(spark, candidates, stays)
+    assert result.count() == 3
+    assert result.select("Id").distinct().count() == 3
+
+
+def test_horizon_survives_the_death_and_censoring_filter(spark):
+    stays = [
+        _stay("c1", "01-01", "01-02", "p1"), _stay("a1", "01-10", "01-15", "p1"),
+        _stay("c2", "01-01", "01-02", "p2"), _stay("a2", "01-20", "03-10", "p2"),
+    ]  # fmt: skip
+    h = _horizons(spark, stays, deaths={"p1": date(2020, 1, 20)})
+    assert h["c1"] == "2020-02-01T00:00:00"  # positive kept despite the death; deadline > a1.STOP
+    assert h["c2"] == "2020-03-10T00:00:00"
+    assert "a1" not in h  # dropped by the death rule (a2 is itself a kept negative index row)
+
+
 # --- compute_lookback_features ---
 
 INDEX_TEST_SCHEMA = StructType(
@@ -762,6 +917,7 @@ def _add_stub_feature_columns(df, index_start_value):
         df.withColumn("index_start", F.lit(index_start_value))
         .withColumn("index_stop", F.lit(index_start_value))
         .withColumn("is_readmitted", F.lit(0))
+        .withColumn("label_horizon", F.lit(index_start_value))
         .withColumn("REASONCODE", F.lit(None).cast(StringType()))
         .withColumn("REASONDESCRIPTION", F.lit(None).cast(StringType()))
         .withColumn("prior_encounter_count", F.lit(0))
@@ -943,7 +1099,7 @@ def test_build_big_join_end_to_end(spark, tmp_path):
     expected = spark.createDataFrame(
         [
             (
-                "p1", "e1", ts("2020-01-01T00:00:00"), ts("2020-01-02T00:00:00"), 0,
+                "p1", "e1", ts("2020-01-01T00:00:00"), ts("2020-01-02T00:00:00"), 0, ts("2020-02-01T00:00:00"),
                 None, None, "GOVERNMENT", "GENERAL PRACTICE", 5,
                 0, 0, 0, 0, 0, 0, 0, 0,
                 expected_age, "M", "white", "nonhispanic", "M",
@@ -985,8 +1141,8 @@ def _enc_csv(id_, start, stop, patient, encounterclass="inpatient"):
     return f"{id_},2020-{start}T00:00:00Z,{stop_text},{patient},o1,pr1,pay1,{encounterclass},123,Desc,100.0,200.0,50.0,,"
 
 
-def _proc_csv(encounter, code, patient="p1"):
-    return f"2020-01-01T00:00:00Z,2020-01-01T01:00:00Z,{patient},{encounter},SNOMED-CT,{code},Desc,50.0,,"
+def _proc_csv(encounter, code, patient="p1", start="01-01T00:00:00", stop="01-01T01:00:00"):
+    return f"2020-{start}Z,2020-{stop}Z,{patient},{encounter},SNOMED-CT,{code},Desc,50.0,,"
 
 
 def _write_slice_2b_input(tmp_path, encounter_rows, procedure_rows, patient_ids):
@@ -1022,7 +1178,8 @@ def test_build_big_join_end_to_end_label_wiring(spark, tmp_path):
         _enc_csv("e12", "07-01", "07-05", "p4"),
         _enc_csv("e13", "07-03", "07-05", "p4"),  # same STOP as e12: both terminal, e13 a continuation
     ]
-    procedures = [_proc_csv("e2", PLANNED), _proc_csv("e3", PLANNED), _proc_csv("e8", PLANNED, "p2"), _proc_csv("e1", "123")]
+    # e2's planned procedure is dated after e1's deadline (planned-ness ignores dates): the one end-to-end horizon above a deadline
+    procedures = [_proc_csv("e2", PLANNED, start="04-01T00:00:00", stop="04-02T00:00:00"), _proc_csv("e3", PLANNED), _proc_csv("e8", PLANNED, "p2"), _proc_csv("e1", "123")]
     input_dir = _write_slice_2b_input(tmp_path, encounters, procedures, ["p1", "p2", "p3", "p4"])
     output_dir = tmp_path / "out"
 
@@ -1040,6 +1197,15 @@ def test_build_big_join_end_to_end_label_wiring(spark, tmp_path):
         ("p4", "e12", 0),  # its only in-window stay e13 is a continuation
         ("p4", "e13", 0),
     ]
+    horizons = dict(zip(frame["encounter_id"], pd.to_datetime(frame["label_horizon"], utc=True), strict=True))
+    assert horizons == {
+        "e1": pd.Timestamp("2020-04-02", tz="UTC"),  # the late planned procedure on in-window e2 (deadline 02-01)
+        "e4": pd.Timestamp("2020-04-10", tz="UTC"),  # deadline; in-window e5 ends 03-21
+        "e5": pd.Timestamp("2020-04-20", tz="UTC"),
+        "e7": pd.Timestamp("2020-06-02", tz="UTC"),  # deadline; e8/e9 (and e9's prev_max_stop) end by 05-20
+        "e12": pd.Timestamp("2020-08-04", tz="UTC"),  # e13 starts before e12's STOP: not in its window
+        "e13": pd.Timestamp("2020-08-04", tz="UTC"),
+    }
     metadata = read_gold_metadata(output_dir)
     assert (metadata.n_rows, metadata.n_positive) == (6, 1)
     assert metadata.n_inpatient_stays == 11  # not 12 (ambulatory e11 excluded) and not 10 (open stay e10 included)

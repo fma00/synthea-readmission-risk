@@ -14,7 +14,7 @@ from datetime import date
 import numpy as np
 import pandas as pd
 
-from readmission_risk.models.data import LABEL_COLUMN, prepare_features
+from readmission_risk.models.data import LABEL_SIDE_COLUMNS, prepare_features
 
 from .constants import PARTITION_TEST
 
@@ -55,9 +55,10 @@ PREDICTION_DTYPES: dict[str, str] = {c: _SPECIAL_DTYPES.get(c, "object") for c i
 
 
 def _require_label_free(frame: pd.DataFrame, caller: str) -> None:
-    if LABEL_COLUMN in frame.columns:
+    present = [c for c in LABEL_SIDE_COLUMNS if c in frame.columns]
+    if present:
         raise ValueError(
-            f"{caller} must not be handed the label column {LABEL_COLUMN!r}: the scorer never sees the observed outcome"
+            f"{caller} must not be handed label-side column(s) {present}: the scorer never sees the observed outcome"
         )
 
 
@@ -67,7 +68,8 @@ def _require_top_n(top_n: object) -> None:
 
 
 def score_batch(model, batch: pd.DataFrame) -> np.ndarray:
-    """ValueError if LABEL_COLUMN is in batch.columns (structural, not by convention). scores =
+    """ValueError if any of LABEL_SIDE_COLUMNS (the label, label_horizon) is in batch.columns (structural, not by
+    convention). scores =
     model.predict_proba(prepare_features(batch))[:, 1]; never calls .fit. RuntimeError (a broken model or environment,
     not user input) if predict_proba does not return shape (len(batch), 2), or any score is non-finite, < 0 or > 1."""
     _require_label_free(batch, "score_batch")
@@ -104,7 +106,7 @@ def build_predictions(
     row order does not matter, and neither `batch` nor `scores` is mutated. discharge_time is index_stop as
     datetime64[us, UTC]: ValueError if any index_stop has a nonzero nanosecond component (the cast would truncate it
     silently). The `window_days` argument is written to the column `scoring_window_days` (not `window_days`, which would
-    be confusable with the 30-day label horizon)."""
+    be confusable with the 30-day label window)."""
     _require_label_free(batch, "build_predictions")
     _require_top_n(top_n)
     if type(window_days) is not int or not 1 <= window_days <= _INT32_MAX:

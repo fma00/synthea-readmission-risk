@@ -27,7 +27,7 @@ def cli():
 
 def _write_gold(directory: Path, **metadata_overrides) -> Path:
     directory.mkdir(parents=True)
-    df = make_gold_frame(300, seed=1)
+    df = make_gold_frame(300, seed=1, readmission_window_days=metadata_overrides.get("readmission_window_days", 30))
     half = len(df) // 2
     df.iloc[:half].to_parquet(directory / "part-0.parquet", index=False)
     df.iloc[half:].to_parquet(directory / "part-1.parquet", index=False)

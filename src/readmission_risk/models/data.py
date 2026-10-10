@@ -19,6 +19,11 @@ from readmission_risk.pipeline.gold_metadata import (
 
 LABEL_COLUMN = "is_readmitted"
 GROUP_COLUMN = "patient_id"
+LABEL_HORIZON_COLUMN = "label_horizon"
+# Columns that carry the observed outcome or post-index information derived from it: the scorer strips every one of them
+# before scoring (scoring.ranking._require_label_free refuses a frame that still has any). label_horizon is the latest
+# timestamp of any record the label depends on (pipeline.big_join.compute_label_horizons); only the split reads it.
+LABEL_SIDE_COLUMNS: tuple[str, ...] = (LABEL_COLUMN, LABEL_HORIZON_COLUMN)
 
 EXPECTED_GOLD_COLUMNS: tuple[str, ...] = (
     "patient_id",
@@ -26,6 +31,7 @@ EXPECTED_GOLD_COLUMNS: tuple[str, ...] = (
     "index_start",
     "index_stop",
     "is_readmitted",
+    "label_horizon",
     "admission_reason_code",
     "admission_reason_description",
     "payer_ownership",
@@ -45,7 +51,7 @@ EXPECTED_GOLD_COLUMNS: tuple[str, ...] = (
     "ethnicity",
     "marital_status",
 )
-# The gold schema (23 columns), restated here rather than imported from
+# The gold schema (24 columns), restated here rather than imported from
 # readmission_risk.pipeline.big_join.GOLD_TABLE_COLUMNS: big_join imports pyspark at module level,
 # and readmission_risk.models will be imported by slice 4's scorer and possibly the dashboard,
 # neither of which should need Spark. tests/models/test_data.py asserts the two stay in sync.
@@ -79,6 +85,10 @@ EXCLUDED_COLUMN_REASONS: dict[str, str] = {
     "encounter_id": "identifier",
     "index_start": "split key; raw calendar time cannot extrapolate across a chronological split",
     "index_stop": "split key / censoring-buffer key; only length_of_stay_days derived from it is a feature",
+    "label_horizon": (
+        "label-side, post-index information (latest record the label depends on); used only by the split's "
+        "label-horizon purge -- never a feature"
+    ),
     "admission_reason_description": "redundant with admission_reason_code",
     "provider_specialty": "constant (GENERAL PRACTICE on every row) -- zero information",
     "organization_utilization": (
@@ -99,6 +109,7 @@ _REQUIRED_NONNULL_COLUMNS: tuple[str, ...] = (
     "index_start",
     "index_stop",
     "is_readmitted",
+    "label_horizon",
     *_GOLD_COUNT_COLUMNS,
     "age_at_index_years",
 )
@@ -148,6 +159,11 @@ def load_gold_table_with_metadata(gold_dir: Path) -> tuple[pd.DataFrame, GoldMet
 
     missing = [c for c in EXPECTED_GOLD_COLUMNS if c not in df.columns]
     unexpected = [c for c in df.columns if c not in EXPECTED_GOLD_COLUMNS]
+    if missing == [LABEL_HORIZON_COLUMN] and not unexpected:
+        raise ValueError(
+            f"Gold table in {gold_dir} has no {LABEL_HORIZON_COLUMN!r} column: it was built before the label-horizon "
+            "purge (2026-10-09); rebuild it with scripts/run_big_join.py into a fresh --output-dir"
+        )
     if missing or unexpected:
         raise ValueError(
             f"Gold table schema mismatch in {gold_dir}: missing columns {missing}, "
@@ -183,7 +199,7 @@ def load_gold_table_with_metadata(gold_dir: Path) -> tuple[pd.DataFrame, GoldMet
     df["age_at_index_years"] = df["age_at_index_years"].astype("float64")
     for col in _STRING_COLUMNS:
         df[col] = df[col].astype(object)
-    for col in ("index_start", "index_stop"):
+    for col in ("index_start", "index_stop", LABEL_HORIZON_COLUMN):
         df[col] = pd.to_datetime(df[col], utc=True)
 
     n_dup = int(df["encounter_id"].duplicated().sum())
@@ -198,7 +214,7 @@ def load_gold_table_with_metadata(gold_dir: Path) -> tuple[pd.DataFrame, GoldMet
 
 
 def gold_fingerprint(df: pd.DataFrame) -> str:
-    """Pure. `df` = the frame returned by load_gold_table. sha256 over ALL 23 columns of the frame
+    """Pure. `df` = the frame returned by load_gold_table. sha256 over ALL 24 columns of the frame
     sorted by encounter_id, rendered through an explicit CSV recipe. This is the only implementation
     of the recipe: train_and_evaluate's `gold_fingerprint` tag and the tests both call it.
     (lineterminator is explicit because pandas otherwise uses os.linesep. A null and an empty string

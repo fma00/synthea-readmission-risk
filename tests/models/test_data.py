@@ -17,6 +17,8 @@ from readmission_risk.models.data import (
     EXPECTED_GOLD_COLUMNS,
     FEATURE_COLUMNS,
     LABEL_COLUMN,
+    LABEL_HORIZON_COLUMN,
+    LABEL_SIDE_COLUMNS,
     gold_fingerprint,
     load_gold_table,
     load_gold_table_with_metadata,
@@ -36,7 +38,7 @@ def _write_parts(
     out = df.copy()
     if spark_like:
         # what Spark actually emits: naive timestamps, int32 counts/label
-        for col in ("index_start", "index_stop"):
+        for col in ("index_start", "index_stop", LABEL_HORIZON_COLUMN):
             out[col] = out[col].dt.tz_convert("UTC").dt.tz_localize(None)
         for col in COUNT_FEATURES[:-1]:
             out[col] = out[col].astype("int32")
@@ -57,7 +59,13 @@ def test_every_gold_column_is_classified_exactly_once():
     assert gold_features | excluded | label == set(EXPECTED_GOLD_COLUMNS)
     assert not (gold_features & excluded) and not (gold_features & label) and not (excluded & label)
     assert len(FEATURE_COLUMNS) == 16
-    assert len(EXPECTED_GOLD_COLUMNS) == 23
+    assert len(EXPECTED_GOLD_COLUMNS) == 24
+
+
+def test_label_side_columns_are_excluded_from_the_features():
+    # ties the scorer's strip list (LABEL_SIDE_COLUMNS) to the feature classification
+    assert LABEL_SIDE_COLUMNS[0] == LABEL_COLUMN
+    assert set(LABEL_SIDE_COLUMNS) - {LABEL_COLUMN} <= set(EXCLUDED_COLUMN_REASONS)
 
 
 def test_expected_gold_columns_match_big_join():
@@ -82,7 +90,7 @@ def test_load_gold_table_reads_spark_style_directory(tmp_path, spark_like):
         assert loaded[col].dtype == np.int64
     assert loaded["age_at_index_years"].dtype == np.float64
     assert loaded[LABEL_COLUMN].dtype == np.int8
-    for col in ("index_start", "index_stop"):
+    for col in ("index_start", "index_stop", LABEL_HORIZON_COLUMN):
         assert isinstance(loaded[col].dtype, pd.DatetimeTZDtype) and str(loaded[col].dt.tz) == "UTC"
     keys = list(zip(loaded["index_start"], loaded["encounter_id"], strict=True))
     assert keys == sorted(keys)
@@ -120,6 +128,9 @@ def _mutate(df: pd.DataFrame, how: str) -> pd.DataFrame:
         df["prior_encounter_count"] = df["prior_encounter_count"].astype("float64")
         df.loc[df.index[0], "prior_encounter_count"] = np.nan
         return df
+    if how == "null_label_horizon":
+        df.loc[df.index[0], LABEL_HORIZON_COLUMN] = pd.NaT
+        return df
     if how == "label_two":
         df.loc[df.index[0], LABEL_COLUMN] = 2
         return df
@@ -140,6 +151,7 @@ def _mutate(df: pd.DataFrame, how: str) -> pd.DataFrame:
         ("zero_rows", "zero rows"),
         ("null_label", LABEL_COLUMN),
         ("null_count_feature", "prior_encounter_count"),
+        ("null_label_horizon", LABEL_HORIZON_COLUMN),
         ("label_two", LABEL_COLUMN),
         ("duplicate_encounter", "encounter_id"),
         ("stop_before_start", "index_stop"),
@@ -202,6 +214,11 @@ def test_gold_fingerprint():
     changed.loc[changed.index[0], "prior_encounter_count"] += 1
     assert gold_fingerprint(changed) != base
 
+    # ... and so must a label_horizon change (it decides which rows the split's label-horizon purge drops)
+    later = df.copy()
+    later.loc[later.index[0], LABEL_HORIZON_COLUMN] += pd.Timedelta(days=1)
+    assert gold_fingerprint(later) != base
+
 
 # --- slice 2b: the _gold_metadata.json sidecar ---
 
@@ -209,6 +226,12 @@ def test_gold_fingerprint():
 def test_load_gold_table_refuses_a_directory_without_metadata(tmp_path):
     _write_parts(make_gold_frame(40, seed=3), tmp_path / "gold", metadata=False)
     with pytest.raises(FileNotFoundError, match="rebuild"):
+        load_gold_table(tmp_path / "gold")
+
+
+def test_load_gold_table_refuses_a_table_without_label_horizon(tmp_path):
+    _write_parts(make_gold_frame(40, seed=3).drop(columns=[LABEL_HORIZON_COLUMN]), tmp_path / "gold")
+    with pytest.raises(ValueError, match=r"no 'label_horizon' column.*rebuild it with scripts/run_big_join\.py"):
         load_gold_table(tmp_path / "gold")
 
 

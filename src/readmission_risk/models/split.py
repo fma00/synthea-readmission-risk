@@ -1,5 +1,6 @@
-"""Chronological, patient-disjoint train/test split with a censoring buffer and a label-window purge.
-See notes/eg-new-feature/model-training-2026-09-19.md (Interfaces > split.py) for the design.
+"""Chronological, patient-disjoint train/test split with a censoring buffer, a label-window purge and a label-horizon purge.
+See notes/eg-new-feature/model-training-2026-09-19.md (Interfaces > split.py) for the design, and
+notes/eg-new-feature/label-horizon-purge-2026-10-09.md for step 4b.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 
-from .data import GROUP_COLUMN, LABEL_COLUMN
+from .data import GROUP_COLUMN, LABEL_COLUMN, LABEL_HORIZON_COLUMN
 
 _CENSOR_BUFFER_WARN_FRACTION = 0.01
 
@@ -68,21 +69,23 @@ def chronological_group_split(
        index_stop + W == T exactly could have its label set by a readmission starting AT T -- a test-period
        event -- and must be purged too. Only rows with index_stop + W < T have every readmission START that
        can set their label before the test period begins.
-
-       Since slice 2b two more things depend on records that are NOT covered by this purge: (a) the label
-       depends on the content of a readmitting stay (whether it carries a planned procedure) and on the stop
-       times of the patient's earlier stays (the continuation rule); (b) whether a row is in the gold table at
-       all depends on the stop times of overlapping stays (the terminal rule). Either can be dated at or after
-       T when a stay straddles it, and this split does NOT enforce that. It is a property that is measured, not
-       guaranteed, on the real data, and a different population or test_start_date can break it: see the
-       slice-2b design doc, Data handling and the "tightening slice 3's purge" follow-up.
+    4b. label-horizon purge -- drop the remaining pre rows with label_horizon >= T. Since slice 2b the label also
+       depends on the readmitting stay's content (its planned-procedure records, which can be dated after the stay
+       ends), on its end time and on earlier stays' end times (the continuation rule), none of which step 4 covers.
+       label_horizon (computed by the Big Join) is the latest timestamp of any of those records, never earlier
+       than index_stop + W, so this step subsumes step 4 and guarantees that every train row's LABEL is
+       determined by records dated before T. It does NOT make the train set's composition independent of
+       post-T data: this step itself reads post-T dates, and index-row membership (the terminal rule and the
+       planned-index exclusion) is not covered (a named follow-up). The purge is outcome-dependent (it drops
+       rows with a long or late-classified in-window stay), so a UserWarning reports every non-zero count.
     5. patient disjointness -- drop pre rows whose patient_id appears in ANY test row. The remainder
        is train.
 
-    Raises ValueError for input/config problems (evaluated before the post-conditions, which would be
-    undefined on empty frames), RuntimeError if an algorithm invariant is violated. Emits a
-    UserWarning if the censoring buffer drops more than 1% of rows (a too-early reference_date is the
-    likely cause: on real data the buffer removes only the handful of censored positives slice 2 kept).
+    Raises ValueError for input/config problems, including a missing, tz-naive or null label_horizon or one before
+    index_stop + W (evaluated before the post-conditions, which would be undefined on empty frames), RuntimeError if
+    an algorithm invariant is violated. Emits a UserWarning if the censoring buffer drops more than 1% of rows (a
+    too-early reference_date is the likely cause: on real data the buffer removes only the handful of censored
+    positives slice 2 kept), and another whenever the label-horizon purge drops any row.
     """
     if readmission_window_days < 1:
         raise ValueError(f"readmission_window_days must be >= 1; got {readmission_window_days}")
@@ -101,8 +104,23 @@ def chronological_group_split(
         raise ValueError("chronological_group_split received a zero-row frame")
     _require_tz_aware(df, "index_start")
     _require_tz_aware(df, "index_stop")
+    if LABEL_HORIZON_COLUMN not in df.columns:
+        raise ValueError(
+            f"chronological_group_split input has no {LABEL_HORIZON_COLUMN!r} column (gold tables built before "
+            "2026-10-09 lack it; rebuild with scripts/run_big_join.py)"
+        )
+    _require_tz_aware(df, LABEL_HORIZON_COLUMN)
+    n_null_horizon = int(df[LABEL_HORIZON_COLUMN].isna().sum())
+    if n_null_horizon:
+        raise ValueError(f"{LABEL_HORIZON_COLUMN} has {n_null_horizon} null value(s)")
 
     window = pd.Timedelta(days=readmission_window_days)
+    n_early_horizon = int((df[LABEL_HORIZON_COLUMN] < df["index_stop"] + window).sum())
+    if n_early_horizon:
+        raise ValueError(
+            f"{n_early_horizon} row(s) have {LABEL_HORIZON_COLUMN} before index_stop + {readmission_window_days} days: "
+            "the gold table was built with a different readmission window, or is malformed"
+        )
     test_start = _utc_midnight(test_start_date)
     reference_end = _utc_midnight(reference_date + timedelta(days=1))
     n_input = len(df)
@@ -137,6 +155,18 @@ def chronological_group_split(
     n_dropped_label_window_purge = int((~label_known).sum())
     pre = pre.loc[label_known]
 
+    # Step 4b
+    horizon_known = pre[LABEL_HORIZON_COLUMN] < test_start
+    n_dropped_label_horizon_purge = int((~horizon_known).sum())
+    pre = pre.loc[horizon_known]
+    if n_dropped_label_horizon_purge:
+        warnings.warn(
+            f"The label-horizon purge dropped {n_dropped_label_horizon_purge} training row(s) whose label depends on a "
+            f"record dated on or after test_start_date ({test_start_date.isoformat()}); report this count with the results",
+            UserWarning,
+            stacklevel=2,
+        )
+
     # Step 5
     overlaps_test = pre[GROUP_COLUMN].isin(set(test[GROUP_COLUMN]))
     n_dropped_patient_overlap = int(overlaps_test.sum())
@@ -157,6 +187,8 @@ def chronological_group_split(
         raise RuntimeError("split invariant violated: train/test are not chronologically separated at test_start")
     if not ((train["index_stop"] + window) < test_start).all():
         raise RuntimeError("split invariant violated: a train row's label window reaches into the test period")
+    if not (train[LABEL_HORIZON_COLUMN] < test_start).all():
+        raise RuntimeError("split invariant violated: a train row's label horizon reaches into the test period")
 
     n_train_positive = int(train[LABEL_COLUMN].sum())
     n_test_positive = int(test[LABEL_COLUMN].sum())
@@ -166,6 +198,7 @@ def chronological_group_split(
         "n_test": len(test),
         "n_dropped_before_train_start": int(n_dropped_before_train_start),
         "n_dropped_label_window_purge": int(n_dropped_label_window_purge),
+        "n_dropped_label_horizon_purge": int(n_dropped_label_horizon_purge),
         "n_dropped_patient_overlap": int(n_dropped_patient_overlap),
         "n_train": len(train),
         "n_train_positive": n_train_positive,

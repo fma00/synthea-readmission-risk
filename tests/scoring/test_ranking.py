@@ -7,7 +7,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from readmission_risk.models.data import LABEL_COLUMN
+from readmission_risk.models.data import (
+    LABEL_COLUMN,
+    LABEL_HORIZON_COLUMN,
+    LABEL_SIDE_COLUMNS,
+)
 from readmission_risk.scoring.ranking import (
     PREDICTION_COLUMNS,
     PREDICTION_DTYPES,
@@ -88,6 +92,12 @@ def test_scorer_refuses_a_frame_carrying_the_label():
         score_batch(_StubModel(np.full(len(gold), 0.1)), gold)
     with pytest.raises(ValueError, match=LABEL_COLUMN):
         build_predictions(gold.assign(index_stop=gold["index_stop"]), np.full(len(gold), 0.1), **PREDICTION_KWARGS)
+    # ... and a frame whose label is gone but whose label_horizon (post-index, label-side information) is still there
+    horizon_only = gold.drop(columns=[LABEL_COLUMN])
+    with pytest.raises(ValueError, match=LABEL_HORIZON_COLUMN):
+        score_batch(_StubModel(np.full(len(gold), 0.1)), horizon_only)
+    with pytest.raises(ValueError, match=LABEL_HORIZON_COLUMN):
+        build_predictions(horizon_only, np.full(len(gold), 0.1), **PREDICTION_KWARGS)
     # build_predictions also refuses a scores array of the wrong length (longer and shorter) and an empty batch
     batch = make_batch(_IDS)
     for wrong in ([0.1] * 4, [0.1] * 6):
@@ -115,7 +125,7 @@ class _StubModel:
 
 
 def _label_free(n=12):
-    return make_gold_frame(n, seed=0).drop(columns=[LABEL_COLUMN])
+    return make_gold_frame(n, seed=0).drop(columns=list(LABEL_SIDE_COLUMNS))
 
 
 def test_score_batch_never_fits_and_returns_the_positive_column():
@@ -153,7 +163,7 @@ def test_pure_functions_do_not_mutate_their_inputs():
     pd.testing.assert_frame_equal(predictions, predictions_before)
     pd.testing.assert_series_equal(labels, labels_before)
 
-    gold = make_gold_frame(20, seed=0).drop(columns=[LABEL_COLUMN])
+    gold = make_gold_frame(20, seed=0).drop(columns=list(LABEL_SIDE_COLUMNS))
     gold_before = copy.deepcopy(gold)
     score_batch(_StubModel(np.full(len(gold), 0.1)), gold)
     pd.testing.assert_frame_equal(gold, gold_before)
