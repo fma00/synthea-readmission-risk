@@ -8,7 +8,7 @@
    <cc:Work>
     <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage"/>
     <dc:title>Reliability, test window (development set)</dc:title>
-    <dc:description>Reliability diagram. Source: MLflow experiment readmission-risk-2b, runs logistic_regression=2bb281f6ab4e47c588eea078cc712201, xgboost_calibrated=681107e057f84c7f9fea53883b913542; 1539 test rows, 41 positives; 10 quantile bins; 95% Wilson intervals with rows treated as independent (indicative only); development-set quality, not a virgin holdout.</dc:description>
+    <dc:description>Reliability diagram. Source: MLflow experiment readmission-risk-v1, runs logistic_regression=fe9633ca42384ea5aeaba83e13d65701, xgboost_calibrated=abe9c605509b49dda4d8ba0aef511a60; 1539 test rows, 41 positives; 10 quantile bins; 95% Wilson intervals with rows treated as independent (indicative only); development-set quality, not a virgin holdout.</dc:description>
     <dc:format>image/svg+xml</dc:format>
     <dc:creator>
      <cc:Agent>

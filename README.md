@@ -93,7 +93,7 @@ Patient ids are synthetic and shortened to eight characters. The table is genera
 - Synthetic data, not clinical evidence — see [About the data](#about-the-data).
 - Weak, small-sample result: 41 test positives and wide intervals — [details](docs/results.md).
 - Not a virgin holdout: design choices were made while looking at the test window — [details](docs/results.md).
-- A thin leakage margin of about 6 days between the label window and the test start — [details](docs/results.md).
+- The label/test leakage margin is enforced: training rows whose label depends on a record dated on or after the test start are purged (0 rows on this data; the closest record is about 6.9 days before it) — [details](docs/results.md).
 - The label is still reason-concentrated (one admission reason dominates the test positives) — [details](docs/results.md).
 - The scorer is a demo over held-out rows, not as-of scoring of new discharges — [details](docs/scoring.md).
 - Local only: no cloud deployment yet — see the [Roadmap](#roadmap).

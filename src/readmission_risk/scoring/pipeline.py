@@ -35,7 +35,7 @@ class ScoringConfig:
     run_date: str  # "YYYYMMDD"
     output_dir: Path = Path("data/predictions")
     tracking_dir: Path = Path("mlflow")
-    experiment_name: str = "readmission-risk"  # the trainer's default; the real 2b runs need "readmission-risk-2b"
+    experiment_name: str = "readmission-risk"  # the trainer's default; the real runs need "readmission-risk-v1"
     model_name: str | None = None  # None and run_id None -> DEFAULT_MODEL
     run_id: str | None = None  # when given, experiment_name is ignored
     top_n: int = DEFAULT_TOP_N

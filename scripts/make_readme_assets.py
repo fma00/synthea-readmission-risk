@@ -25,7 +25,7 @@ app = typer.Typer(add_completion=False, rich_markup_mode=None, pretty_exceptions
     "from the two models' finished MLflow runs, and the 5-row sample Top-N table from one predictions partition."
 )
 def main(
-    experiment_name: Annotated[str, typer.Option(help="MLflow experiment holding the two runs (the real runs: readmission-risk-2b).")],
+    experiment_name: Annotated[str, typer.Option(help="MLflow experiment holding the two runs (the real runs: readmission-risk-v1).")],
     predictions: Annotated[Path, typer.Option(help="A predictions.parquet written by scripts/score_discharges.py.")],
     tracking_dir: Annotated[Path, typer.Option(help="Directory holding the MLflow store (mlflow.db).")] = Path("mlflow"),
     out_dir: Annotated[Path, typer.Option(help="Where the SVGs and sample_topn.md go (previews go in <out-dir>/preview).")] = Path("docs/img"),

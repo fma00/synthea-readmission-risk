@@ -43,7 +43,7 @@ def main(
     output_dir: Annotated[Path, typer.Option(help="Root of the prediction partitions.")] = Path("data/predictions"),
     tracking_dir: Annotated[Path, typer.Option(help="Directory holding the MLflow store (mlflow.db).")] = Path("mlflow"),
     experiment_name: Annotated[
-        str, typer.Option(help="MLflow experiment holding the runs (ignored with --run-id); the real 2b runs are in readmission-risk-2b.")
+        str, typer.Option(help="MLflow experiment holding the runs (ignored with --run-id); the real runs are in readmission-risk-v1.")
     ] = "readmission-risk",
     model: Annotated[
         str | None,

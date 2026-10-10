@@ -771,3 +771,23 @@ The Big Join was rebuilt from `data/raw/full_run` with the phase-A code into a *
   - The latest in-window stay record over train rows is 2022-12-25T01:59:59Z (margin ≈ 6.9 days).
 
 R1/R2 (in place) and R6–R9 remain phase B.
+
+### Phase B results (2026-10-10, Python 3.14.7)
+
+- **R1/R2.** `data/gold/full_run_2b` was moved to `data/gold/full_run_2b_pre_horizon` (kept for the owner to delete) and
+  rebuilt in place: 9,284 rows, 151 positives, 13,565 inpatient stays (planned 3,320; continuation 682; non-terminal 682).
+- **R3–R5.** Identical to the phase-A scratchpad check:
+  - the metadata is byte-identical and the 23 prior columns are identical; 13 rows have a horizon past the deadline;
+  - the Spark column equals the oracle on all 9,284 rows, and the 40-cutoff set identity holds, with the only purge at
+    2025-07-01 (1 row);
+  - at 2023-01-01 the purge drops 0 rows and every split count is unchanged.
+- **R6.** Retrained into `readmission-risk-v1`: LR `fe9633ca42384ea5aeaba83e13d65701`, XGBoost
+  `abe9c605509b49dda4d8ba0aef511a60`. The expected "only 41 positive rows" warning fired.
+- **R7.**
+  - (a) `split_assignment.csv` is byte-identical to the `readmission-risk-2b` runs for both models.
+  - (b) All logged metrics are identical (30 LR, 45 XGBoost), and the max |Δ predict_proba| on the test rows is **0.0**
+    for both models, so the Python 3.12 → 3.14 retrain changed nothing.
+- **R8.** Run date 20250630 rescored with the v1 LR run, which passes every scorer guard including guard 14. `rank`,
+  `encounter_id` and `risk_score` are identical to the old file; only `model_run_id` and `gold_fingerprint` differ.
+- **R9.** The README assets were regenerated. Only the `<dc:description>` line changed in the two SVGs (new experiment
+  and run ids); `sample_topn.md` is byte-identical.
