@@ -26,10 +26,11 @@ macOS only: XGBoost needs the OpenMP runtime — `brew install libomp`. A JDK 17
 
 ```sh
 ruff check .
+zizmor --offline .
 pytest
 ```
 
-This is the fast path to confirm the codebase is sound — no external downloads and no generated data (it does need a JDK on `PATH` for the PySpark tests). It's what CI runs on every push.
+This is the fast path to confirm the codebase is sound — no generated data, and no external downloads beyond what the dependency install already fetched (it does need a JDK on `PATH` for the PySpark tests). It's what CI runs on every push to `main` and on every pull request. `zizmor` audits the GitHub Actions workflows. `zizmor --offline .` (the command above) never touches the network and skips the online audits CI runs, which query the GitHub API (known-vulnerable actions, and a check that each pin's `# vX.Y.Z` comment matches its SHA); `GH_TOKEN=$(gh auth token) zizmor .` reproduces CI's audit exactly. A plain `zizmor .` goes online whenever `GH_TOKEN`, `GITHUB_TOKEN` or `ZIZMOR_GITHUB_TOKEN` is set.
 
 ## Running the actual pipeline (Slice 1: Synthea generation)
 

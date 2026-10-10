@@ -2,18 +2,25 @@ name: CI
 
 on:
   push:
+    # Pushes to other branches get CI through their pull request; running on both would double every PR's jobs.
+    branches: [main]
   pull_request:
 
-# Least privilege: this workflow only checks out code, lints and tests.
+# Least privilege: this workflow only checks out code, lints, tests and audits workflows.
 permissions:
   contents: read
 
-# A push to a branch that also has an open PR would otherwise run this workflow twice; and a new push
-# makes an in-flight run for the same ref obsolete.
+# Pull requests: one group per PR, so a new push cancels the superseded run. Pushes to main: one group per commit, so
+# no run on main is ever cancelled, not even while pending (GitHub keeps one pending run per group and cancels the
+# older one). github.ref differs between push and pull_request, so the old ref-only group never merged a push with
+# its PR; the push filter above is what prevents the double run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: true
 
+# Every `uses:` is pinned to a full commit SHA with a `# vX.Y.Z` comment: a tag can be moved by whoever controls the
+# action's repository, a commit cannot. Dependabot (.github/dependabot.yml) proposes updates as PRs; the
+# audit-workflows job fails on an unpinned action, a comment that does not match its SHA, or a known-vulnerable action.
 jobs:
   lint-and-test:
     # 3.14 is the development interpreter (.python-version); 3.12 is the Python of the Dataproc Serverless runtime the
@@ -26,14 +33,17 @@ jobs:
     # turn CI red unannounced in a project whose dependencies are hash-pinned. Move it deliberately, after a green run.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          # CI never pushes; do not leave the job token in .git/config for later steps.
+          persist-credentials: false
 
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961  # v5.7.0
         with:
           distribution: "temurin"
           java-version: "17"
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
           python-version: ${{ matrix.python-version }}
           # The install pulls pyspark, mlflow and xgboost (hundreds of MB); cache the wheels, keyed on the
@@ -55,3 +65,29 @@ jobs:
 
       - name: Test
         run: pytest
+
+  # Runs zizmor ONLINE: some audits (known-vulnerable-actions, impostor-commit, and in practice ref-version-mismatch)
+  # need the GitHub API. So this job can turn red without a commit, e.g. when an advisory is published for a pinned
+  # action; that is the point (bump the action). It is a separate job so its result never hides lint/test results.
+  audit-workflows:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          # The floating minor, like lint-and-test: an exact .python-version patch may not be on the runner yet.
+          python-version: "3.14"
+          cache: "pip"
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install zizmor
+        run: pip install --require-hashes -r requirements-dev.txt
+
+      - name: Audit workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # --gh-token makes a missing token an error; without it zizmor would silently skip the online audits.
+        run: zizmor --gh-token "$GH_TOKEN" .

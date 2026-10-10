@@ -14,7 +14,9 @@ What is checked, and why:
   bullet's figures without touching docs/results.md is not detected.)
 - Structure and honesty: the README has the agreed sections in order, labels planned work as planned, and avoids a
   short list of overclaiming phrases.
-- CI: the workflow requests read-only token permissions.
+- CI: the workflow requests read-only token permissions, runs pushes only on main, pins every action to a commit SHA
+  with a version comment, does not persist checkout credentials and runs zizmor online with a failing exit code;
+  Dependabot covers github-actions only (weekly, cooldown, grouped).
 - .gitignore: git itself is asked (`git check-ignore`) whether local-state and credential-style paths are ignored BY THE
   REPO's .gitignore (not by a local exclude file), whether shared files stay visible, and that no tracked file matches
   an ignore rule. These rules are the only thing standing between a `git add .` and a public credentials leak.
@@ -451,6 +453,120 @@ def test_ci_workflow_requests_read_only_token_permissions():
     at = lines.index("permissions:")
     assert lines[at + 1] == "  contents: read"
     assert at < next(i for i, line in enumerate(lines) if line.startswith("jobs:"))
+
+
+# Supply-chain baseline (notes/eg-new-feature/ci-supply-chain-hardening-2026-10-10.md). Line-based, like the test above:
+# zizmor audits the workflows semantically in CI; these checks pin the decisions so that a change to them is deliberate.
+WORKFLOWS_DIR = ROOT / ".github" / "workflows"
+CI_WORKFLOW = WORKFLOWS_DIR / "ci.yml"
+DEPENDABOT = ROOT / ".github" / "dependabot.yml"
+# The config files zizmor 1.30.1 discovers; any of them could disable audits or ignore findings.
+ZIZMOR_CONFIGS = [ROOT / ".github" / "zizmor.yml", ROOT / ".github" / "zizmor.yaml", ROOT / "zizmor.yml", ROOT / "zizmor.yaml"]
+_USES_RE = re.compile(r"^(\s*)(?:- )?uses:\s*(.+?)\s*$")
+_PINNED_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}  # v\d+\.\d+\.\d+")
+EXPECTED_DEPENDABOT = [
+    "version: 2",
+    "updates:",
+    '  - package-ecosystem: "github-actions"',
+    '    directory: "/"',
+    "    schedule:",
+    '      interval: "weekly"',
+    "    cooldown:",
+    "      default-days: 7",
+    "    groups:",
+    "      github-actions-minor-and-patch:",
+    '        patterns: ["*"]',
+    '        update-types: ["minor", "patch"]',
+]
+
+
+def _workflow_files() -> list[Path]:
+    return sorted([*WORKFLOWS_DIR.glob("*.yml"), *WORKFLOWS_DIR.glob("*.yaml")])
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _block_end(lines: list[str], start: int, column: int) -> int:
+    """Index of the first non-blank line after `start` indented at most `column` (or len(lines))."""
+    return next((i for i in range(start + 1, len(lines)) if lines[i].strip() and _indent(lines[i]) <= column), len(lines))
+
+
+def _step_block(lines: list[str], at: int) -> list[str]:
+    """The lines of the step containing the `uses:` line at index `at`, whichever key the step starts with."""
+    key_column = _indent(lines[at]) + (2 if lines[at].lstrip().startswith("- ") else 0)
+    start = next(i for i in range(at, -1, -1) if re.match(r"^\s*- ", lines[i]) and _indent(lines[i]) < key_column)
+    return lines[start : _block_end(lines, start, _indent(lines[start]))]
+
+
+def _without_comments(lines: list[str]) -> list[str]:
+    return [line.rstrip() for line in lines if line.strip() and not line.lstrip().startswith("#")]
+
+
+def test_every_workflow_action_is_pinned_to_a_commit_sha_with_a_version_comment():
+    found, offenders = 0, []
+    for path in _workflow_files():
+        for lineno, line in enumerate(_read(path).split("\n"), start=1):
+            m = _USES_RE.match(line)
+            if not m or m.group(2).startswith("./"):
+                continue
+            found += 1
+            if not _PINNED_RE.fullmatch(m.group(2)):
+                offenders.append(f"{path.relative_to(ROOT)}:{lineno}: {line.strip()}")
+    assert found, "no `uses:` line found in .github/workflows/"
+    assert offenders == [], "pin every action to a full commit SHA followed by `  # vX.Y.Z`:\n" + "\n".join(offenders)
+
+
+def test_checkout_steps_do_not_persist_credentials():
+    found = 0
+    for path in _workflow_files():
+        lines = _read(path).split("\n")
+        for at, line in enumerate(lines):
+            m = _USES_RE.match(line)
+            if not m or not m.group(2).startswith("actions/checkout@"):
+                continue
+            found += 1
+            step = [s.strip() for s in _step_block(lines, at)]
+            assert "persist-credentials: false" in step, f"{path.relative_to(ROOT)}:{at + 1}: checkout persists credentials"
+    assert found, "no checkout step found in .github/workflows/"
+
+
+def test_dependabot_config_is_github_actions_only_weekly_with_cooldown_and_grouping():
+    assert DEPENDABOT.is_file(), ".github/dependabot.yml is missing"
+    assert _without_comments(_read(DEPENDABOT).split("\n")) == EXPECTED_DEPENDABOT
+
+
+def test_ci_audits_workflows_with_zizmor_online_and_blocking():
+    text = _read(CI_WORKFLOW)
+    lines = text.split("\n")
+    stripped = [line.strip() for line in lines]
+    assert stripped.count('run: zizmor --gh-token "$GH_TOKEN" .') == 1
+    assert "GH_TOKEN: ${{ github.token }}" in stripped
+    assert "continue-on-error" not in text
+    assert [line for line in lines if re.match(r"^\s*(?:- )?if:", line)] == [], "an `if:` could switch the audit off"
+    start = lines.index("  audit-workflows:")
+    job = [line.strip() for line in lines[start : _block_end(lines, start, 2)]]
+    assert "run: pip install --require-hashes -r requirements-dev.txt" in job
+    for path in _workflow_files():
+        assert "zizmor: ignore" not in _read(path), f"{path.relative_to(ROOT)} suppresses a zizmor finding inline"
+    assert [p.name for p in ZIZMOR_CONFIGS if p.exists()] == [], "a zizmor config file could disable audits"
+    assert "zizmor" in [line.strip() for line in _read(ROOT / "requirements-dev.in").split("\n")]
+    lock = _read(ROOT / "requirements-dev.txt").split("\n")
+    at = next((i for i, line in enumerate(lock) if line.startswith("zizmor==")), None)
+    assert at is not None, "zizmor is not pinned in requirements-dev.txt"
+    assert lock[at + 1].strip().startswith("--hash=sha256:")
+
+
+def test_ci_push_trigger_runs_only_on_main():
+    lines = _read(CI_WORKFLOW).split("\n")
+    start = lines.index("on:")
+    assert _without_comments(lines[start : _block_end(lines, start, 0)]) == [
+        "on:",
+        "  push:",
+        "    branches: [main]",
+        "  pull_request:",
+    ]
 
 
 # ---------------------------------------------------------------- .gitignore

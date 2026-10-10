@@ -153,7 +153,8 @@ tests/                          # pytest suite (tests/test_docs.py covers these 
 docs/                           # setup, results and scoring write-ups
 notes/                          # design docs, PRDs, measurements (dated records)
 .claude/commands/               # the /eg-* design-review workflow
-.github/workflows/              # CI: ruff + pytest
+.github/workflows/              # CI: ruff + pytest, plus a zizmor workflow audit; actions pinned to commit SHAs
+.github/dependabot.yml          # weekly update PRs for the pinned actions
 ```
 
 ## License and acknowledgements

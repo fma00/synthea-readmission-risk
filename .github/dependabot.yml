@@ -1,0 +1,16 @@
+# Proposes updates to the SHA-pinned actions in .github/workflows/ as pull requests; nothing updates without a merge.
+# github-actions only: Python dependencies are hash-locked with pip-compile (see docs/setup.md), which Dependabot's pip
+# updater would fight. The cooldown skips releases younger than 7 days, so a compromised release is usually pulled
+# before it is ever proposed. Majors are not in the group and arrive as one PR each.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions-minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
