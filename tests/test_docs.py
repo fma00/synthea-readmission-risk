@@ -40,6 +40,7 @@ CHECKED_FILES = [README, *DOCS]
 
 EXPECTED_H2 = [
     "Status",
+    "60-second tour",
     "Architecture",
     "Results so far",
     "Example output",
@@ -624,3 +625,24 @@ def test_readme_sample_table_is_verbatim_from_the_generated_file():
 def test_sample_table_rank_one_agrees_with_the_scoring_docs():
     top_row = next(line for line in _read(ROOT / "docs" / "img" / "sample_topn.md").splitlines() if line.startswith("| 1 |"))
     assert top_row.split("|")[2].strip() in _read(ROOT / "docs" / "scoring.md")
+
+
+def test_readme_refusal_example_matches_what_the_code_raises():
+    """The README quotes a real refusal; regenerate the message from the code (same counts and window) and compare, so a
+    reworded error cannot leave a stale copy in the README."""
+    import datetime as dt
+
+    import pandas as pd
+
+    from readmission_risk.scoring.selection import select_held_out_window
+
+    line = next(line for line in _read(README).splitlines() if line.startswith("ERROR: window ["))
+    counts = re.search(r"contains (\d+) in-sample .* and (\d+) discharge", line)
+    assert counts is not None, line
+    n_train, n_dropped = int(counts.group(1)), int(counts.group(2))
+    stops = pd.date_range("2022-06-10", periods=n_train + n_dropped, freq="h", tz="UTC")
+    gold = pd.DataFrame({"encounter_id": [f"e{i}" for i in range(len(stops))], "index_stop": stops})
+    partition_of = pd.Series(["train"] * n_train, index=[f"e{i}" for i in range(n_train)])
+    with pytest.raises(ValueError) as info:
+        select_held_out_window(gold, partition_of, run_date=dt.date(2022, 6, 30), window_days=30)
+    assert line == f"ERROR: {info.value}"
