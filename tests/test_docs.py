@@ -16,7 +16,7 @@ What is checked, and why:
   short list of overclaiming phrases.
 - CI: the workflow requests read-only token permissions, runs pushes only on main, pins every action to a commit SHA
   with a version comment, does not persist checkout credentials and runs zizmor online with a failing exit code;
-  Dependabot covers github-actions only (weekly, cooldown, grouped).
+  Dependabot covers github-actions (weekly, cooldown, grouped) and the Terraform provider in infra/ (weekly, cooldown).
 - .gitignore: git itself is asked (`git check-ignore`) whether local-state and credential-style paths are ignored BY THE
   REPO's .gitignore (not by a local exclude file), whether shared files stay visible, and that no tracked file matches
   an ignore rule. These rules are the only thing standing between a `git add .` and a public credentials leak.
@@ -84,8 +84,21 @@ MUST_BE_IGNORED = [
     ".env.local",
     ".venv-dataproc/bin/python",
     ".venv-lock312/bin/python",
+    "infra/terraform.tfvars",
+    "infra/prod.auto.tfvars",
+    "infra/terraform.tfvars.json",
+    "infra/terraform.tfstate",
+    "infra/terraform.tfstate.backup",
+    "infra/.terraform/providers/x",
+    "infra/bootstrap_override.tf",
+    "infra/override.tf",
+    "infra/override.tf.json",
 ]
 MUST_NOT_BE_IGNORED = [
+    "infra/.terraform.lock.hcl",
+    "infra/terraform.tfvars.example",
+    "infra/storage.tf",
+    "infra/bootstrap.sh",
     "deploy/champion.json",
     "src/readmission_risk/bundles/manifest.py",
     "tests/bundles/test_store.py",
@@ -488,6 +501,12 @@ EXPECTED_DEPENDABOT = [
     "      github-actions-minor-and-patch:",
     '        patterns: ["*"]',
     '        update-types: ["minor", "patch"]',
+    '  - package-ecosystem: "terraform"',
+    '    directory: "/infra"',
+    "    schedule:",
+    '      interval: "weekly"',
+    "    cooldown:",
+    "      default-days: 7",
 ]
 
 
@@ -543,7 +562,7 @@ def test_checkout_steps_do_not_persist_credentials():
     assert found, "no checkout step found in .github/workflows/"
 
 
-def test_dependabot_config_is_github_actions_only_weekly_with_cooldown_and_grouping():
+def test_dependabot_config_is_weekly_with_cooldown_for_actions_and_terraform():
     assert DEPENDABOT.is_file(), ".github/dependabot.yml is missing"
     assert _without_comments(_read(DEPENDABOT).split("\n")) == EXPECTED_DEPENDABOT
 

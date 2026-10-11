@@ -6,7 +6,7 @@ on:
     branches: [main]
   pull_request:
 
-# Least privilege: this workflow only checks out code, lints, tests and audits workflows.
+# Least privilege: this workflow only checks out code, lints, tests, audits workflows and validates the Terraform config.
 permissions:
   contents: read
 
@@ -123,3 +123,34 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         # --gh-token makes a missing token an error; without it zizmor would silently skip the online audits.
         run: zizmor --gh-token "$GH_TOKEN" .
+
+  # Static checks of infra/ only: fmt, init WITHOUT a backend (no GCS, no credentials) and validate. Never plan or
+  # apply: Terraform is applied from the laptop (PRD FR8). The CLI comes from HashiCorp's release zip, checked against
+  # a pinned SHA256 (from terraform_<version>_SHA256SUMS) rather than through a setup action; bump both env values
+  # together with infra/versions.tf's required_version (tests/test_infra.py keeps them in agreement).
+  terraform-validate:
+    runs-on: ubuntu-24.04
+    env:
+      TERRAFORM_VERSION: "1.16.5"
+      TERRAFORM_SHA256: "2bc2fcfff033265c9e02ca0351f01794eb122f62a9b2a49a3294b9e49eaab5e4"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Terraform
+        run: |
+          curl -fsSLo "$RUNNER_TEMP/terraform.zip" "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+          echo "${TERRAFORM_SHA256}  $RUNNER_TEMP/terraform.zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/terraform.zip" -d "$RUNNER_TEMP/terraform-bin"
+          echo "$RUNNER_TEMP/terraform-bin" >> "$GITHUB_PATH"
+
+      - name: Check formatting
+        run: terraform -chdir=infra fmt -check -recursive -diff
+
+      - name: Initialise without a backend
+        # -lockfile=readonly: the providers must match infra/.terraform.lock.hcl's hashes, and the file is never updated.
+        run: terraform -chdir=infra init -backend=false -input=false -lockfile=readonly
+
+      - name: Validate
+        run: terraform -chdir=infra validate

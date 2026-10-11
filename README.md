@@ -176,11 +176,12 @@ deploy/champion.json            # the live model bundle (promotion = a PR editin
 scripts/                        # command-line entry points
 tests/                          # pytest suite (tests/test_docs.py covers these docs)
 docs/                           # setup, results and scoring write-ups
+infra/                          # Terraform: buckets, service accounts, WIF, budgets; applied from a laptop, validated in CI
 notes/                          # design docs, PRDs, measurements (dated records)
 .claude/commands/               # the /eg-* design-review workflow
-.github/workflows/              # CI: ruff + pytest, a Dataproc-runtime pipeline job, and a zizmor workflow audit; actions pinned to commit SHAs
-.github/dependabot.yml          # weekly update PRs for the pinned actions
-Makefile                        # common tasks: setup, lint, test, train, export, score, runtime env, lockfiles
+.github/workflows/              # CI: ruff + pytest, a Dataproc-runtime pipeline job, a zizmor workflow audit and Terraform validation; a dispatch-only keyless GCP smoke job; actions pinned to commit SHAs
+.github/dependabot.yml          # weekly update PRs for the pinned actions and the Terraform provider
+Makefile                        # common tasks: setup, lint, test, train, export, score, runtime env, lockfiles, tf-validate
 .pre-commit-config.yaml         # ruff + zizmor git hooks (make hooks)
 requirements-dataproc-3.0.txt   # hash-locked Dataproc runtime 3.0 mirror (CI's pipeline job only)
 ```

@@ -171,7 +171,7 @@ Each requirement is testable; slice designs refine them.
     - a **CHF 20/month** alert-only budget, at 50/90/100% of actual spend and 100% of forecast. The billing account's currency is CHF, so this PRD's "$" amounts are approximate equivalents;
     - us-central1 quotas read: `CPUS` 200, `CPUS_ALL_REGIONS` 32, `DISKS_TOTAL_GB` 4,096. No increase was requested, because the job fits the defaults when capped (FR14).
 
-    **The CHF 5/month early-warning budget (OQ4) → slice 3:** Terraform creates it next to importing the CHF 20 budget.
+    **The CHF 5/month early-warning budget (OQ4) → slice 3:** Terraform creates it next to importing the CHF 20 budget. **Done in slice 3 (2026-10-11, `notes/eg-new-feature/v2-slice3-terraform-wif-2026-10-11.md`):** `google_billing_budget.early_warning` (CHF 5, 100% actual and forecast) created; the CHF 20 budget imported with no change.
   - a `Makefile` (targets: setup, lint, test, train, score, tf-validate) and **pre-commit hooks** running ruff and zizmor (OQ6). **→ slice 1** (not done in the closeout). **Done in slice 1 (`notes/eg-new-feature/v2-slice1-tooling-and-dataproc-runtime-leg-2026-10-11.md`);** tf-validate → slice 3; a `hooks` target was added.
 - **FR0.2** Supply-chain baseline (G17), merged before any workflow holds `id-token: write`. **Done in `51f1d62`** (design: `notes/eg-new-feature/ci-supply-chain-hardening-2026-10-10.md`), except the two rules that only bite once `id-token` workflows exist (they become review checks for slices 3–7):
   - every `uses:` pinned to a full SHA with a `# vX.Y.Z` comment;
@@ -219,7 +219,7 @@ Each requirement is testable; slice designs refine them.
 
   Bucket Lock is explicitly rejected because it is irreversible and blocks teardown.
 
-  **Slice 2 (2026-10-11, `notes/eg-new-feature/v2-slice2-model-bundle-and-manifest-2026-10-11.md`):** local no-overwrite done (atomic temp-dir rename, idempotent identical re-export, any other existing entry refused, read-only files); the three GCS controls → slice 3.
+  **Slice 2 (2026-10-11, `notes/eg-new-feature/v2-slice2-model-bundle-and-manifest-2026-10-11.md`):** local no-overwrite done (atomic temp-dir rename, idempotent identical re-export, any other existing entry refused, read-only files); the three GCS controls → slice 3. **Slice 3 (2026-10-11, `notes/eg-new-feature/v2-slice3-terraform-wif-2026-10-11.md`):** the bucket and IAM controls are live: `bundle-writer` has `objectCreator` only on the versioned bundle bucket, uploads use `ifGenerationMatch=0` (through the JSON API: `gcloud storage cp` needs `objects.get`), and live check V5 measured a refused overwrite (412 with the precondition, 403 without; object unchanged). The scorer's read-only service account and the Python GCS writer → slice 4.
 
 **Infrastructure and identity (G4, G16, G17)**
 - **FR8** Terraform manages:
@@ -231,8 +231,8 @@ Each requirement is testable; slice designs refine them.
   - the budget alerts;
   - the dashboard service account's custom query quota.
 
-  It is applied from the laptop; CI runs only `terraform fmt -check` and `validate`. Plain resources are used, not the `gh-oidc` module (its defaults have no condition and map by name).
-- **FR9** The WIF provider's attribute condition uses numeric claims: `assertion.repository_id=='<id>' && assertion.repository_owner_id=='<id>' && assertion.ref=='refs/heads/main'`. If they turn out to be mappable, it also restricts `event_name` to `schedule`/`workflow_dispatch` (NHV). Each job impersonates its own least-privilege service account (scorer, monitor, Big Join submitter / Dataproc runtime, trainer). No service-account key exists anywhere in CI.
+  It is applied from the laptop; CI runs only `terraform fmt -check` and `validate`. Plain resources are used, not the `gh-oidc` module (its defaults have no condition and map by name). **Slice 3 (2026-10-11, `notes/eg-new-feature/v2-slice3-terraform-wif-2026-10-11.md`):** done and applied for the state bucket (bootstrap script), the raw/gold/bundle buckets (raw: 90-day lifecycle), two service accounts (`gha-smoke`, `bundle-writer`) with additive IAM, the WIF pool and provider, and both budgets; CI job `terraform-validate`; `make tf-validate`. BigQuery datasets and tables → slice 4; the dashboard SA and its query quota → slice 8.
+- **FR9** The WIF provider's attribute condition uses numeric claims: `assertion.repository_id=='<id>' && assertion.repository_owner_id=='<id>' && assertion.ref=='refs/heads/main'`. If they turn out to be mappable, it also restricts `event_name` to `schedule`/`workflow_dispatch` (NHV). Each job impersonates its own least-privilege service account (scorer, monitor, Big Join submitter / Dataproc runtime, trainer). No service-account key exists anywhere in CI. **Slice 3 (2026-10-11, `notes/eg-new-feature/v2-slice3-terraform-wif-2026-10-11.md`):** the condition is the conjunction of the numeric repository and owner ids, `ref == refs/heads/main` and `event_name in ['workflow_dispatch', 'schedule']` (both claims mappable per GitHub's and Google's docs); `gha-smoke` is bound to `smoke.yml`'s `workflow_ref` only; later service accounts arrive with their jobs. Live WIF proof (V-post) runs after v2 merges into `main`.
 
 **Scale-up (G10, G12, G15)**
 - **FR10** `prereg.yaml` is committed (and its commit hash recorded) **before** the 200k generation. It is shaped after Hofman et al.'s Phase A, and Phase B is appended after validation. It contains:
@@ -367,7 +367,7 @@ Proposed `/eg-new-feature` slices, refined there:
 - Once the closeout is done, work switches to the `v2` branch, and the then-current v2 material (the v2 brainstorm note and this PRD) is committed there. **Status 2026-10-10:** `v2` and `origin/v2` were fast-forwarded to `main` (`2242649`), and both notes are staged on `v2`.
 - CI for `v2` needs an open PR `v2 → main`, because push CI runs only on `main` since `51f1d62`.
 2. **Bundle + manifest** (FR4–FR7): guard mapping table; manifest fixtures replace `clone_run`; `forbid_model_loading` still applies; the scorer drops its mlflow import; `champion.json`. **Done 2026-10-11** (`notes/eg-new-feature/v2-slice2-model-bundle-and-manifest-2026-10-11.md`).
-3. **Terraform + WIF** (FR8–FR9): bootstrap script; `infra/` directory; one `workflow_dispatch` smoke job that only lists a bucket. Also: `terraform import` the existing CHF 20 budget and create the carried CHF 5 budget.
+3. **Terraform + WIF** (FR8–FR9): bootstrap script; `infra/` directory; one `workflow_dispatch` smoke job that only lists a bucket. Also: `terraform import` the existing CHF 20 budget and create the carried CHF 5 budget. **Done 2026-10-11** (`notes/eg-new-feature/v2-slice3-terraform-wif-2026-10-11.md`), except V-post: the first real WIF run of `smoke.yml`, after v2 merges.
 4. **Score to BigQuery** (FR17–FR18, part of FR20): a `bigquery_writer` injected into `score_run_date`; `scoring_runs`; `ASSERT` scripts; one manual run on 10k (end of the spine).
 5. **`gs://` Big Join + fingerprint + pilot** (FR10–FR13): `prereg.yaml` lands here, before generation.
 6. **200k + Dataproc + retrain + gate + frozen-v1** (FR14–FR16, plus the carried FR0.3 portable export).
@@ -392,11 +392,11 @@ Notes:
 - **NHV list (verify during the slices):**
   - Dataproc runtime 3.0 availability in us-central1;
   - whether Dataproc accepts direct-WIF principalSets (impersonation assumed);
-  - whether `event_name` / `workflow_ref` can be mapped in the WIF condition;
+  - whether `event_name` / `workflow_ref` can be mapped in the WIF condition; **Resolved on documentation (slice 3):** both are GitHub OIDC claims and Google allows mapping any claim; live proof at V-post.
   - connector 0.44.0 direct-write overwrite / DYNAMIC partition behaviour;
   - the Storage Write API free tier (reported 2 TiB/month);
   - batch load jobs being free;
-  - the GCS backend's native state locking;
+  - the GCS backend's native state locking; **Resolved (slice 3):** HashiCorp's docs say the gcs backend supports locking; observed ("Acquiring state lock") during the migration.
   - whether Python 3.14 is selectable on Community Cloud today;
   - whether uv enforces `--hash` on Community Cloud;
   - Dependabot updating SHA-pin version comments;
@@ -404,7 +404,7 @@ Notes:
   - badge behaviour after disable;
   - the 6-hour job limit;
   - the Dataproc runtime service-account role names;
-  - `storage.objectCreator` lacking overwrite.
+  - `storage.objectCreator` lacking overwrite. **Resolved live (slice 3, V5):** overwrite refused (412/403), object unchanged.
 
 ## Sources & references
 

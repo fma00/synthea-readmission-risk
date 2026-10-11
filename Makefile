@@ -19,6 +19,7 @@ TRAIN_ARGS       ?=
 SCORE_ARGS       ?=
 EXPORT_MODEL     ?= logistic_regression
 EXPORT_ARGS      ?=
+TERRAFORM        ?= terraform
 BIN := $(VENV)/bin
 
 # $(call check_python,<venv dir>,<major>,<minor>,<variable to override>)
@@ -34,7 +35,7 @@ define fresh_venv
 case "$(1)" in */*|*..*) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; .venv-*) ;; *) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; esac; rm -rf "$(1)" && $(2) -m venv "$(1)"
 endef
 
-.PHONY: help setup hooks lint test pre-commit train export score setup-runtime test-runtime lock-dev lock-runtime
+.PHONY: help setup hooks lint test pre-commit train export score setup-runtime test-runtime lock-dev lock-runtime tf-validate
 .DEFAULT_GOAL := help
 
 help: ## List the targets
@@ -103,3 +104,10 @@ lock-runtime: ## Recompile requirements-dataproc-3.0.txt under Python 3.12 (re-r
 	@$(LOCK_VENV)/bin/python -c 'import sys; print("pip-compile interpreter:", sys.version.split()[0], sys.executable)'
 	$(LOCK_VENV)/bin/pip install --require-hashes -r requirements-dev.txt
 	$(LOCK_VENV)/bin/pip-compile --upgrade --generate-hashes --output-file=requirements-dataproc-3.0.txt requirements-dataproc-3.0.in
+
+# Static checks only, like CI's terraform-validate job: no backend, no credentials, nothing applied. Locally, fmt
+# -recursive also covers the gitignored infra/terraform.tfvars, which CI never sees (run `terraform -chdir=infra fmt`).
+tf-validate: ## Check infra/ like CI's terraform-validate job: fmt -check, init without backend, validate
+	$(TERRAFORM) -chdir=infra fmt -check -recursive -diff
+	$(TERRAFORM) -chdir=infra init -backend=false -input=false -lockfile=readonly
+	$(TERRAFORM) -chdir=infra validate

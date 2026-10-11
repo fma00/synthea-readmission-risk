@@ -1,5 +1,5 @@
 """Bundles on local disk: <bundles-root>/<bundle_id>/{manifest.json, model.pkl, split_assignment.csv}. The one module
-that knows the storage layout (the same seam as scoring/store.write_partition), so v2 slice 3 adds GCS here. Bundles are
+that knows the storage layout (the same seam as scoring/store.write_partition), so v2 slice 4 adds GCS here. Bundles are
 never overwritten (FR7): written to a temp directory, renamed into place, made read-only. Standard library only. See
 notes/eg-new-feature/v2-slice2-model-bundle-and-manifest-2026-10-11.md (Interfaces > bundles/store.py).
 """
@@ -25,7 +25,7 @@ def local_bundle_path(bundle_uri: str) -> Path:
     if not bundle_uri:
         raise ValueError("empty bundle URI")
     if bundle_uri.startswith("gs://"):
-        raise ValueError(f"GCS bundle URIs arrive in v2 slice 3: {bundle_uri}")
+        raise ValueError(f"GCS bundle URIs arrive in v2 slice 4: {bundle_uri}")
     match = _SCHEME_RE.match(bundle_uri)
     if match:
         raise ValueError(f"unsupported bundle URI scheme {match.group(0)!r}: {bundle_uri}")
@@ -87,7 +87,7 @@ def write_bundle(files: Mapping[str, bytes], manifest: dict, bundles_root: Path)
     no-op (created=False); any other existing entry at that path is a ValueError -- bundles are never overwritten.
     Known limit, accepted for a single-user local store (design note, write_bundle): POSIX rename() silently replaces an
     EMPTY directory, so an empty bundles_root/<bundle_id>/ created by another process between the existence check and the
-    rename is replaced rather than refused (nothing is lost: it was empty). v2 slice 3's GCS writer closes this with
+    rename is replaced rather than refused (nothing is lost: it was empty). v2 slice 4's GCS writer closes this with
     ifGenerationMatch=0."""
     expected = _expected_bytes(files, manifest)
     bundle_id = manifest["bundle_id"]

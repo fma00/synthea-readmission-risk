@@ -1,0 +1,5 @@
+# Copy to terraform.tfvars (gitignored) and fill in. Run `terraform -chdir=infra fmt` after editing:
+# bootstrap.sh and `make tf-validate` refuse a terraform.tfvars that is not fmt-clean.
+billing_account    = "XXXXXX-XXXXXX-XXXXXX"
+existing_budget_id = "<id from gcloud billing budgets list>"
+operator_member    = "user:you@example.com"

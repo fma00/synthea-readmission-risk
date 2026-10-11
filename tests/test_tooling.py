@@ -24,13 +24,13 @@ PRE_COMMIT_CONFIG = ROOT / ".pre-commit-config.yaml"
 
 EXPECTED_TARGETS = {
     "help", "setup", "hooks", "lint", "test", "pre-commit", "train", "export", "score",
-    "setup-runtime", "test-runtime", "lock-dev", "lock-runtime",
+    "setup-runtime", "test-runtime", "lock-dev", "lock-runtime", "tf-validate",
 }
 # Every variable the Makefile reads, plus make's own propagation variables: a pytest started by `make test X=y` (or a
 # shell exporting VENV=...) must not change what these tests see.
 MAKEFILE_VARIABLES = ("PYTHON", "PYTHON312", "VENV", "RUNTIME_VENV", "LOCK_VENV", "GOLD_DIR", "REFERENCE_DATE",
                       "TEST_START_DATE", "EXPERIMENT", "RUN_DATE", "TRAIN_EXPERIMENT", "TRAIN_ARGS", "SCORE_ARGS",
-                      "EXPORT_MODEL", "EXPORT_ARGS")
+                      "EXPORT_MODEL", "EXPORT_ARGS", "TERRAFORM")
 SCRUBBED_ENV = ("MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "GNUMAKEFLAGS", "MAKEFILES", *MAKEFILE_VARIABLES)
 EXPECTED_PRE_COMMIT = [
     "repos:",
@@ -112,6 +112,16 @@ def test_make_score_passes_the_reference_defaults():
     ) in _dry_run("score")
     assert "--experiment-name" not in _dry_run("score")  # the scorer reads the champion bundle, not MLflow
     assert "--run-date 20240115 --show-observed-outcomes" in _dry_run("score", "RUN_DATE=20240115", "SCORE_ARGS=--show-observed-outcomes")
+
+
+@needs_make
+def test_make_tf_validate_runs_fmt_init_without_backend_and_validate():
+    # The same three commands as ci.yml's terraform-validate job; never a backend, plan or apply.
+    assert [line for line in _dry_run("tf-validate").split("\n") if line] == [
+        "terraform -chdir=infra fmt -check -recursive -diff",
+        "terraform -chdir=infra init -backend=false -input=false -lockfile=readonly",
+        "terraform -chdir=infra validate",
+    ]
 
 
 @needs_make
