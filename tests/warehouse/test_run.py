@@ -70,6 +70,15 @@ def _fast_resolution(monkeypatch):
     monkeypatch.setattr("readmission_risk.warehouse.staging.time.sleep", lambda s: None)
 
 
+@pytest.fixture(autouse=True)
+def _laptop_environment(monkeypatch):
+    """Hermetic trigger detection: the suite also runs inside GitHub Actions (CI sets GITHUB_ACTIONS=true and
+    GITHUB_EVENT_NAME=pull_request), where score_to_bigquery rightly records the Actions event. Tests start from a laptop
+    environment; test_actions_trigger_and_url sets the Actions variables itself."""
+    for key in ("GITHUB_ACTIONS", "GITHUB_EVENT_NAME", "GITHUB_SHA", "GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID"):
+        monkeypatch.delenv(key, raising=False)
+
+
 def test_succeeded_records_one_row_in_order(scoring_env):
     fake = scripted()
     result = score_to_bigquery(_request(scoring_env), client_factory=lambda: fake)
