@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -50,5 +51,6 @@ def test_directory_pointer_is_a_value_error(tmp_path):
 
 
 def test_committed_champion_json_is_valid():
-    champion = read_champion(_REPO / "deploy" / "champion.json")  # schema only: the bundle is gitignored (a private-bucket copy since slice 3; read from GCS in slice 4)
-    assert champion.bundle_uri.startswith("bundles/")
+    # schema only: the champion lives in the private bundle bucket since v2 slice 4 (no local path can reach main again)
+    champion = read_champion(_REPO / "deploy" / "champion.json")
+    assert re.fullmatch(r"gs://synthea-readmission-risk-bundles/[0-9a-f]{64}", champion.bundle_uri), champion.bundle_uri
