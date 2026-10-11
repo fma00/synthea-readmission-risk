@@ -1,6 +1,6 @@
 # v2 slice 4: score to BigQuery (FR17–FR18, part of FR20, the GCS bundle seam)
 
-**Status:** design, revision 8 (2026-10-11). Gate overridden by the owner after round 7 (see the revision log); implementation in progress. Branch: `v2-slice4-score-to-bigquery` off `v2` (at `eda740b`, PR #5 merged; CI on PR #4 green on all four jobs), merged into `v2` by PR (ruleset `require-pr-main-and-v2`, id 24876876).
+**Status:** implemented and applied 2026-10-11 (design revision 8; gate overridden by the owner after round 7, see the revision log; implementation, review and live outcomes in "Results"). Commits `68edbdd` (the slice) and `26a534b` (the champion repoint). Open: L-post after v2 merges. Branch: `v2-slice4-score-to-bigquery` off `v2` (at `eda740b`, PR #5 merged; CI on PR #4 green on all four jobs), merged into `v2` by PR (ruleset `require-pr-main-and-v2`, id 24876876).
 
 ## Why
 
@@ -839,6 +839,74 @@ Every gcloud/bq command runs with `export CLOUDSDK_CORE_PROJECT=synthea-readmiss
   - After 24 h, the billing report shows no BigQuery or Storage charge above zero beyond the free tier (F4).
 - **L10:** `scorer` holds exactly the designed bindings and no user-managed keys. The `serving` dataset ACL does not list `scorer`; the two serving tables' IAM lists it with `scorerTableWriter`; `scratch` lists it as editor. The negative checks ran in L0 step 6, on empty tables; L10 repeats only the create probe (`bq mk --table serving.l10_probe`, must be refused) now that the tables hold data.
 - **L-post** (after v2 merges, added to the V-post TODO): `gh workflow run score.yml --ref main -f run_date=20250630` → green, with a `scoring_runs` row carrying `trigger = workflow_dispatch` and the run URL.
+
+## Results
+
+Recorded under the redaction rule. Implementation 2026-10-11 on branch `v2-slice4-score-to-bigquery` (off `v2` at `eda740b`).
+
+**Design check.** Rounds 1-7, then an owner override:
+- Round 1 ran comprehension (passed), the critic and readiness. Rounds 2-7 ran the critic and readiness.
+- Readiness closed once, in round 5 (on r5), and reopened on text added later.
+- The critic's gap counts were 21, 10, 6, 5, 3, 5, 5. The three-revision cap was reached after round 4. The owner chose further rounds twice, then "fix all 10, then implement" after round 7 (r8).
+- Neither pass formally closed on r8.
+
+**Implementation deviations from r8 (all small, none changes a decision):**
+- The SQL scripts use `DECLARE c DEFAULT (SELECT AS STRUCT ...)`, with the struct type inferred, rather than spelling out `STRUCT<...>`.
+- `resolve_job`'s `sleep`/`monotonic` default to None and are resolved per call, so tests can patch the clock.
+- `google-cloud-storage` is pinned at **3.16.0**, not 3.17.0: 3.17.0 was 3 days old, and the design's 7-day rule applies.
+- Both fixed-id jobs (publish, record) pass `job_retry=None`. google-cloud-bigquery 3.46 warns that a `job_id` without it will become an error, which was seen live in L0.
+- BLE001 `noqa` sites: `run.py` (the run handler, the `drop_staging` catch, and the `_record` catch, which the job id resolves) and `staging.py` (`resolve_job`'s retry and `publish_landed`). `seeded_check`'s cleanup uses `contextlib.suppress`.
+- `seeded_check` creates copies with CTAS throughout; no copy jobs are used anywhere.
+
+**Pre-commit review.** 4 rounds. The stop condition tripped after rounds 2, 3 and 4; the owner chose "keep working" twice, then "accept".
+- **Fixed, round 1:** a transient GCS error behind a reader's mapped ValueError was recorded as `refused`; `_classify` now walks the cause chain.
+- **Fixed, round 1:** the gold listing is bounded (`max_results`).
+- **Fixed, round 2:** no ADC and a denied impersonation stay `refused`.
+- **Fixed, round 3:** a google-auth `RefreshError` is judged by its HTTP response body, because impersonated credentials never set `retryable`.
+- **Fixed, round 4:** 408 is transient (google-auth's `DEFAULT_RETRYABLE_STATUS_CODES`).
+- **Rebutted:** the champion repoint is a separate commit (D4); the reviewer accepted this.
+- The round-4 fix was not re-reviewed (owner's choice).
+
+**Tool gates.** `ruff check .` clean; `zizmor --offline .` no findings (9 suppressed below the default persona: 7 before, plus 2 pedantic notes on `score.yml`); `make tf-validate` valid; `pytest` **917 passed, 1 skipped** (was 767 + 1), after the round-4 fix and before the champion-test change; the champion test and docs tests (114) pass after the repoint.
+
+**Live checks** (as the `scorer` service account unless noted):
+- **L1:** `Plan: 15 to add, 0 to change, 0 to destroy` → `Apply complete! Resources: 15 added, 0 changed, 0 destroyed.` → "No changes". The first impersonation was refused for about 64 s (IAM propagation); the error was a `RefreshError` whose body held `{"error": {"code": 403, "status": "PERMISSION_DENIED"}}`, the exact shape `_refresh_error_is_permanent` parses.
+- **L0:** identity `scorer@…` confirmed. Results:
+  - **`scoring_runs.sql` on the empty table:** passed.
+  - **F8, a failing ASSERT:** `BadRequest`, structured message `Query error: PRED-01: the run date has no prediction rows at [40:1]`, which matches the placeholder `_ASSERT_MESSAGE_RE` unchanged.
+  - **F8, a malformed script:** `Syntax error: Expected "," but got keyword AS at [40:23]`, not taken as a verdict. Both messages are pinned in `tests/warehouse/test_data_tests.py`.
+  - **F3, the publish transaction as the scorer:** `DONE`, no error.
+  - **Negative checks on the empty tables:** every one refused with 403, naming the permission:
+    - create → `bigquery.tables.create` on the dataset;
+    - expiration → `bigquery.tables.update`;
+    - **load job into `scoring_runs` → `bigquery.tables.create` on the dataset** (the critic's reading confirmed: loads into `serving` are impossible under D6, so the DML design was required);
+    - delete → `bigquery.tables.delete`.
+- **L2 (operator):** 8 objects uploaded to `gs://synthea-readmission-risk-gold/full_run_2b/`; each object's md5 equals the local file's, and after a fresh download each sha256 equals the local file's.
+- **L2b:** the local reference, 42 rows; its Top-10 matches the README sample.
+- **L3:** as `bundle-writer`, re-exporting the v1 logistic-regression bundle to the bucket root gave exit 1, "already exists (at least model.pkl)" (412). **F5:** no GET on any object before the upload. One bucket-metadata `GET /storage/v1/b/<bucket>` was sent and refused (403) and was ignored by the client; nothing was read, and its origin was not traced (an observation, not a defect). The manifest's generation was unchanged.
+- **L3b:** a fresh export to `gs://…/l3-probe/` gave `created`; the objects were created model.pkl → split_assignment.csv → manifest.json, the manifest last by generation. The scorer validated and scored from that bundle, and its 42 predictions are identical, value for value, to L2b. Then `l3-probe/` was deleted with all versions.
+- **L4a:** `make score-bq RUN_DATE=20250630 SCORE_ARGS="--bundle gs://…/75a14…"` → `succeeded (published: yes; recorded: yes)`. The read-back has 42 rows, all 18 columns identical to L2b, one `scoring_run_id`, and `scratch` is empty.
+- **Commits:** `68edbdd` (the slice) and `26a534b` (the champion → `gs://`, same pin), on the owner's instruction.
+- **L4b:** `make score-bq RUN_DATE=20250630` with no `--bundle` → `succeeded`, `champion_sha256` = `b61388f0…`. The partition was replaced: still 42 rows, all under the new run id.
+- **L5:** scoring 20250731 (44 rows) left 20250630 unchanged: the row count, `BIT_XOR(FARM_FINGERPRINT(encounter_id))` and the run id are all equal before and after.
+- **L6:** 4 rows (L4a, L4b, L5 and the refused L7), all with `trigger = laptop`. L4a records commit `eda740b` with `git_dirty = true` (run before the commit) and no champion (`--bundle`); the later rows record `26a534b`, clean, champion `b61388f0`.
+- **L7:** `--run-date 20221215` → exit 1, `refused (published: no; recorded: yes)`. The refused row still carries the bundle and the window (`on_validated`).
+- **L8 (M5):** `make m5-check RUN_DATE=20250630` → both clean copies pass, and all 17 mutated copies fail with exactly their own ID ("M5 OK"); `scratch` is empty afterwards. This is PRD M5's recorded run.
+- **L9 (operator):**
+  - **F6:** `run_data_tests` with a 1 MiB cap is refused ("Query exceeded limit for bytes billed").
+  - **Bytes billed:** today's scorer jobs billed at most 20 MiB per job (the scripts) and about 755 MB in total, mostly M5's 19 CTAS copies; the load jobs billed nothing.
+  - **F4:** the billing report is still due, 24 h after the run.
+- **L10 (operator):** the live IAM matches the design:
+  - `scorer`: 0 user-managed keys;
+  - on the account: `serviceAccountTokenCreator` → `<OPERATOR>` and `workloadIdentityUser` → `score.yml@refs/heads/main`;
+  - `objectViewer` on the bundle and gold buckets;
+  - project `bigquery.jobUser`;
+  - **no entry in the `serving` ACL**, `WRITER` on `scratch`;
+  - `scorerTableWriter` on exactly the two serving tables.
+
+**Open:** L-post (the first dispatched `score.yml`, after v2 merges into `main`, together with slice 3's V-post) and the F4 billing check.
+
+**Follow-ups found during the live checks:** the bundle exporter's MLflow import contacts `config.mlflow-telemetry.io` (MLflow telemetry; `MLFLOW_DISABLE_TELEMETRY=true` silences it, so consider setting it in `make export` and `scripts/export_bundle.py`); the untraced bucket-metadata GET in L3.
 
 ## Teardown additions (docs/setup.md > Teardown checklist)
 
