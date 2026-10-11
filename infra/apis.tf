@@ -1,6 +1,7 @@
-# bootstrap.sh enables these with gcloud first: provider 8.5.0 reads each newly enabled service back through the Cloud
-# Resource Manager API, which is itself in this list and disabled on a new project, so enabling it in the same batch
-# would fail the first apply. Terraform then adopts them as already enabled.
+# bootstrap.sh enables the first six with gcloud first: provider 8.5.0 reads each newly enabled service back through the
+# Cloud Resource Manager API, which is itself in this list and disabled on a new project, so enabling it in the same
+# batch would fail the first apply. Terraform then adopts them as already enabled. Later additions (bigquery, v2 slice
+# 4) are enabled by Terraform itself: Cloud Resource Manager is on by then.
 locals {
   services = toset([
     "iam.googleapis.com",
@@ -9,6 +10,7 @@ locals {
     "cloudresourcemanager.googleapis.com",
     "storage.googleapis.com",
     "billingbudgets.googleapis.com",
+    "bigquery.googleapis.com",
   ])
 }
 

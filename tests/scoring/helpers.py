@@ -566,6 +566,7 @@ def _ic(case_id: str, key: str, build, forbidden: tuple[str, ...] = ()) -> Bundl
 
 INTEGRITY_CASES: list[BundleCase] = [
     _ic("I1-not-a-directory", "bundle not found: ", _not_a_directory),
+    # a MALFORMED gs:// URI (bucket name "b" is too short): refused by check_bundle_uri before any client call
     _ic("I1-gs-uri", "bundle not found: ", lambda env, tmp: ({"bundle_uri": "gs://b/x"}, ())),
     _ic("I1-other-scheme", "bundle not found: ", lambda env, tmp: ({"bundle_uri": "s3://b/x"}, ())),
     _ic("I1-no-manifest", "manifest: ", _integrity(drop_manifest=True)),

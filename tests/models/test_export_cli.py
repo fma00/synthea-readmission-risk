@@ -88,3 +88,36 @@ def test_export_cli_warns_when_the_scorer_would_refuse_the_run(cli, scoring_env,
     assert "WARNING: run status is FAILED" in result.stderr and "do not promote it" in result.stderr
     finished = CliRunner().invoke(cli.app, [*args, "--run-id", scoring_env.lr_run_id])
     assert "run status" not in finished.stderr
+
+
+def test_export_cli_prints_a_gs_uri_unchanged(cli, scoring_env, monkeypatch):
+    """v2 slice 4: a gs:// --bundles-dir reaches export_bundle as a string and its URI is printed as is, with no
+    'absolute, machine-specific path' warning."""
+    from types import SimpleNamespace
+
+    seen = []
+    uri = "gs://synthea-readmission-risk-bundles/" + "a" * 64
+
+    def fake_export(tracking_dir, run_id, root):
+        seen.append(root)
+        return SimpleNamespace(
+            bundle_id="a" * 64, bundle_uri=uri, created=True, manifest_sha256="b" * 64,
+            run_status="FINISHED", run_lifecycle_stage="active",
+        )  # fmt: skip
+
+    monkeypatch.setattr(cli, "export_bundle", fake_export)
+    result = CliRunner().invoke(
+        cli.app,
+        ["--tracking-dir", str(scoring_env.tracking_dir), "--bundles-dir", "gs://synthea-readmission-risk-bundles",
+         "--run-id", scoring_env.lr_run_id],
+    )  # fmt: skip
+    assert result.exit_code == 0, result.stderr
+    assert seen == ["gs://synthea-readmission-risk-bundles"]
+    assert _lines(result.stdout)["bundle_uri"] == uri and "WARNING" not in result.stderr
+    assert read_champion_text(result.stdout)["bundle_uri"] == uri
+
+
+def read_champion_text(stdout: str) -> dict:
+    import json
+
+    return json.loads(stdout.split("champion.json for this bundle:\n", 1)[1])

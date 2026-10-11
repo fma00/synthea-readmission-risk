@@ -10,7 +10,10 @@ notes/eg-new-feature/v2-slice3-terraform-wif-2026-10-11.md, Verification):
 - bundle-writer can only create objects; IAM is additive only; no service-account key exists anywhere;
 - bucket settings, lifecycle and prevent_destroy are as designed;
 - id-token: write appears only at job level in dispatch/schedule workflows, and CI never plans or applies;
-- the Terraform CLI, provider and lock-file versions agree.
+- the Terraform CLI, provider and lock-file versions agree;
+- (v2 slice 4) the scorer has exactly its designed grants, is bound to score.yml on main, and cannot create or drop
+  serving tables; the BigQuery tables are partitioned, filter-required and deletion-protected, and read their schemas
+  from the package; every resource waits for the API set.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 INFRA = ROOT / "infra"
 WORKFLOWS = ROOT / ".github" / "workflows"
 SMOKE = WORKFLOWS / "smoke.yml"
+SCORE = WORKFLOWS / "score.yml"
 CI = WORKFLOWS / "ci.yml"
 _RESOURCE_RE = re.compile(r'^resource "(\w+)" "(\w+)" \{\n(.*?)^\}', flags=re.MULTILINE | re.DOTALL)
 
@@ -68,6 +72,14 @@ def _variable_default(name: str) -> str:
 
 def _iam_members() -> list[dict[str, str]]:
     return [_args(body) | {"_type": t, "_name": n} for t, n, body in _resources(_all_tf()) if t.endswith("_iam_member")]
+
+
+def expected_gold_uri() -> str:
+    """The gold table the scheduled scorer reads: the gold bucket's name plus the 10k table's prefix (tests/test_tooling.py
+    compares the Makefile's GOLD_URI default with it)."""
+    bucket = re.search(r'^  name\s*=\s*"([^"]+)"', _resource("google_storage_bucket", "gold"), flags=re.MULTILINE)
+    assert bucket
+    return f"gs://{bucket.group(1)}/full_run_2b"
 
 
 def _indent(line: str) -> int:
@@ -177,7 +189,7 @@ def test_bundle_writer_is_create_only():
 def test_iam_is_additive_only():
     types = {t for t, _, _ in _resources(_all_tf())}
     assert [t for t in types if t.endswith(("_iam_policy", "_iam_binding"))] == []
-    assert len(_iam_members()) == 4
+    assert len(_iam_members()) == 12
 
 
 def test_no_service_account_keys_in_infra_or_workflows():
@@ -306,3 +318,111 @@ def test_terraform_versions_agree():
     # Platform coverage (linux_amd64 for CI, darwin_arm64 for the laptop) is enforced by CI's -lockfile=readonly init and
     # the recipe in docs/setup.md; h1: values are opaque, so only their number is checked here.
     assert len(re.findall(r'"h1:', lock)) >= 2
+
+
+# ---------------------------------------------------------------- scorer and BigQuery (v2 slice 4)
+
+SCORER = '"serviceAccount:${google_service_account.scorer.email}"'
+
+
+def test_scorer_grants_are_exactly():
+    grants = sorted(
+        (m["_type"], m["role"], m.get("bucket") or m.get("table_id") or m.get("dataset_id") or m.get("project"))
+        for m in _iam_members()
+        if m.get("member") == SCORER
+    )
+    assert grants == sorted([
+        ("google_storage_bucket_iam_member", '"roles/storage.objectViewer"', "google_storage_bucket.bundles.name"),
+        ("google_storage_bucket_iam_member", '"roles/storage.objectViewer"', "google_storage_bucket.gold.name"),
+        ("google_bigquery_table_iam_member", "google_project_iam_custom_role.scorer_table_writer.id",
+         "google_bigquery_table.predictions.table_id"),
+        ("google_bigquery_table_iam_member", "google_project_iam_custom_role.scorer_table_writer.id",
+         "google_bigquery_table.scoring_runs.table_id"),
+        ("google_bigquery_dataset_iam_member", '"roles/bigquery.dataEditor"', "google_bigquery_dataset.scratch.dataset_id"),
+        ("google_project_iam_member", '"roles/bigquery.jobUser"', "var.project_id"),
+    ])  # fmt: skip
+    on_account = sorted(
+        (m["role"], m["member"]) for m in _iam_members() if m.get("service_account_id") == "google_service_account.scorer.name"
+    )
+    assert on_account == [
+        ('"roles/iam.serviceAccountTokenCreator"', "var.operator_member"),
+        ('"roles/iam.workloadIdentityUser"', "local.score_principal_set"),
+    ]
+    # nothing on the serving dataset itself (no dataset-level grant: D6)
+    assert [m for m in _iam_members() if "serving" in m.get("dataset_id", "")] == []
+
+
+def test_custom_role_is_exactly_get_getdata_updatedata():
+    role = _collapse(_resource("google_project_iam_custom_role", "scorer_table_writer"))
+    permissions = re.search(r"permissions = \[ (.*?),? \]", role)
+    assert permissions is not None
+    assert [p.strip().strip('"') for p in permissions.group(1).split(",")] == [
+        "bigquery.tables.get",
+        "bigquery.tables.getData",
+        "bigquery.tables.updateData",
+    ]
+
+
+def test_scorer_sa_binding_is_keyed_to_the_score_workflow_on_main():
+    iam = _collapse(_tf("iam.tf"))
+    assert 'score_workflow_ref = "${var.github_repository}/.github/workflows/score.yml@refs/heads/main"' in iam
+    assert (
+        'score_principal_set = "principalSet://iam.googleapis.com/${local.pool_name}/attribute.workflow_ref/'
+        '${local.score_workflow_ref}"'
+    ) in iam
+    assert SCORE.is_file()
+
+
+def test_score_workflow_matches_the_terraform_values():
+    score, smoke = _read(SCORE), _read(SMOKE)
+    provider = re.search(r"workload_identity_provider: (\S+)\n", smoke)
+    account_id = re.search(r'account_id\s*=\s*"([^"]+)"', _resource("google_service_account", "scorer"))
+    assert provider and account_id
+    assert f"workload_identity_provider: {provider.group(1)}\n" in score
+    assert f"service_account: {account_id.group(1)}@{_variable_default('project_id')}.iam.gserviceaccount.com\n" in score
+    assert f"--gold-dir {expected_gold_uri()} " in score
+
+
+def test_score_workflow_is_dispatch_only_and_input_reaches_shell_only_via_env():
+    text = _read(SCORE)
+    lines = text.split("\n")
+    assert _triggers(lines) == {"workflow_dispatch"} and "permissions: {}" in lines
+    job_permissions = [i for i, line in enumerate(lines) if line == "    permissions:"]
+    granted = {line.strip() for line in _block(lines, job_permissions[0])[1:] if line.strip()}
+    assert granted == {"contents: read", "id-token: write"}
+    for i, line in enumerate(lines):
+        if "${{" in line:
+            assert line.strip() == "RUN_DATE: ${{ inputs.run_date }}", f"score.yml:{i + 1}: expression outside env"
+    assert '--run-date "$RUN_DATE"' in text
+    assert "cache:" not in text  # no pip cache in a job that holds cloud credentials
+
+
+def test_bigquery_tables_partitioned_require_filter_and_deletion_protected():
+    for name, field in (("predictions", "as_of_date"), ("scoring_runs", "started_at")):
+        body = _collapse(_resource("google_bigquery_table", name))
+        assert f'time_partitioning {{ type = "DAY" field = "{field}" }}' in body, name
+        assert "require_partition_filter = true" in body and "deletion_protection = true" in body, name
+        assert f'schema = file("${{path.module}}/../src/readmission_risk/warehouse/schemas/{name}.json")' in body, name
+        assert (ROOT / "src" / "readmission_risk" / "warehouse" / "schemas" / f"{name}.json").is_file()
+    assert 'location = var.region' in _collapse(_resource("google_bigquery_dataset", "serving"))
+    scratch = _collapse(_resource("google_bigquery_dataset", "scratch"))
+    assert "default_table_expiration_ms = 86400000" in scratch
+
+
+def test_predictions_table_description_is_demo_notice():
+    from readmission_risk.scoring.constants import DEMO_NOTICE
+
+    body = _resource("google_bigquery_table", "predictions")
+    heredoc = re.search(r"chomp\(<<-EOT\n(.*?)\n\s*EOT\n", body, flags=re.DOTALL)
+    assert heredoc is not None and heredoc.group(1).strip() == DEMO_NOTICE
+
+
+def test_every_resource_depends_on_enabled_apis():
+    for rtype, name, body in _resources(_all_tf()):
+        if (rtype, name) == ("google_project_service", "enabled"):
+            continue
+        assert "depends_on = [google_project_service.enabled]" in _collapse(body), f"{rtype}.{name}"
+
+
+def test_bigquery_api_is_enabled():
+    assert '"bigquery.googleapis.com",' in _tf("apis.tf")

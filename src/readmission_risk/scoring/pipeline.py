@@ -7,6 +7,7 @@ notes/eg-new-feature/v2-slice2-model-bundle-and-manifest-2026-10-11.md (Interfac
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -45,7 +46,7 @@ class ScoringConfig:
 @dataclass(frozen=True, eq=False)  # holds DataFrames/Series: no generated __eq__/__hash__
 class ScoringResult:
     predictions: pd.DataFrame  # exactly what was handed to the writer
-    partition_path: Path  # what the writer returned
+    partition_path: Path | str  # what the writer returned (a bigquery:// string from the BigQuery staging writer)
     bundle: ModelBundle
     window_start: pd.Timestamp
     window_end: pd.Timestamp
@@ -70,9 +71,17 @@ def _validate_config(config: ScoringConfig) -> date:
     return run_date
 
 
-def score_run_date(config: ScoringConfig, *, loader=load_bundle_model, writer=write_partition) -> ScoringResult:
+def score_run_date(
+    config: ScoringConfig,
+    *,
+    loader=load_bundle_model,
+    writer=write_partition,
+    on_validated: Callable[[ModelBundle, int], None] | None = None,
+) -> ScoringResult:
     """`loader` and `writer` are injection points: the BigQuery swap replaces `writer`; tests replace both to prove that
-    nothing is loaded or written until every guard has passed."""
+    nothing is loaded or written until every guard has passed. `on_validated(bundle, window_days)` is called exactly once,
+    right after the bundle has passed every guard and before the completeness guard, so a caller can record which bundle
+    a later refusal concerned (v2 slice 4's scoring_runs)."""
     # 1. config
     run_date = _validate_config(config)
 
@@ -97,6 +106,9 @@ def score_run_date(config: ScoringConfig, *, loader=load_bundle_model, writer=wr
             expected_manifest_sha256=champion.sha256,
             champion_path=champion_path,
         )
+
+    if on_validated is not None:
+        on_validated(bundle, window_days)
 
     # 5. the held-out batch (the completeness guard; may refuse)
     observed_until = observation_horizon(reference_date, metadata.readmission_window_days)

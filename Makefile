@@ -20,6 +20,8 @@ SCORE_ARGS       ?=
 EXPORT_MODEL     ?= logistic_regression
 EXPORT_ARGS      ?=
 TERRAFORM        ?= terraform
+GOLD_URI         ?= gs://synthea-readmission-risk-gold/full_run_2b
+SCORER_SA        ?= scorer@synthea-readmission-risk.iam.gserviceaccount.com
 BIN := $(VENV)/bin
 
 # $(call check_python,<venv dir>,<major>,<minor>,<variable to override>)
@@ -35,11 +37,11 @@ define fresh_venv
 case "$(1)" in */*|*..*) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; .venv-*) ;; *) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; esac; rm -rf "$(1)" && $(2) -m venv "$(1)"
 endef
 
-.PHONY: help setup hooks lint test pre-commit train export score setup-runtime test-runtime lock-dev lock-runtime tf-validate
+.PHONY: help setup hooks lint test pre-commit train export score score-bq m5-check setup-runtime test-runtime lock-dev lock-runtime tf-validate
 .DEFAULT_GOAL := help
 
 help: ## List the targets
-	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
+	@grep -E '^[a-z0-9-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
 
 setup: ## Create .venv (Python 3.14) and install the three hash-locked dependency sets (docs/setup.md)
 	test -d $(VENV) || $(PYTHON) -m venv $(VENV)
@@ -74,6 +76,12 @@ export: ## Export the EXPORT_MODEL run of EXPERIMENT as a model bundle under bun
 
 score: ## Score the Top-N triage list for RUN_DATE with the champion bundle (deploy/champion.json); extra flags via SCORE_ARGS
 	$(BIN)/python scripts/score_discharges.py --gold-dir $(GOLD_DIR) --run-date $(RUN_DATE) $(SCORE_ARGS)
+
+score-bq: ## Score RUN_DATE into BigQuery as the scorer SA (laptop; needs ADC); extra flags via SCORE_ARGS
+	$(BIN)/python scripts/score_to_bigquery.py --gold-dir $(GOLD_URI) --run-date $(RUN_DATE) --impersonate-service-account $(SCORER_SA) $(SCORE_ARGS)
+
+m5-check: ## Prove every BigQuery data test fires on a seeded bad row (M5), as the scorer SA
+	$(BIN)/python scripts/seeded_data_test_check.py --run-date $(RUN_DATE) --impersonate-service-account $(SCORER_SA)
 
 setup-runtime: ## Recreate .venv-dataproc: Python 3.12 + the Dataproc runtime 3.0 mirror (requirements-dataproc-3.0.txt)
 	@$(call fresh_venv,$(RUNTIME_VENV),$(PYTHON312),RUNTIME_VENV)

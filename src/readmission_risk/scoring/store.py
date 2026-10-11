@@ -49,7 +49,7 @@ def partition_dir(output_dir: Path, run_date: date) -> Path:
     return Path(output_dir) / f"run_date={run_date:%Y%m%d}"
 
 
-def _validate_predictions(predictions: pd.DataFrame, run_date: date) -> None:
+def validate_predictions(predictions: pd.DataFrame, run_date: date) -> None:
     """Every check that can fail is made BEFORE the filesystem is touched."""
     if list(predictions.columns) != list(PREDICTION_COLUMNS):
         raise ValueError(
@@ -78,6 +78,17 @@ def _validate_predictions(predictions: pd.DataFrame, run_date: date) -> None:
                 raise ValueError(f"column {column!r} has {n_null} null value(s) but is non-nullable")
 
 
+def predictions_arrow_table(predictions: pd.DataFrame, run_date: date) -> pa.Table:
+    """validate_predictions, then the frame as a PREDICTION_SCHEMA Arrow table. Shared by write_partition and the BigQuery
+    staging writer, so both refuse exactly the same frames before touching any storage."""
+    validate_predictions(predictions, run_date)
+    try:
+        return pa.Table.from_pandas(predictions, schema=PREDICTION_SCHEMA, preserve_index=False)
+    except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as exc:
+        # ArrowTypeError is a TypeError and would otherwise escape the CLI's "ERROR:" path
+        raise ValueError(f"predictions cannot be converted to PREDICTION_SCHEMA: {exc}") from exc
+
+
 def write_partition(predictions: pd.DataFrame, output_dir: Path, run_date: date) -> Path:
     """Validates, then replaces <output_dir>/run_date=YYYYMMDD/predictions.parquet as a unit: the file is written to a
     uniquely named dot-prefixed temp file in the same directory and os.replace()d onto the final name (atomic), and the
@@ -88,12 +99,7 @@ def write_partition(predictions: pd.DataFrame, output_dir: Path, run_date: date)
     produced it. Raises ValueError (naming the column) if `predictions` is not exactly the PREDICTION_COLUMNS frame that
     ranking.build_predictions returns (columns, dtypes, non-nullability, rank == 1..n, as_of_date == run_date); nothing is
     created on disk in that case. Returns the final path."""
-    _validate_predictions(predictions, run_date)
-    try:
-        table = pa.Table.from_pandas(predictions, schema=PREDICTION_SCHEMA, preserve_index=False)
-    except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError) as exc:
-        # ArrowTypeError is a TypeError and would otherwise escape the CLI's "ERROR:" path
-        raise ValueError(f"predictions cannot be converted to PREDICTION_SCHEMA: {exc}") from exc
+    table = predictions_arrow_table(predictions, run_date)
     directory = partition_dir(output_dir, run_date)
     directory.mkdir(parents=True, exist_ok=True)
     final = directory / PARTITION_FILENAME

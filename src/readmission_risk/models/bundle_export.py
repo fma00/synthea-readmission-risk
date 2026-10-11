@@ -125,7 +125,7 @@ def _download_run_artifact(client: MlflowClient, run_id: str, path: str, tmp: st
         raise ValueError(f"export: cannot read artifact {path!r} of MLflow run {run_id}: {exc}") from exc
 
 
-def export_bundle(tracking_dir: Path, run_id: str, bundles_root: Path) -> ExportResult:
+def export_bundle(tracking_dir: Path, run_id: str, bundles_root: Path | str) -> ExportResult:
     _require_store(tracking_dir)
     original_uri = mlflow.get_tracking_uri()
     mlflow.set_tracking_uri(mlflow_tracking_uri(tracking_dir))

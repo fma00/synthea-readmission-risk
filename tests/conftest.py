@@ -25,3 +25,18 @@ def scoring_env(tmp_path_factory):
     mlflow.set_tracking_uri(original_uri)
     yield env
     mlflow.set_tracking_uri(original_uri)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_gcp(request, monkeypatch):
+    """Tests never reach Google Cloud (v2 slice 4): the credential and client factories raise unless a test replaces them
+    with a fake. A test marked real_gcp_module (only tests/test_gcp.py) keeps the real functions and fakes google.auth
+    itself. Patched by dotted string, so this file imports no google package (CI's Dataproc-runtime job has none)."""
+    if request.node.get_closest_marker("real_gcp_module"):
+        return
+
+    def refuse(*_args, **_kwargs):
+        raise RuntimeError("tests must not call GCP: replace readmission_risk.gcp's client factories with a fake")
+
+    for name in ("credentials", "storage_client", "bigquery_client"):
+        monkeypatch.setattr(f"readmission_risk.gcp.{name}", refuse)

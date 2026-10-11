@@ -109,7 +109,7 @@ $ python scripts/score_discharges.py --gold-dir data/gold/full_run_2b --run-date
 ERROR: window [2022-06-01T00:00:00+00:00, 2022-07-01T00:00:00+00:00) contains 27 in-sample (training-partition) discharge(s) and 9 discharge(s) excluded by the split (neither partition); a held-out Top-N list needs every discharge in the window to be a held-out row
 ```
 
-In the same way, the integrity checks and 14 guards in [`validate_bundle`](src/readmission_risk/scoring/bundle_guard.py) refuse a tampered bundle, or a model trained on a different gold table, label definition, library version or Python version, before it is unpickled; [docs/scoring.md](docs/scoring.md) lists every refusal. The command scores with the committed champion bundle (`deploy/champion.json`); on a fresh clone, train, export and score your own bundle as [docs/scoring.md](docs/scoring.md#model-bundles) describes.
+In the same way, the integrity checks and 14 guards in [`validate_bundle`](src/readmission_risk/scoring/bundle_guard.py) refuse a tampered bundle, or a model trained on a different gold table, label definition, library version or Python version, before it is unpickled; [docs/scoring.md](docs/scoring.md) lists every refusal. The command scores with the committed champion bundle (`deploy/champion.json`, in a private bucket since v2 slice 4, so it needs the author's credentials); on a fresh clone, train, export and score your own bundle offline with `--bundle bundles/<id>`, as [docs/scoring.md](docs/scoring.md#model-bundles) describes.
 
 ## Limitations
 
