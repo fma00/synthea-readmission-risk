@@ -4,7 +4,7 @@
 
 ## Setup
 
-Developed on Python 3.14 (pinned via [.python-version](../.python-version)); CI also tests Python 3.12, the Python of the Dataproc Serverless runtime the scale-up phase targets. The same hash-pinned lockfiles install on both.
+Developed and CI-tested on Python 3.14 (pinned via [.python-version](../.python-version)). The pipeline subpackage is also CI-tested on Python 3.12 with PySpark 4.0.1, the stack of the Dataproc Serverless runtime the scale-up phase targets (see [Testing against the Dataproc runtime](#testing-against-the-dataproc-runtime)). The rest of the package is not tested on 3.12, although `requires-python` still admits it.
 
 ```sh
 # Create and activate the virtualenv
@@ -31,6 +31,42 @@ pytest
 ```
 
 This is the fast path to confirm the codebase is sound — no generated data, and no external downloads beyond what the dependency install already fetched (it does need a JDK on `PATH` for the PySpark tests). It's what CI runs on every push to `main` and on every pull request. `zizmor` audits the GitHub Actions workflows. `zizmor --offline .` (the command above) never touches the network and skips the online audits CI runs, which query the GitHub API (known-vulnerable actions, and a check that each pin's `# vX.Y.Z` comment matches its SHA); `GH_TOKEN=$(gh auth token) zizmor .` reproduces CI's audit exactly. A plain `zizmor .` goes online whenever `GH_TOKEN`, `GITHUB_TOKEN` or `ZIZMOR_GITHUB_TOKEN` is set.
+
+## Makefile and pre-commit
+
+The [Makefile](../Makefile) wraps the commands on this page. Its recipes call the tools in `.venv` by path, so no activated virtualenv is needed; `make help` lists the targets. It works with the GNU Make 3.81 that macOS ships.
+
+| Target | What it does |
+|---|---|
+| `make setup` | Creates `.venv` with `python3.14` (or reuses it, refusing one of another Python) and runs the three installs above |
+| `make hooks` | Installs the git pre-commit hook (see below) |
+| `make lint` | `ruff check .` and `zizmor --offline .`, the full-repository equivalent of CI's lint |
+| `make test` | `pytest` |
+| `make pre-commit` | Runs the hooks over all tracked files |
+| `make train TRAIN_EXPERIMENT=<name>` | Trains both models on `data/gold/full_run_2b`; the name is required and must differ from the scoring experiment (`readmission-risk-v1`), because training into an experiment that already holds runs makes the scorer's `--model` ambiguous. It does not check other existing experiments. Extra flags go in `TRAIN_ARGS` |
+| `make score` | Scores run date `20250630` from `readmission-risk-v1`; override `RUN_DATE`, `EXPERIMENT`, `GOLD_DIR`, extra flags in `SCORE_ARGS` |
+| `make setup-runtime`, `make test-runtime` | The Dataproc runtime environment, next section |
+| `make lock-dev`, `make lock-runtime` | Recompile `requirements-dev.txt` / `requirements-dataproc-3.0.txt` under Python 3.12 |
+
+The pre-commit hook (`make hooks`, configured in [.pre-commit-config.yaml](../.pre-commit-config.yaml)) runs ruff on the staged Python files and notebooks, and zizmor offline whenever a file under `.github/` or `.pre-commit-config.yaml` itself is staged (zizmor audits both). Both tools come from the main checkout's `.venv`, so the versions are the hash-pinned ones in `requirements-dev.txt`. Things to know:
+
+- `make setup` does not install the hook; `make hooks` does. `pre-commit install` fails outside a git checkout and refuses to run when `core.hooksPath` is set.
+- The hook is installed with `--allow-missing-config`: it is shared by every branch, and a branch without `.pre-commit-config.yaml` commits with a skip notice instead of being refused.
+- It checks staged files only. A commit that changes only `pyproject.toml` (ruff's own configuration) re-lints nothing; `make lint` checks everything. CI runs both tools again (zizmor online), so `git commit --no-verify` skips nothing CI does not catch.
+- In a linked git worktree the hook uses the main checkout's `.venv`, but the Makefile does not: its `VENV` default is the relative `.venv`. Run `make lint VENV="$(git rev-parse --git-common-dir)/../.venv"` there, or create a `.venv` in the worktree with `make setup`.
+
+## Testing against the Dataproc runtime
+
+The feature join runs on Dataproc Serverless runtime 3.0 in the scale-up phase: Python 3.12, Spark 4.0.1 and Java 21, with the runtime's own pandas 2.3, pyarrow 19.0 and numpy 2.1. [requirements-dataproc-3.0.txt](../requirements-dataproc-3.0.txt) is a hash-locked mirror of those libraries ([requirements-dataproc-3.0.in](../requirements-dataproc-3.0.in) names the source page and date). It is used only for testing; it is never installed on Dataproc or combined with `requirements.txt`. CI's `pipeline-dataproc-runtime` job runs `tests/pipeline` under it and asserts the exact stack, Java 21 included. To run the same tests locally:
+
+```sh
+make setup-runtime   # deletes and recreates .venv-dataproc with python3.12 (override PYTHON312=/path/to/python3.12)
+make test-runtime    # pytest tests/pipeline in .venv-dataproc
+```
+
+`make test-runtime` needs a JDK that Spark 4.0 supports, 17 or 21; PySpark uses `JAVA_HOME` if set, otherwise the `java` on `PATH` (JDK 25, for example, is not supported). The Java version and exact library versions are asserted only in CI. The test `tests/pipeline/test_runtime_dependencies.py` also enforces that the code shipped to Dataproc (`src/readmission_risk/pipeline/`, the package `__init__.py` and `scripts/run_big_join.py`) imports only the standard library, its own subpackage and the runtime-bundled packages.
+
+When Google's runtime page changes a bundled version, edit `requirements-dataproc-3.0.in` (and the version constants in that test), then run `make lock-runtime` and `make test-runtime`. `make lock-runtime` re-resolves to the newest allowed patches. The command recorded in a lockfile's header is not the recipe, so use the Makefile targets: `make lock-dev` keeps existing pins, `make lock-runtime` passes `--upgrade`. The `.venv-*` directories are deleted and recreated by these targets.
 
 ## Running the actual pipeline (Slice 1: Synthea generation)
 

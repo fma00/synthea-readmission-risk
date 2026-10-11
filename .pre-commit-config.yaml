@@ -1,0 +1,20 @@
+# Local hooks only. Each runs the tool from the MAIN checkout's .venv (created by `make setup`), found through git's
+# common directory, so the hooks also work in linked worktrees (e.g. .claude/worktrees/*), which share the hooks but
+# have no .venv of their own. The version is the hash-pinned one in requirements-dev.txt: no second, unhashed version
+# source. pre-commit does not put any venv on PATH, hence the explicit path. With no .venv in the main checkout the hook
+# fails ("not found", exit 127) and blocks the commit. zizmor runs offline here; CI (ci.yml) runs ruff and online zizmor
+# again, so `git commit --no-verify` skips nothing CI does not catch.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff check
+        entry: sh -c 'exec "$(git rev-parse --git-common-dir)/../.venv/bin/ruff" check --force-exclude "$@"' --
+        language: unsupported
+        types_or: [python, pyi, jupyter]
+      - id: zizmor
+        name: zizmor (offline)
+        entry: sh -c 'exec "$(git rev-parse --git-common-dir)/../.venv/bin/zizmor" --offline .' --
+        language: unsupported
+        files: ^(\.github/|\.pre-commit-config\.yaml$)
+        pass_filenames: false

@@ -81,6 +81,8 @@ MUST_BE_IGNORED = [
     "docs/img/.tmp-abc123/reliability_light.svg",
     ".env",
     ".env.local",
+    ".venv-dataproc/bin/python",
+    ".venv-lock312/bin/python",
 ]
 MUST_NOT_BE_IGNORED = [
     ".claude/commands/eg-prd.md",
@@ -91,6 +93,10 @@ MUST_NOT_BE_IGNORED = [
     "LICENSE",
     "README.md",
     "tests/test_docs.py",
+    "Makefile",
+    ".pre-commit-config.yaml",
+    "requirements-dataproc-3.0.txt",
+    "requirements-dataproc-3.0.in",
 ]
 HAS_GIT_CHECKOUT = (ROOT / ".git").exists() and shutil.which("git") is not None
 FORBIDDEN_README_PHRASES = ["production-ready", "production ready", "state-of-the-art", "leakage-safe", "streamlit.app"]

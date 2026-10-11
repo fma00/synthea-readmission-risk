@@ -1,6 +1,6 @@
 # synthea-readmission-risk
 
-[![CI](https://github.com/fma00/synthea-readmission-risk/actions/workflows/ci.yml/badge.svg)](https://github.com/fma00/synthea-readmission-risk/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) [![Python 3.12 | 3.14](https://img.shields.io/badge/python-3.12%20%7C%203.14-blue.svg)](.python-version)
+[![CI](https://github.com/fma00/synthea-readmission-risk/actions/workflows/ci.yml/badge.svg)](https://github.com/fma00/synthea-readmission-risk/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) [![Python 3.14](https://img.shields.io/badge/python-3.14-blue.svg)](.python-version)
 
 An end-to-end, tested pipeline for predicting **unplanned** 30-day hospital readmission from [Synthea](https://synthea.mitre.org/)-generated synthetic patient data. A PySpark job joins ten Synthea tables into a per-encounter feature table and an explicit planned-versus-unplanned readmission label; a leakage-controlled training pipeline — chronological, patient-disjoint split with a censoring buffer and a label-window purge — fits a logistic regression baseline and a calibrated XGBoost challenger, both tracked in MLflow; and a Top-N triage CLI ranks held-out discharges behind a set of provenance guards that refuse any model/data mismatch.
 
@@ -35,7 +35,7 @@ For ML and MLOps reviewers: seven stops, each a file to open and what to look fo
 3. **The split:** [`chronological_group_split`](src/readmission_risk/models/split.py) is chronological and patient-disjoint, with a censoring buffer, a label-window purge and a label-horizon purge; [test_split.py](tests/models/test_split.py) pins each rule.
 4. **Honest evaluation:** [evaluate.py](src/readmission_risk/models/evaluate.py) and [baselines.py](src/readmission_risk/models/baselines.py) report calibration (Brier score, ECE, reliability curve) next to AUC, with patient-clustered bootstrap intervals and a no-model lookup that the models do not beat ([results](docs/results.md)).
 5. **Guarded scoring:** [`validate_run`](src/readmission_risk/scoring/runs.py) runs 14 checks that refuse a mismatched model/data pair before anything is unpickled; [a real refusal](#what-a-refusal-looks-like) is shown below.
-6. **Supply chain:** [requirements.txt](requirements.txt) is hash-locked, and [ci.yml](.github/workflows/ci.yml) uses SHA-pinned actions, a zizmor audit and a Python 3.12 + 3.14 matrix.
+6. **Supply chain:** [requirements.txt](requirements.txt) is hash-locked, and [ci.yml](.github/workflows/ci.yml) uses SHA-pinned actions, a zizmor audit, Python 3.14 tests plus a Dataproc-runtime job (Python 3.12, PySpark 4.0.1, Java 21) for the pipeline tests; local pre-commit hooks (ruff, zizmor) mirror the lint.
 7. **How it was designed:** [notes/](notes/) holds one design document per slice, each stress-tested by independent fresh-context reviewers; where a review did not close, the note says so (see [How this was built](#how-this-was-built)).
 
 ## Architecture
@@ -176,8 +176,11 @@ tests/                          # pytest suite (tests/test_docs.py covers these 
 docs/                           # setup, results and scoring write-ups
 notes/                          # design docs, PRDs, measurements (dated records)
 .claude/commands/               # the /eg-* design-review workflow
-.github/workflows/              # CI: ruff + pytest, plus a zizmor workflow audit; actions pinned to commit SHAs
+.github/workflows/              # CI: ruff + pytest, a Dataproc-runtime pipeline job, and a zizmor workflow audit; actions pinned to commit SHAs
 .github/dependabot.yml          # weekly update PRs for the pinned actions
+Makefile                        # common tasks: setup, lint, test, train, score, runtime env, lockfiles
+.pre-commit-config.yaml         # ruff + zizmor git hooks (make hooks)
+requirements-dataproc-3.0.txt   # hash-locked Dataproc runtime 3.0 mirror (CI's pipeline job only)
 ```
 
 ## License and acknowledgements

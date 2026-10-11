@@ -376,7 +376,7 @@ def _source_model_uri(env: ScoringEnv, experiment: str):
     return _clone(env, experiment, tags={"model_uri": uri}), ()
 
 
-# Guard 14 versions, derived from the running interpreter so the cases hold on every CI leg (3.12 and 3.14).
+# Guard 14 versions, derived from the running interpreter so the cases hold under whichever interpreter runs the suite (CI: 3.14).
 RUNNING_PYTHON = current_python_version()
 OTHER_MINOR_PYTHON = f"{sys.version_info.major}.{sys.version_info.minor + 1}.0"
 OTHER_PATCH_PYTHON = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro + 1}"
