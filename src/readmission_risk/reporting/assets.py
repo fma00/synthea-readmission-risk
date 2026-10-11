@@ -17,7 +17,7 @@ import mlflow
 import pandas as pd
 from mlflow.tracking import MlflowClient
 
-from readmission_risk.scoring.runs import resolve_run_id
+from readmission_risk.models.tracking import resolve_run_id
 
 from .reliability import TITLE, bin_points, build_reliability_figure
 from .style import MODEL_DISPLAY_NAMES, MODEL_NAMES, THEMES, house_style, save_figure

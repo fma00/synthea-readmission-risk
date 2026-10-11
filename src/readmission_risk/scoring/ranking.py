@@ -30,6 +30,7 @@ PREDICTION_COLUMNS: tuple[str, ...] = (
     "admission_reason_code",
     "admission_reason_description",
     "risk_score",
+    "model_bundle_id",
     "model_run_id",
     "model_name",
     "top_n",
@@ -89,6 +90,7 @@ def build_predictions(
     run_date: date,
     top_n: int,
     window_days: int,
+    model_bundle_id: str,
     model_run_id: str,
     model_name: str,
     label_definition: str,
@@ -149,6 +151,7 @@ def build_predictions(
     frame["as_of_date"] = pd.Series([run_date] * n, dtype=object)
     frame["rank"] = np.arange(1, n + 1, dtype="int32")
     frame["is_top_n"] = frame["rank"].to_numpy() <= top_n
+    frame["model_bundle_id"] = _constant(model_bundle_id)
     frame["model_run_id"] = _constant(model_run_id)
     frame["model_name"] = _constant(model_name)
     frame["top_n"] = np.full(n, top_n, dtype="int32")

@@ -36,15 +36,18 @@ def _table(result: ScoringResult, n_shown: int) -> list[str]:
 
 
 def format_report(result: ScoringResult) -> str:
-    run, predictions = result.run, result.predictions
+    bundle, predictions = result.bundle, result.predictions
     n = len(predictions)
     top_n = int(predictions["top_n"].iloc[0])
     n_shown = min(top_n, n)
-    commit = run.git_commit[:7] if run.git_commit else "unknown"
+    commit = bundle.git_commit[:7] if bundle.git_commit else "unknown"
     lines = [
         DEMO_NOTICE,
         "",
-        f"model: {run.model_name} run_id={run.run_id} (trained at commit {commit}, working tree {run.git_dirty or 'unknown'})",
+        (
+            f"model: {bundle.model_name} bundle={bundle.bundle_id[:12]} mlflow_run_id={bundle.mlflow_run_id} "
+            f"(trained at commit {commit}, working tree {bundle.git_dirty or 'unknown'})"
+        ),
         (
             f"window: {result.window_start.isoformat()} to {result.window_end.isoformat()} (end exclusive), "
             f"{n} held-out discharges scored"

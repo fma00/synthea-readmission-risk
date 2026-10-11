@@ -6,10 +6,11 @@ notes/eg-new-feature/batch-scoring-cli-2026-09-20.md.
 
 Exit code 0 on success. Exit 1, printing "ERROR: <message>" to stderr, on FileNotFoundError or ValueError -- the two
 user-correctable failure types (bad path, a refused run/gold pair, a window that touches in-sample rows, a bad flag). A
-RuntimeError (a broken model or a violated post-condition) and MLflow/OS errors are deliberately NOT caught: they propagate
+RuntimeError (a broken model or a violated post-condition) and other errors are deliberately NOT caught: they propagate
 as an ordinary traceback because they indicate a bug or a broken environment. Typer's own usage errors (a missing required
-option, a non-integer --top-n) exit 2. --verbose also prints the traceback of the reported errors. MLflow's pickle-safety
-warning on model load is not suppressed.
+option, a non-integer --top-n) exit 2. --verbose also prints the traceback of the reported errors. The model comes from a
+bundle (notes/eg-new-feature/v2-slice2-model-bundle-and-manifest-2026-10-11.md): deploy/champion.json by default, or
+--bundle; it is unpickled only after the bundle's manifest, file hashes and every guard have passed.
 """
 
 import sys
@@ -30,9 +31,9 @@ _HELP = (
     + "\n\nScores the held-out discharges whose discharge time falls in the trailing window of --window-days UTC "
     "calendar days ending on --run-date (inclusive), ranks them by predicted risk and prints the Top-N. The full ranked "
     "batch is written to <output-dir>/run_date=YYYYMMDD/predictions.parquet; re-running a run date replaces that "
-    "partition, so scoring the same date with the other model replaces the first model's file. A window that contains "
+    "partition, so scoring the same date with another bundle replaces the first one's file. A window that contains "
     "any discharge that is not a held-out row of the chosen model (a training row, or a row dropped by the split) is "
-    "refused."
+    "refused. The model is the bundle deploy/champion.json points at, unless --bundle or --champion says otherwise."
 )
 
 
@@ -41,18 +42,16 @@ def main(
     gold_dir: Annotated[Path, typer.Option(help="Gold table directory (Parquet part files + _gold_metadata.json).")],
     run_date: Annotated[str, typer.Option(help="YYYYMMDD: the last day of the discharge window.")],
     output_dir: Annotated[Path, typer.Option(help="Root of the prediction partitions.")] = Path("data/predictions"),
-    tracking_dir: Annotated[Path, typer.Option(help="Directory holding the MLflow store (mlflow.db).")] = Path("mlflow"),
-    experiment_name: Annotated[
-        str, typer.Option(help="MLflow experiment holding the runs (ignored with --run-id); the real runs are in readmission-risk-v1.")
-    ] = "readmission-risk",
-    model: Annotated[
-        str | None,
+    bundle: Annotated[
+        str | None, typer.Option(help="A bundle directory to score with. Mutually exclusive with --champion.")
+    ] = None,
+    champion: Annotated[
+        Path | None,
         typer.Option(
-            help="logistic_regression (the default when neither --model nor --run-id is given) or xgboost_calibrated: "
-            "the single FINISHED run of that model in --experiment-name. Mutually exclusive with --run-id."
+            help="The champion pointer to follow (when neither --bundle nor --champion is given: deploy/champion.json, "
+            "relative to the current directory)."
         ),
     ] = None,
-    run_id: Annotated[str | None, typer.Option(help="An explicit MLflow run id. Mutually exclusive with --model.")] = None,
     top_n: Annotated[int, typer.Option(help="How many of the highest-risk discharges to print.")] = DEFAULT_TOP_N,
     window_days: Annotated[
         int | None, typer.Option(help="Window length in UTC calendar days (default: the gold table's readmission window, 30).")
@@ -73,10 +72,8 @@ def main(
         gold_dir=gold_dir,
         run_date=run_date,
         output_dir=output_dir,
-        tracking_dir=tracking_dir,
-        experiment_name=experiment_name,
-        model_name=model,
-        run_id=run_id,
+        bundle_uri=bundle,
+        champion_path=champion,
         top_n=top_n,
         window_days=window_days,
         show_observed_outcomes=show_observed_outcomes,

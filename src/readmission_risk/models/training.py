@@ -29,6 +29,7 @@ from readmission_risk.pipeline.gold_metadata import (
 )
 
 from . import tracking
+from .constants import MODEL_NAMES
 from .data import (
     EXCLUDED_COLUMN_REASONS,
     FEATURE_COLUMNS,
@@ -53,7 +54,6 @@ from .modeling import (
 )
 from .split import chronological_group_split
 
-MODEL_NAMES: tuple[str, ...] = ("logistic_regression", "xgboost_calibrated")
 MIN_TEST_POSITIVES_FOR_RELIABLE_METRICS = 50
 _BASELINE, _CHALLENGER = MODEL_NAMES
 _CALIBRATION_METHODS = ("sigmoid", "isotonic")

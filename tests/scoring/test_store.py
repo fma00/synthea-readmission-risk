@@ -49,7 +49,7 @@ def test_partition_round_trip_and_layout(tmp_path):
     # remove_metadata: from_pandas adds a 'pandas' metadata key, which is allowed
     assert file_schema.remove_metadata().equals(PREDICTION_SCHEMA.remove_metadata())
     assert file_schema.metadata[b"readmission_risk.demo_notice"].decode() == DEMO_NOTICE
-    assert file_schema.metadata[b"readmission_risk.schema_version"] == b"1"
+    assert file_schema.metadata[b"readmission_risk.schema_version"] == b"2"
 
 
 def test_read_partition_missing_file_raises_file_not_found(tmp_path):

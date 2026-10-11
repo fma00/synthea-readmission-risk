@@ -53,6 +53,9 @@ tools/synthea/
 /models/
 *.pkl
 *.joblib
+# Model bundles (v2 slice 2): local until v2 slice 3 moves them to GCS. Anchored like /data/ and /models/: an unanchored
+# `bundles/` would also ignore src/readmission_risk/bundles/ and tests/bundles/.
+/bundles/
 
 # MLflow local tracking store (SQLite DB + artifacts) -- anchored to the repo root, like /models/ above
 # (an unanchored `models/` also matched src/readmission_risk/models/ and tests/models/).

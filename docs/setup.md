@@ -43,8 +43,9 @@ The [Makefile](../Makefile) wraps the commands on this page. Its recipes call th
 | `make lint` | `ruff check .` and `zizmor --offline .`, the full-repository equivalent of CI's lint |
 | `make test` | `pytest` |
 | `make pre-commit` | Runs the hooks over all tracked files |
-| `make train TRAIN_EXPERIMENT=<name>` | Trains both models on `data/gold/full_run_2b`; the name is required and must differ from the scoring experiment (`readmission-risk-v1`), because training into an experiment that already holds runs makes the scorer's `--model` ambiguous. It does not check other existing experiments. Extra flags go in `TRAIN_ARGS` |
-| `make score` | Scores run date `20250630` from `readmission-risk-v1`; override `RUN_DATE`, `EXPERIMENT`, `GOLD_DIR`, extra flags in `SCORE_ARGS` |
+| `make train TRAIN_EXPERIMENT=<name>` | Trains both models on `data/gold/full_run_2b`; the name is required and must differ from the export experiment (`EXPERIMENT`, default `readmission-risk-v1`), because training into an experiment that already holds runs makes the exporter's `--model` ambiguous (`make export` reads `EXPERIMENT`). It does not check other existing experiments. Extra flags go in `TRAIN_ARGS` |
+| `make export` | Exports the `EXPORT_MODEL` run (default `logistic_regression`) of `EXPERIMENT` (default `readmission-risk-v1`) as a model bundle under the gitignored `bundles/` and prints the `deploy/champion.json` text that would promote it; extra flags in `EXPORT_ARGS` ([scoring.md](scoring.md#model-bundles)) |
+| `make score` | Scores run date `20250630` with the champion bundle (`deploy/champion.json`); override `RUN_DATE`, `GOLD_DIR`, extra flags in `SCORE_ARGS` (e.g. `--bundle bundles/<id>`) |
 | `make setup-runtime`, `make test-runtime` | The Dataproc runtime environment, next section |
 | `make lock-dev`, `make lock-runtime` | Recompile `requirements-dev.txt` / `requirements-dataproc-3.0.txt` under Python 3.12 |
 
@@ -99,7 +100,7 @@ python scripts/run_big_join.py --input-dir data/raw/full_run --output-dir data/g
 
 # Train + evaluate. --reference-date MUST equal the value used for the Synthea run and the feature join.
 # In a store that already holds runs under this experiment name (e.g. the reference runs), pass a fresh
-# --experiment-name, or --model becomes ambiguous for the scorer (docs/scoring.md).
+# --experiment-name, or --model becomes ambiguous for the bundle exporter (docs/scoring.md).
 python scripts/train_models.py --gold-dir data/gold/full_run_2b --reference-date 20260916 --test-start-date 20230101 --experiment-name readmission-risk-v1
 
 # Browse runs, metrics, calibration diagrams

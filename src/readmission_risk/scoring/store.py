@@ -20,7 +20,7 @@ from .ranking import PREDICTION_COLUMNS, PREDICTION_DTYPES
 PARTITION_FILENAME = "predictions.parquet"
 _TMP_PREFIX = ".predictions."  # dot-prefixed: pyarrow's dataset discovery ignores it, a plain name does not
 _TMP_SUFFIX = ".tmp"
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"  # "2" since v2 slice 2: adds model_bundle_id
 _NULLABLE_COLUMNS = ("admission_reason_code", "admission_reason_description")
 
 _ARROW_TYPES: dict[str, pa.DataType] = {

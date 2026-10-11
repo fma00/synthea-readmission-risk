@@ -17,6 +17,8 @@ RUN_DATE         ?= 20250630
 TRAIN_EXPERIMENT ?=
 TRAIN_ARGS       ?=
 SCORE_ARGS       ?=
+EXPORT_MODEL     ?= logistic_regression
+EXPORT_ARGS      ?=
 BIN := $(VENV)/bin
 
 # $(call check_python,<venv dir>,<major>,<minor>,<variable to override>)
@@ -32,7 +34,7 @@ define fresh_venv
 case "$(1)" in */*|*..*) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; .venv-*) ;; *) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; esac; rm -rf "$(1)" && $(2) -m venv "$(1)"
 endef
 
-.PHONY: help setup hooks lint test pre-commit train score setup-runtime test-runtime lock-dev lock-runtime
+.PHONY: help setup hooks lint test pre-commit train export score setup-runtime test-runtime lock-dev lock-runtime
 .DEFAULT_GOAL := help
 
 help: ## List the targets
@@ -62,12 +64,15 @@ pre-commit: ## Run the pre-commit hooks over all tracked files
 	$(BIN)/pre-commit run --all-files
 
 train: ## Train both models into TRAIN_EXPERIMENT (required, must not be EXPERIMENT); extra flags via TRAIN_ARGS
-	@test -n "$(TRAIN_EXPERIMENT)" || { echo "ERROR: set TRAIN_EXPERIMENT=<a new experiment name>; training into an experiment that already holds runs makes the scorer's --model ambiguous (docs/scoring.md)" >&2; exit 1; }
-	@test "$(TRAIN_EXPERIMENT)" != "$(EXPERIMENT)" || { echo "ERROR: TRAIN_EXPERIMENT must differ from the scoring experiment $(EXPERIMENT)" >&2; exit 1; }
+	@test -n "$(TRAIN_EXPERIMENT)" || { echo "ERROR: set TRAIN_EXPERIMENT=<a new experiment name>; training into an experiment that already holds runs makes make export's --model ambiguous (docs/scoring.md)" >&2; exit 1; }
+	@test "$(TRAIN_EXPERIMENT)" != "$(EXPERIMENT)" || { echo "ERROR: TRAIN_EXPERIMENT must differ from the export experiment $(EXPERIMENT)" >&2; exit 1; }
 	$(BIN)/python scripts/train_models.py --gold-dir $(GOLD_DIR) --reference-date $(REFERENCE_DATE) --test-start-date $(TEST_START_DATE) --experiment-name $(TRAIN_EXPERIMENT) $(TRAIN_ARGS)
 
-score: ## Score the Top-N triage list for RUN_DATE from EXPERIMENT; extra flags via SCORE_ARGS
-	$(BIN)/python scripts/score_discharges.py --gold-dir $(GOLD_DIR) --experiment-name $(EXPERIMENT) --run-date $(RUN_DATE) $(SCORE_ARGS)
+export: ## Export the EXPORT_MODEL run of EXPERIMENT as a model bundle under bundles/; extra flags via EXPORT_ARGS
+	$(BIN)/python scripts/export_bundle.py --experiment-name $(EXPERIMENT) --model $(EXPORT_MODEL) $(EXPORT_ARGS)
+
+score: ## Score the Top-N triage list for RUN_DATE with the champion bundle (deploy/champion.json); extra flags via SCORE_ARGS
+	$(BIN)/python scripts/score_discharges.py --gold-dir $(GOLD_DIR) --run-date $(RUN_DATE) $(SCORE_ARGS)
 
 setup-runtime: ## Recreate .venv-dataproc: Python 3.12 + the Dataproc runtime 3.0 mirror (requirements-dataproc-3.0.txt)
 	@$(call fresh_venv,$(RUNTIME_VENV),$(PYTHON312),RUNTIME_VENV)

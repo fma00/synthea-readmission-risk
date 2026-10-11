@@ -1,5 +1,6 @@
 """Shared test helpers for the scoring slice (plain module, not conftest.py, which holds fixtures only).
-See notes/eg-new-feature/batch-scoring-cli-2026-09-20.md (Verification criteria > Test infrastructure).
+See notes/eg-new-feature/batch-scoring-cli-2026-09-20.md (Verification criteria > Test infrastructure) and, for the
+bundle fixtures (tamper_bundle, BUNDLE_CASES, INTEGRITY_CASES), notes/eg-new-feature/v2-slice2-model-bundle-and-manifest-2026-10-11.md.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ PREDICTION_KWARGS = {
     "run_date": date(2026, 6, 30),
     "top_n": 3,
     "window_days": 180,
+    "model_bundle_id": "b" * 64,
     "model_run_id": "run-abc",
     "model_name": "logistic_regression",
     "label_definition": "unplanned_readmission_v1",
@@ -58,37 +60,31 @@ def make_predictions(ids=("e", "c", "a", "b", "d"), scores=(0.2, 0.5, 0.5, 0.5, 
 
 
 # ---------------------------------------------------------------------------------------------------------------
-# Real-store fixtures: one trained store per test session, plus cloned (tampered) runs.
+# Real-store fixtures: one trained store per test session, exported to two bundles, plus tampered bundle copies.
 # ---------------------------------------------------------------------------------------------------------------
 import json
+import shutil
 import sys
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
-from urllib.request import url2pathname
 
 import mlflow
-import mlflow.sklearn
 import numpy as np
-import yaml
-from mlflow.models import infer_signature
 from mlflow.tracking import MlflowClient
 
-from readmission_risk.models.data import (
-    FEATURE_COLUMNS,
-    prepare_features,
+from readmission_risk.bundles.champion import champion_json
+from readmission_risk.bundles.manifest import (
+    compute_bundle_id,
+    manifest_bytes,
+    sha256_hex,
 )
-from readmission_risk.models.tracking import (
-    current_python_version,
-    load_logged_model,
-    mlflow_tracking_uri,
-)
-from readmission_risk.models.training import (
-    TrainingConfig,
-    train_and_evaluate,
-)
+from readmission_risk.models.bundle_export import export_bundle
+from readmission_risk.models.data import FEATURE_COLUMNS
+from readmission_risk.models.tracking import mlflow_tracking_uri
+from readmission_risk.models.training import TrainingConfig, train_and_evaluate
+from readmission_risk.models.versions import current_python_version
 from tests.models.helpers import (
     REFERENCE_DATE_STR,
     TEST_START_STR,
@@ -119,6 +115,9 @@ class ScoringEnv:
     experiment_name: str
     lr_run_id: str
     xgb_run_id: str
+    bundles_root: Path
+    lr_bundle_uri: str
+    xgb_bundle_uri: str
     df: pd.DataFrame  # the fixture gold frame (with the label)
     n_train: int  # from the LR run's params split_n_train / split_n_test, never hard-coded
     n_test: int
@@ -143,6 +142,9 @@ class ScoringEnv:
         is_test = self.df["encounter_id"].map(self.assignment(run_id)) == "test"
         return self.df.loc[in_window & is_test].reset_index(drop=True)
 
+    def manifest(self, bundle_uri: str | None = None) -> dict:
+        return json.loads((Path(bundle_uri or self.lr_bundle_uri) / "manifest.json").read_text())
+
 
 def tempfile_from_text(text: str):
     import io
@@ -151,7 +153,8 @@ def tempfile_from_text(text: str):
 
 
 def build_scoring_env(root: Path) -> ScoringEnv:
-    """Trains both models once on make_gold_frame(300, seed=1) (652 rows; split 165 train / 310 test / 177 in neither)."""
+    """Trains both models once on make_gold_frame(300, seed=1) (652 rows; split 165 train / 310 test / 177 in neither) and
+    exports both runs as bundles."""
     original_uri = mlflow.get_tracking_uri()
     try:
         df = make_gold_frame(300, seed=1)
@@ -167,151 +170,170 @@ def build_scoring_env(root: Path) -> ScoringEnv:
                 n_bootstrap=0,
             )
         )
+        lr, xgb = result.models["logistic_regression"], result.models["xgboost_calibrated"]
+        bundles_root = root / "bundles"
+        lr_bundle = export_bundle(tracking_dir, lr.run_id, bundles_root)
+        xgb_bundle = export_bundle(tracking_dir, xgb.run_id, bundles_root)
     finally:
         mlflow.set_tracking_uri(original_uri)
-    lr, xgb = result.models["logistic_regression"], result.models["xgboost_calibrated"]
     return ScoringEnv(
         gold_dir=gold_dir,
         tracking_dir=tracking_dir,
         experiment_name=SCORING_EXPERIMENT,
         lr_run_id=lr.run_id,
         xgb_run_id=xgb.run_id,
+        bundles_root=bundles_root,
+        lr_bundle_uri=lr_bundle.bundle_uri,
+        xgb_bundle_uri=xgb_bundle.bundle_uri,
         df=df,
         n_train=int(result.split_summary["n_train"]),
         n_test=int(result.split_summary["n_test"]),
     )
 
 
-def clone_run(
-    tracking_dir: Path,
-    source_run_id: str,
+# ---------------------------------------------------------------------------------------------------------------
+# tamper_bundle: a copy of a bundle with chosen defects, written as ordinary files (never through write_bundle, which
+# would refuse most of them). Steps: (a) non-"files" set/delete edits; (b) file byte edits; (c) if rehash, recompute the
+# files table's sha256/size; (d) "files" set/delete edits; (e) if rehash, recompute bundle_id.
+# ---------------------------------------------------------------------------------------------------------------
+_MISSING = object()
+
+
+def _path(key) -> tuple[str, ...]:
+    return tuple(key) if isinstance(key, tuple) else tuple(key.split("."))
+
+
+def _set(document: dict, path: tuple[str, ...], value) -> None:
+    node = document
+    for part in path[:-1]:
+        node = node[part]  # the parent must exist (only top-level keys may be created)
+    if len(path) > 1 and path[-1] not in node:
+        raise KeyError(f"tamper_bundle: {'.'.join(path)} does not exist")
+    node[path[-1]] = value
+
+
+def _delete(document: dict, path: tuple[str, ...]) -> None:
+    node = document
+    for part in path[:-1]:
+        node = node[part]
+    del node[path[-1]]
+
+
+def tamper_bundle(
+    src_uri: str,
+    dst_root: Path,
     *,
-    experiment: str,
-    gold_frame: pd.DataFrame,
-    tags: dict[str, str] | None = None,
-    params: dict[str, str | None] | None = None,
-    features_json: dict | str | None = None,
-    split_assignment_csv: str | None = None,
-    signature_columns: Sequence[str] | None = None,
-    no_signature: bool = False,
-    status: str = "FINISHED",
-    drop_tags: Sequence[str] = (),
-    drop_artifacts: Sequence[str] = (),
-    mlmodel_python_version: object = None,
-    drop_mlmodel_python_version: bool = False,
-    mlmodel_python_function_flavor: object = None,
+    set: Mapping | None = None,  # shadows the builtin inside this function only: the design's keyword name
+    delete: tuple = (),
+    files: Mapping[str, bytes | None] | None = None,
+    rehash: bool = True,
+    manifest_raw: bytes | None = None,
+    dir_name: str | None = None,
+    extra_entries: Mapping[str, bytes | None] | None = None,
+    drop_manifest: bool = False,
+    symlink_files: Mapping[str, Path] | None = None,
 ) -> str:
-    """A tampered copy of a trained run, in `experiment` of the same store (created with an explicit artifact location under
-    the temp tracking dir: a SQLite store otherwise defaults to ./mlruns under the CWD). Copies the source's params and
-    non-mlflow.* tags, re-logs the same fitted model under its own run, sets its OWN model_uri tag, and only THEN applies the
-    caller's `tags` / `params` overrides (so a caller-supplied model_uri wins) and `drop_tags`. Every override is tested
-    with `is not None`, never truthiness. MLflow params cannot be edited after the fact, which is why tampering uses clones;
-    `params={"x": None}` means "do not copy x". The three mlmodel_* keywords (at most one) rewrite the clone's own MLmodel
-    file right after it is logged: set flavors.python_function.python_version to any YAML value, delete it, or replace the
-    whole python_function flavor (guard 14's legacy fallback reads that file)."""
-    assert sum([mlmodel_python_version is not None, drop_mlmodel_python_version, mlmodel_python_function_flavor is not None]) <= 1
-    tracking_dir = Path(tracking_dir)
-    original_uri = mlflow.get_tracking_uri()
-    mlflow.set_tracking_uri(mlflow_tracking_uri(tracking_dir))
-    try:
-        client = MlflowClient()
-        source = client.get_run(source_run_id)
-        existing = client.get_experiment_by_name(experiment)
-        experiment_id = (
-            existing.experiment_id
-            if existing is not None
-            else client.create_experiment(experiment, artifact_location=(tracking_dir.resolve() / "artifacts").as_uri())
-        )
-        model = load_logged_model(tracking_dir, source_run_id)
-        with tempfile.TemporaryDirectory() as tmp:
-            source_features = Path(client.download_artifacts(source_run_id, "feature_columns.json", tmp)).read_text()
-            source_assignment = Path(client.download_artifacts(source_run_id, "split_assignment.csv", tmp)).read_text()
+    src = Path(src_uri)
+    manifest = json.loads((src / "manifest.json").read_text())
+    contents = {p.name: p.read_bytes() for p in src.iterdir() if p.name != "manifest.json"}
+    edits = [(_path(k), v) for k, v in (set or {}).items()]
+    deletes = [_path(k) for k in delete]
 
-        columns = list(FEATURE_COLUMNS) if signature_columns is None else list(signature_columns)
-        signature = None if no_signature else infer_signature(prepare_features(gold_frame)[columns])
+    def is_files(path: tuple[str, ...]) -> bool:
+        return path[0] == "files"
 
-        new_params = dict(source.data.params)
-        for key, value in (params or {}).items():
-            if value is None:
-                new_params.pop(key, None)
-            else:
-                new_params[key] = value
-        run = mlflow.start_run(experiment_id=experiment_id)
-        try:
-            mlflow.log_params(new_params)
-            mlflow.set_tags({k: v for k, v in source.data.tags.items() if not k.startswith("mlflow.") and k != "model_uri"})
-            if "feature_columns.json" not in drop_artifacts:
-                text = source_features if features_json is None else (features_json if isinstance(features_json, str) else json.dumps(features_json))
-                mlflow.log_text(text, "feature_columns.json")
-            if "split_assignment.csv" not in drop_artifacts:
-                mlflow.log_text(source_assignment if split_assignment_csv is None else split_assignment_csv, "split_assignment.csv")
-            info = mlflow.sklearn.log_model(
-                model, name="model", signature=signature, serialization_format=mlflow.sklearn.SERIALIZATION_FORMAT_CLOUDPICKLE
-            )
-            if mlmodel_python_version is not None or drop_mlmodel_python_version or mlmodel_python_function_flavor is not None:
-                _edit_mlmodel(info.model_id, mlmodel_python_version, drop_mlmodel_python_version, mlmodel_python_function_flavor)
-            mlflow.set_tag("model_uri", info.model_uri)  # the clone's own tag ...
-            for key, value in (tags or {}).items():  # ... which a caller-supplied tag then overrides
-                mlflow.set_tag(key, value)
-            for key in drop_tags:
-                client.delete_tag(run.info.run_id, key)
-        finally:
-            mlflow.end_run(status=status)
-        return run.info.run_id
-    finally:
-        mlflow.set_tracking_uri(original_uri)
+    # (a)
+    for path, value in edits:
+        if not is_files(path):
+            _set(manifest, path, value)
+    for path in deletes:
+        if not is_files(path):
+            _delete(manifest, path)
+    # (b)
+    for name, data in (files or {}).items():
+        if data is None:
+            contents.pop(name, None)
+        else:
+            contents[name] = data
+    # (c)
+    if rehash and isinstance(manifest.get("files"), dict):
+        for name, data in contents.items():
+            if name in manifest["files"]:
+                manifest["files"][name]["sha256"] = sha256_hex(data)
+                manifest["files"][name]["size"] = len(data)
+    # (d)
+    for path, value in edits:
+        if is_files(path):
+            _set(manifest, path, value)
+    for path in deletes:
+        if is_files(path):
+            _delete(manifest, path)
+    # (e)
+    if rehash:
+        manifest["bundle_id"] = compute_bundle_id(manifest)
+    name = dir_name or (manifest.get("bundle_id") if isinstance(manifest.get("bundle_id"), str) else None) or src.name
+    target = Path(dst_root) / name
+    target.mkdir(parents=True)
+    if not drop_manifest:
+        if manifest_raw is not None:
+            raw = manifest_raw
+        elif rehash:
+            raw = manifest_bytes(manifest)
+        else:
+            raw = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii") + b"\n"
+        (target / "manifest.json").write_bytes(raw)
+    for file_name, data in contents.items():
+        (target / file_name).write_bytes(data)
+    for entry, data in (extra_entries or {}).items():
+        if entry.endswith("/"):
+            (target / entry.rstrip("/")).mkdir()
+        else:
+            (target / entry).write_bytes(data)
+    for file_name, link_target in (symlink_files or {}).items():
+        (target / file_name).unlink()
+        (target / file_name).symlink_to(link_target)
+    return str(target)
 
 
-def _edit_mlmodel(model_id: str, version: object, drop_version: bool, flavor: object) -> None:
-    """Rewrites a logged model's MLmodel YAML in place (url2pathname: the artifact location is a percent-encoded file URI)."""
-    location = MlflowClient().get_logged_model(model_id).artifact_location
-    path = Path(url2pathname(urlparse(location).path)) / "MLmodel"
-    document = yaml.safe_load(path.read_text())
-    if flavor is not None:
-        document["flavors"]["python_function"] = flavor
-    elif drop_version:
-        del document["flavors"]["python_function"]["python_version"]
-    else:
-        document["flavors"]["python_function"]["python_version"] = version
-    path.write_text(yaml.safe_dump(document))
+def write_champion(path: Path, bundle_uri: str, sha256: str | None = None) -> Path:
+    """A champion pointer at `path` for `bundle_uri`, pinning `sha256` or the bundle's real manifest sha."""
+    if sha256 is None:
+        sha256 = sha256_hex((Path(bundle_uri) / "manifest.json").read_bytes())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(champion_json(bundle_uri, sha256))
+    return path
 
 
 def forbid_model_loading(monkeypatch) -> None:
-    """Makes every route that would deserialize a logged model raise AssertionError. Apply it only around a call that must
-    never unpickle (the clone construction in a GuardCase's `build` legitimately loads a model)."""
+    """Makes every route that would deserialize a model raise AssertionError: cloudpickle.load/loads and pickle.load/loads
+    (cloudpickle.loads IS pickle.loads). Broader than before on purpose; the gold-load and selection paths do not unpickle,
+    so a trip for a non-model reason is a finding, not noise. Apply it only around a call that must never unpickle."""
+    import pickle
+
     import cloudpickle
-    import mlflow.pyfunc
 
     def refuse(*args, **kwargs):
         raise AssertionError("a model was deserialized before every guard had passed")
 
-    for owner, name in ((mlflow.sklearn, "load_model"), (mlflow.pyfunc, "load_model"), (cloudpickle, "load"), (cloudpickle, "loads")):
+    for owner, name in ((cloudpickle, "load"), (cloudpickle, "loads"), (pickle, "load"), (pickle, "loads")):
         monkeypatch.setattr(owner, name, refuse)
 
 
 # ---------------------------------------------------------------------------------------------------------------
-# GUARD_CASES: one per defect, each breaking exactly one guard of runs.validate_run (48 in total).
+# BUNDLE_CASES (the 48 MLflow-run guard cases ported; see the design's case table) and INTEGRITY_CASES (I1-I5).
+# build(env, tmp_path) -> (ScoringConfig overrides, extra substrings the message must contain).
 # ---------------------------------------------------------------------------------------------------------------
 @dataclass(frozen=True)
-class GuardCase:
+class BundleCase:
     case_id: str
-    guard_key: str
-    build: Callable[[ScoringEnv, str], tuple[str, tuple[str, ...]]]  # (env, experiment) -> (run_id_to_pass, extra_substrings)
+    key: str
+    build: Callable[[ScoringEnv, Path], tuple[dict, tuple[str, ...]]]
     forbidden: tuple[str, ...] = ()
+    starts_with: bool = False  # integrity keys must START the message (they carry their colon)
 
 
-def _clone(env: ScoringEnv, experiment: str, **kwargs) -> str:
-    return clone_run(env.tracking_dir, env.lr_run_id, experiment=experiment, gold_frame=env.df, **kwargs)
-
-
-def _simple(**kwargs):
-    return lambda env, experiment: (_clone(env, experiment, **kwargs), ())
-
-
-def _deleted(env: ScoringEnv, experiment: str):
-    run_id = _clone(env, experiment)
-    env.client().delete_run(run_id)
-    return run_id, ()
+def _tampered(extras: tuple[str, ...] = (), **kwargs):
+    return lambda env, tmp: ({"bundle_uri": tamper_bundle(env.lr_bundle_uri, tmp / "bundles", **kwargs)}, extras)
 
 
 def split_violation_sentence(env: ScoringEnv, assignment: pd.DataFrame) -> tuple[tuple[int, int, int], str]:
@@ -333,7 +355,7 @@ def split_violation_sentence(env: ScoringEnv, assignment: pd.DataFrame) -> tuple
 
 
 def _relabel_case(kind: str):
-    def build(env: ScoringEnv, experiment: str):
+    def build(env: ScoringEnv, tmp: Path):
         frame = pd.read_csv(tempfile_from_text(env.assignment_csv()), dtype=str, keep_default_na=False)
         by_id = env.df.set_index("encounter_id")
         frame["patient_id"] = frame["encounter_id"].map(by_id["patient_id"])
@@ -358,135 +380,234 @@ def _relabel_case(kind: str):
         triple, sentence = split_violation_sentence(env, modified)
         expected_pattern = {"train_to_test": triple[0] == 1 and triple[1] == 0, "test_to_train": triple[1] == 1 and triple[0] == 0, "dropped_to_train": triple[:2] == (0, 0) and triple[2] >= 1}[kind]
         assert expected_pattern, f"fixture precondition: unexpected violation triple {triple} for {kind}"
-        return _clone(env, experiment, split_assignment_csv=modified.to_csv(index=False)), (sentence,)
+        csv = modified.to_csv(index=False).encode()
+        return {"bundle_uri": tamper_bundle(env.lr_bundle_uri, tmp / "bundles", files={"split_assignment.csv": csv})}, (sentence,)
 
     return build
 
 
-def _csv_case(transform: Callable[[str], str]):
-    return lambda env, experiment: (_clone(env, experiment, split_assignment_csv=transform(env.assignment_csv())), ())
+def _split_case(transform: Callable[[str], str]):
+    def build(env: ScoringEnv, tmp: Path):
+        text = (Path(env.lr_bundle_uri) / "split_assignment.csv").read_text()
+        uri = tamper_bundle(env.lr_bundle_uri, tmp / "bundles", files={"split_assignment.csv": transform(text).encode()})
+        return {"bundle_uri": uri}, ()
+
+    return build
 
 
-def _bogus(env: ScoringEnv, experiment: str):
-    return "0" * 32, ()
+def _absent_bundle(env: ScoringEnv, tmp: Path):
+    return {"bundle_uri": str(tmp / "bundles" / ("0" * 64))}, ()
 
 
-def _source_model_uri(env: ScoringEnv, experiment: str):
-    uri = env.client().get_run(env.lr_run_id).data.tags["model_uri"]
-    return _clone(env, experiment, tags={"model_uri": uri}), ()
+def _signature_case(edit: Callable[[list[dict]], list[dict]]):
+    def build(env: ScoringEnv, tmp: Path):
+        signature = edit([dict(s) for s in env.manifest()["signature"]])
+        return {"bundle_uri": tamper_bundle(env.lr_bundle_uri, tmp / "bundles", set={"signature": signature})}, ()
+
+    return build
+
+
+def _first_entry(**changes):
+    return lambda signature: [{**signature[0], **changes}, *signature[1:]]
+
+
+def _logged_by_other_run(env: ScoringEnv, tmp: Path):
+    uri = tamper_bundle(env.lr_bundle_uri, tmp / "bundles", set={"mlflow.model_logged_by_run_id": env.xgb_run_id})
+    return {"bundle_uri": uri}, ()
 
 
 # Guard 14 versions, derived from the running interpreter so the cases hold under whichever interpreter runs the suite (CI: 3.14).
 RUNNING_PYTHON = current_python_version()
 OTHER_MINOR_PYTHON = f"{sys.version_info.major}.{sys.version_info.minor + 1}.0"
 OTHER_PATCH_PYTHON = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro + 1}"
-NO_PYTHON_TAG = ("python_version",)
-
-
-def _python_case(extras: tuple[str, ...], **kwargs):
-    return lambda env, experiment: (_clone(env, experiment, **kwargs), extras)
-
 
 _REV = list(reversed(FEATURE_COLUMNS))
-GUARD_CASES: list[GuardCase] = [
-    GuardCase("1-bogus-run-id", "run not found", _bogus),
-    GuardCase("2-status-failed", "not FINISHED", _simple(status="FAILED")),
-    GuardCase("2-soft-deleted", "deleted", _deleted),
-    GuardCase("3-no-model-uri", "model_uri", _simple(drop_tags=("model_uri",))),
-    GuardCase("4-unknown-model-name", "model_name", _simple(tags={"model_name": "random_forest"})),
-    GuardCase("4-no-model-name", "model_name", _simple(drop_tags=("model_name",))),
-    GuardCase("5-other-label-definition", "gold_label_definition", _simple(tags={"gold_label_definition": "all_cause_v0"})),
-    GuardCase("5-no-label-definition", "gold_label_definition", _simple(drop_tags=("gold_label_definition",))),
-    GuardCase("6-wrong-fingerprint", "gold_fingerprint", _simple(tags={"gold_fingerprint": "0" * 64})),
-    GuardCase("6-no-fingerprint", "gold_fingerprint", _simple(drop_tags=("gold_fingerprint",))),
-    GuardCase("7-reference-date-mismatch", "reference_date", _simple(params={"reference_date": "20260917"}), ("readmission_window_days",)),
-    GuardCase("7-window-mismatch", "readmission_window_days", _simple(params={"readmission_window_days": "14"}), ("reference_date",)),
-    GuardCase("7-no-reference-date", "reference_date", _simple(params={"reference_date": None}), ("readmission_window_days",)),
-    GuardCase("7-no-window", "readmission_window_days", _simple(params={"readmission_window_days": None}), ("reference_date",)),
-    GuardCase("8-old-sklearn", "library version", _simple(tags={"sklearn_version": "0.0.0"})),
-    GuardCase("8-no-numpy-tag", "library version", _simple(drop_tags=("numpy_version",))),
-    GuardCase("9-features-reversed", "feature_columns.json", _simple(features_json={"features": _REV})),
-    GuardCase("9-features-extra", "feature_columns.json", _simple(features_json={"features": [*FEATURE_COLUMNS, "extra"]})),
-    GuardCase("9-no-features-key", "feature_columns.json", _simple(features_json='{"nofeatures": 1}')),
-    GuardCase("9-not-json", "feature_columns.json", _simple(features_json="not json")),
-    GuardCase("9-features-not-a-list", "feature_columns.json", _simple(features_json='{"features": "abc"}')),
-    GuardCase("9-no-artifact", "feature_columns.json", _simple(drop_artifacts=("feature_columns.json",))),
-    GuardCase("10-signature-reversed", "signature", _simple(signature_columns=_REV)),
-    GuardCase("10-no-signature", "signature", _simple(no_signature=True)),
-    GuardCase("10-bad-model-uri", "signature", _simple(tags={"model_uri": "models:/m-doesnotexist"})),
-    GuardCase("11-wrong-header", "split_assignment.csv", _csv_case(lambda t: t.replace("encounter_id,partition", "id,partition", 1))),
-    GuardCase("11-duplicate-id", "split_assignment.csv", _csv_case(lambda t: t + t.splitlines()[1] + "\n")),
-    GuardCase("11-unknown-partition", "split_assignment.csv", _csv_case(lambda t: t.replace(",test", ",validation", 1))),
-    GuardCase("11-no-test-row", "split_assignment.csv", _csv_case(lambda t: t.replace(",test", ",train"))),
-    GuardCase("11-id-not-in-gold", "split_assignment.csv", _csv_case(lambda t: t + "not-in-gold,test\n")),
-    GuardCase("11-empty-file", "split_assignment.csv", _csv_case(lambda t: "")),
-    GuardCase("11-no-artifact", "split_assignment.csv", _simple(drop_artifacts=("split_assignment.csv",))),
-    GuardCase("12-train-relabelled-test", "split consistency", _relabel_case("train_to_test")),
-    GuardCase("12-test-relabelled-train", "split consistency", _relabel_case("test_to_train")),
-    GuardCase("12-dropped-added-as-train", "split consistency", _relabel_case("dropped_to_train")),
-    GuardCase("12-no-test-start-date", "split consistency", _simple(params={"test_start_date": None})),
-    GuardCase("12-bad-test-start-date", "split consistency", _simple(params={"test_start_date": "not-a-date"})),
-    GuardCase("13-model-of-another-run", "model provenance", _source_model_uri, ("signature",)),
-    GuardCase(
+BUNDLE_CASES: list[BundleCase] = [
+    BundleCase("1-bogus-bundle", "bundle not found", _absent_bundle),
+    BundleCase("2-status-failed", "not FINISHED", _tampered(set={"mlflow.run_status": "FAILED"})),
+    BundleCase("2-status-not-a-string", "not FINISHED", _tampered(set={"mlflow.run_status": 1})),
+    BundleCase("2-soft-deleted", "deleted", _tampered(set={"mlflow.run_lifecycle_stage": "deleted"})),
+    BundleCase("4-unknown-model-name", "model_name", _tampered(set={"model_name": "random_forest"})),
+    BundleCase("4-no-model-name", "model_name", _tampered(set={"model_name": None})),
+    BundleCase("5-other-label-definition", "gold_label_definition", _tampered(set={"gold_label_definition": "all_cause_v0"})),
+    BundleCase("5-no-label-definition", "gold_label_definition", _tampered(set={"gold_label_definition": None})),
+    BundleCase("6-wrong-fingerprint", "gold_fingerprint", _tampered(set={"gold_fingerprint": "0" * 64})),
+    BundleCase("6-no-fingerprint", "gold_fingerprint", _tampered(set={"gold_fingerprint": None})),
+    BundleCase("6-unknown-fingerprint-definition", "gold_fingerprint", _tampered(set={"gold_fingerprint_definition": "spark-v9"})),
+    BundleCase("6-fingerprint-definition-not-a-string", "gold_fingerprint", _tampered(set={"gold_fingerprint_definition": ["x"]})),
+    BundleCase("7-reference-date-mismatch", "reference_date", _tampered(set={"params.reference_date": "20260917"}), ("readmission_window_days",)),
+    BundleCase("7-window-mismatch", "readmission_window_days", _tampered(set={"params.readmission_window_days": "14"}), ("reference_date",)),
+    BundleCase("7-no-reference-date", "reference_date", _tampered(set={"params.reference_date": None}), ("readmission_window_days",)),
+    BundleCase("7-no-window", "readmission_window_days", _tampered(set={"params.readmission_window_days": None}), ("reference_date",)),
+    BundleCase("8-old-sklearn", "library version", _tampered(set={"library_versions.sklearn_version": "0.0.0"})),
+    BundleCase("8-no-numpy-tag", "library version", _tampered(set={"library_versions.numpy_version": None})),
+    BundleCase("9-features-reversed", "feature_columns.json", _tampered(set={"feature_columns": _REV})),
+    BundleCase("9-features-extra", "feature_columns.json", _tampered(set={"feature_columns": [*FEATURE_COLUMNS, "extra"]})),
+    BundleCase("9-no-features-key", "feature_columns.json", _tampered(set={"feature_columns": None})),
+    BundleCase("9-features-not-a-list", "feature_columns.json", _tampered(set={"feature_columns": "abc"})),
+    BundleCase("10-signature-reversed", "signature", _signature_case(lambda s: list(reversed(s)))),
+    BundleCase("10-no-signature", "signature", _tampered(set={"signature": None})),
+    BundleCase("10-signature-dtype-mismatch", "signature", _signature_case(_first_entry(type="string"))),
+    BundleCase("10-signature-optional-column", "signature", _signature_case(_first_entry(required=False))),
+    BundleCase("11-wrong-header", "split_assignment.csv", _split_case(lambda t: t.replace("encounter_id,partition", "id,partition", 1))),
+    BundleCase("11-duplicate-id", "split_assignment.csv", _split_case(lambda t: t + t.splitlines()[1] + "\n")),
+    BundleCase("11-unknown-partition", "split_assignment.csv", _split_case(lambda t: t.replace(",test", ",validation", 1))),
+    BundleCase("11-no-test-row", "split_assignment.csv", _split_case(lambda t: t.replace(",test", ",train"))),
+    BundleCase("11-id-not-in-gold", "split_assignment.csv", _split_case(lambda t: t + "not-in-gold,test\n")),
+    BundleCase("11-empty-file", "split_assignment.csv", _split_case(lambda t: "")),
+    BundleCase("12-train-relabelled-test", "split consistency", _relabel_case("train_to_test")),
+    BundleCase("12-test-relabelled-train", "split consistency", _relabel_case("test_to_train")),
+    BundleCase("12-dropped-added-as-train", "split consistency", _relabel_case("dropped_to_train")),
+    BundleCase("12-no-test-start-date", "split consistency", _tampered(set={"params.test_start_date": None})),
+    BundleCase("12-bad-test-start-date", "split consistency", _tampered(set={"params.test_start_date": "not-a-date"})),
+    BundleCase("13-model-of-another-run", "model provenance", _logged_by_other_run, ("signature",)),
+    BundleCase("13-logged-by-null", "model provenance", _tampered(set={"mlflow.model_logged_by_run_id": None})),
+    BundleCase(
         "14-other-minor", "python version",
-        _python_case((f"trained under Python {OTHER_MINOR_PYTHON} (from the run tag)", f"running Python {RUNNING_PYTHON}"),
-                     tags={"python_version": OTHER_MINOR_PYTHON}, mlmodel_python_version=OTHER_MINOR_PYTHON),
+        _tampered((f"trained under Python {OTHER_MINOR_PYTHON} (from the run tag)", f"running Python {RUNNING_PYTHON}"),
+                  set={"python_version": OTHER_MINOR_PYTHON, "mlmodel_python_version": OTHER_MINOR_PYTHON}),
         ("library version", "inconsistent provenance"),
     ),
-    GuardCase(
+    BundleCase(
         "14-legacy-other-minor", "python version",
-        _python_case((f"trained under Python {OTHER_MINOR_PYTHON} (from the logged model's MLmodel)",),
-                     drop_tags=NO_PYTHON_TAG, mlmodel_python_version=OTHER_MINOR_PYTHON),
+        _tampered((f"trained under Python {OTHER_MINOR_PYTHON} (from the logged model's MLmodel)",),
+                  set={"python_version": None, "mlmodel_python_version": OTHER_MINOR_PYTHON}),
         ("library version", "inconsistent provenance"),
     ),
-    GuardCase(
+    BundleCase(
         "14-tag-vs-mlmodel", "python version",
-        _python_case(("inconsistent provenance",), tags={"python_version": OTHER_MINOR_PYTHON}),
+        _tampered(("inconsistent provenance",), set={"python_version": OTHER_MINOR_PYTHON}),
         ("library version", "mismatch"),
     ),
-    GuardCase(
+    BundleCase(
         "14-malformed-tag", "python version",
-        _python_case(("tag 'python_version' is '3.x'",), tags={"python_version": "3.x"}),
+        _tampered(("tag 'python_version' is '3.x'",), set={"python_version": "3.x"}),
         ("library version", "MLmodel python_version"),
     ),
-    GuardCase(
+    BundleCase(
         "14-malformed-mlmodel", "python version",
-        _python_case(("MLmodel python_version 'garbage'",), drop_tags=NO_PYTHON_TAG, mlmodel_python_version="garbage"),
+        _tampered(("MLmodel python_version 'garbage'",), set={"python_version": None, "mlmodel_python_version": "garbage"}),
         ("library version", "tag 'python_version'"),
     ),
-    GuardCase(
+    BundleCase(
         "14-no-version-anywhere", "python version",
-        _python_case(("is unknown",), drop_tags=NO_PYTHON_TAG, drop_mlmodel_python_version=True),
+        _tampered(("is unknown",), set={"python_version": None, "mlmodel_python_version": None}),
         ("library version", "not a version of the form"),
     ),
-    GuardCase(
+    BundleCase(
         "14-empty-tag", "python version",
-        _python_case(("tag 'python_version' is ''",), tags={"python_version": ""}),
+        _tampered(("tag 'python_version' is ''",), set={"python_version": ""}),
         ("library version", "MLmodel python_version"),
     ),
-    GuardCase(  # a float: how an unquoted `3.10` parses in YAML
+    BundleCase(  # a float: how an unquoted `3.10` parses in YAML (the exporter copies it as a JSON number)
         "14-mlmodel-yaml-float", "python version",
-        _python_case(("MLmodel python_version 3.1,",), drop_tags=NO_PYTHON_TAG, mlmodel_python_version=3.1),
+        _tampered(("MLmodel python_version 3.1,",), set={"python_version": None, "mlmodel_python_version": 3.1}),
         ("library version", "tag 'python_version'"),
     ),
-    GuardCase(  # mirror of 14-tag-vs-mlmodel: a correct tag in front of a foreign MLmodel; only step (v) refuses it
+    BundleCase(  # mirror of 14-tag-vs-mlmodel: a correct tag in front of a foreign MLmodel; only step (v) refuses it
         "14-mlmodel-vs-tag", "python version",
-        _python_case(("inconsistent provenance", f"records '{OTHER_MINOR_PYTHON}'"), mlmodel_python_version=OTHER_MINOR_PYTHON),
+        _tampered(("inconsistent provenance", f"records '{OTHER_MINOR_PYTHON}'"), set={"mlmodel_python_version": OTHER_MINOR_PYTHON}),
         ("library version", "mismatch"),
     ),
-    GuardCase(  # a scalar python_function flavor: treated as absent, never an AttributeError
-        "14-non-dict-python-function-flavor", "python version",
-        _python_case(("is unknown",), drop_tags=NO_PYTHON_TAG, mlmodel_python_function_flavor="x"),
-        ("library version", "not a version of the form"),
+]
+
+
+def _integrity(extras: tuple[str, ...] = (), **kwargs):
+    return _tampered(extras, **kwargs)
+
+
+def _not_a_directory(env: ScoringEnv, tmp: Path):
+    file = tmp / "not-a-bundle"
+    file.write_text("x")
+    return {"bundle_uri": str(file)}, ()
+
+
+def _symlinked_model(env: ScoringEnv, tmp: Path):
+    outside = tmp / "outside-model.pkl"
+    shutil.copyfile(Path(env.lr_bundle_uri) / "model.pkl", outside)
+    return {"bundle_uri": tamper_bundle(env.lr_bundle_uri, tmp / "bundles", symlink_files={"model.pkl": outside})}, ()
+
+
+def _flip_first_byte(data: bytes) -> bytes:
+    return bytes([data[0] ^ 1]) + data[1:]
+
+
+def _flipped_model(env: ScoringEnv, tmp: Path):
+    data = (Path(env.lr_bundle_uri) / "model.pkl").read_bytes()
+    uri = tamper_bundle(env.lr_bundle_uri, tmp / "bundles", files={"model.pkl": _flip_first_byte(data)}, rehash=False)
+    return {"bundle_uri": uri}, ()
+
+
+def _truncated_split(env: ScoringEnv, tmp: Path):
+    data = (Path(env.lr_bundle_uri) / "split_assignment.csv").read_bytes()
+    uri = tamper_bundle(env.lr_bundle_uri, tmp / "bundles", files={"split_assignment.csv": data[:-10]}, rehash=False)
+    return {"bundle_uri": uri}, ()
+
+
+def _non_canonical(env: ScoringEnv, tmp: Path):
+    raw = json.dumps(env.manifest(), indent=2).encode()
+    return {"bundle_uri": tamper_bundle(env.lr_bundle_uri, tmp / "bundles", manifest_raw=raw)}, ()
+
+
+def _under_champion(sha256: str | None = None, **tamper_kwargs):
+    """A champion pinning the ORIGINAL manifest's sha (or `sha256`) in front of a bundle tampered with `tamper_kwargs`."""
+
+    def build(env: ScoringEnv, tmp: Path):
+        original = sha256_hex((Path(env.lr_bundle_uri) / "manifest.json").read_bytes())
+        uri = tamper_bundle(env.lr_bundle_uri, tmp / "bundles", **tamper_kwargs) if tamper_kwargs else env.lr_bundle_uri
+        return {"champion_path": write_champion(tmp / "deploy" / "champion.json", uri, sha256 or original)}, ()
+
+    return build
+
+
+def _ic(case_id: str, key: str, build, forbidden: tuple[str, ...] = ()) -> BundleCase:
+    return BundleCase(case_id, key, build, forbidden, starts_with=True)
+
+
+INTEGRITY_CASES: list[BundleCase] = [
+    _ic("I1-not-a-directory", "bundle not found: ", _not_a_directory),
+    _ic("I1-gs-uri", "bundle not found: ", lambda env, tmp: ({"bundle_uri": "gs://b/x"}, ())),
+    _ic("I1-other-scheme", "bundle not found: ", lambda env, tmp: ({"bundle_uri": "s3://b/x"}, ())),
+    _ic("I1-no-manifest", "manifest: ", _integrity(drop_manifest=True)),
+    _ic("I1-not-json", "manifest: ", _integrity(manifest_raw=b"not json")),
+    _ic("I1-not-object", "manifest: ", _integrity(manifest_raw=b"[]\n")),
+    _ic("I1-schema-version-2", "manifest: ", _integrity(set={"schema_version": 2})),
+    _ic("I1-schema-version-true", "manifest: ", _integrity(set={"schema_version": True})),
+    _ic("I3-edited-without-rehash", "bundle_id: ", _integrity(set={"model_name": "xgboost_calibrated"}, rehash=False)),
+    _ic("I3-renamed-dir", "bundle_id: ", _integrity(dir_name="f" * 64)),
+    _ic("I3-non-canonical-bytes", "bundle_id: ", _non_canonical),
+    _ic("I3-no-bundle-id", "bundle_id: ", _integrity(delete=("bundle_id",), rehash=False)),
+    _ic("I4-missing-model", "files: ", _integrity(files={"model.pkl": None})),
+    _ic("I4-missing-split", "files: ", _integrity(files={"split_assignment.csv": None})),
+    _ic("I4-model-byte-flipped", "files: ", _flipped_model),
+    _ic("I4-split-truncated", "files: ", _truncated_split),
+    _ic("I4-extra-file", "files: ", _integrity(extra_entries={"notes.txt": b"x"})),
+    _ic("I4-subdirectory", "files: ", _integrity(extra_entries={"sub/": None})),
+    _ic("I4-symlinked-model", "files: ", _symlinked_model),
+    _ic("I4-wrong-role", "files: ", _integrity(set={("files", "model.pkl", "role"): "x"})),
+    _ic("I4-size-is-bool", "files: ", _integrity(set={("files", "model.pkl", "size"): True})),
+    _ic("I4-no-files-key", "files: ", _integrity(delete=("files",))),
+    _ic("I5-missing-key", "manifest shape: ", _integrity(delete=("git",))),
+    _ic("I5-unknown-key", "manifest shape: ", _integrity(set={"extra": 1})),
+    _ic("I5-params-not-object", "manifest shape: ", _integrity(set={"params": "x"})),
+    _ic("I5-run-id-null", "manifest shape: ", _integrity(set={"mlflow.run_id": None})),
+    _ic("I5-run-id-not-hex", "manifest shape: ", _integrity(set={"mlflow.run_id": "run-1"})),
+    _ic("I5-git-commit-int", "manifest shape: ", _integrity(set={"git.commit": 7})),
+    _ic("I5-portable-not-null", "manifest shape: ", _integrity(set={"portable": {"x": 1}})),
+    _ic("I2-champion-sha-mismatch", "champion sha256: ", _under_champion(sha256="0" * 64)),
+    _ic(
+        "I2-edited-without-rehash-under-champion", "champion sha256: ",
+        _under_champion(set={"model_name": "xgboost_calibrated"}, rehash=False), ("bundle_id",),
     ),
+    _ic("I2-invalid-json-under-champion", "champion sha256: ", _under_champion(manifest_raw=b"not json"), ("manifest:",)),
 ]
 
 
 # ---------------------------------------------------------------------------------------------------------------
 # A hand-built ScoringResult (report and CLI tests)
 # ---------------------------------------------------------------------------------------------------------------
+from readmission_risk.scoring.bundle_guard import ModelBundle
 from readmission_risk.scoring.pipeline import ScoringResult
-from readmission_risk.scoring.runs import ModelRun
 
 _IDS = [f"enc-000{i}" for i in range(1, 6)]
 _SCORES = [0.4, 0.2, 0.5, 0.1, 0.3]  # rank order: enc-0003, enc-0001, enc-0005, enc-0002, enc-0004
@@ -496,19 +617,22 @@ _DESCRIPTIONS = [None, "other", "d" * 48 + "TAILTAIL", "other", "e" * 48]  # ran
 def make_result(*, git_commit="0123456789abcdef0123456789abcdef01234567", git_dirty="clean", observed=None) -> ScoringResult:
     batch = make_batch(_IDS, descriptions=_DESCRIPTIONS)
     predictions = build_predictions(batch, _SCORES, **{**PREDICTION_KWARGS, "top_n": 3, "window_days": 3, "run_date": date(2026, 3, 10)})
-    run = ModelRun(
-        run_id="run-abc",
+    bundle = ModelBundle(
+        bundle_id="b" * 64,
+        bundle_uri="bundles/" + "b" * 64,
+        mlflow_run_id="run-abc",
         model_name="logistic_regression",
         test_start_date="20230101",
         gold_fingerprint="f" * 64,
         git_commit=git_commit,
         git_dirty=git_dirty,
         partition_of=pd.Series(dtype=object),
+        model_bytes=b"",
     )
     return ScoringResult(
         predictions=predictions,
         partition_path=Path("out/run_date=20260310/predictions.parquet"),
-        run=run,
+        bundle=bundle,
         window_start=pd.Timestamp("2026-03-08T00:00Z"),
         window_end=pd.Timestamp("2026-03-11T00:00Z"),
         window_days=3,

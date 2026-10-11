@@ -208,14 +208,18 @@ Each requirement is testable; slice designs refine them.
     - git commit and dirty flag;
     - the MLflow run id (provenance);
     - the sha256 of each file.
-- **FR5** The scorer validates the manifest and the file sha256s before any unpickling, and never imports `mlflow`. All guard cases, including those `91cb37c` added for guard 14, are ported to manifest fixtures. The reference runs are now `readmission-risk-v1`, trained on 3.14.7 (`4fad5a2`), so the spine's first champion bundle can be exported from them directly. The 3.12-trained `readmission-risk-2b` runs are history only, and guard 14 refuses them under 3.14. **Kill trigger:** if more than 20% of the scoring tests need semantic changes, the manifest becomes an additional layer over the existing MLflow guards.
-- **FR6** `deploy/champion.json` names `{bundle_uri, sha256}`. The scheduled tick reads it from `main`. Promotion is a PR that edits it, and the PR carries the gate table (FR15) as a check output. Rollback is `git revert` of that PR (G19); partitions already scored are not re-scored.
+
+  **Slice 2 (2026-10-11, `notes/eg-new-feature/v2-slice2-model-bundle-and-manifest-2026-10-11.md`):** done for the export command (`scripts/export_bundle.py`, `make export`, from an existing MLflow run; a non-FINISHED or deleted run is exported with a warning and refused by the scorer) and the manifest (all 14 guard facts, the split assignment file and its sha256, `test_start_date`, git commit and dirty flag, the MLflow run id, every file's sha256); training-time export and the portable form (a null `portable` slot; manifest schema 2) → slice 6; `gs://` → slice 3 (local `bundles/` behind a storage seam until then); fingerprint definition `pandas-csv-sha256-v1` recorded in the manifest until FR12.
+- **FR5** The scorer validates the manifest and the file sha256s before any unpickling, and never imports `mlflow`. All guard cases, including those `91cb37c` added for guard 14, are ported to manifest fixtures. The reference runs are now `readmission-risk-v1`, trained on 3.14.7 (`4fad5a2`), so the spine's first champion bundle can be exported from them directly. The 3.12-trained `readmission-risk-2b` runs are history only, and guard 14 refuses them under 3.14. **Kill trigger:** if more than 20% of the scoring tests need semantic changes, the manifest becomes an additional layer over the existing MLflow guards. **Slice 2 (2026-10-11, `notes/eg-new-feature/v2-slice2-model-bundle-and-manifest-2026-10-11.md`):** done; the scorer imports neither mlflow nor pyspark; 23 of 140 scoring tests (16.4%) changed semantically, under the kill trigger.
+- **FR6** `deploy/champion.json` names `{bundle_uri, sha256}`. The scheduled tick reads it from `main`. Promotion is a PR that edits it, and the PR carries the gate table (FR15) as a check output. Rollback is `git revert` of that PR (G19); partitions already scored are not re-scored. **Slice 2 (2026-10-11, `notes/eg-new-feature/v2-slice2-model-bundle-and-manifest-2026-10-11.md`):** `deploy/champion.json` and its reader done (pinning the v1 logistic-regression bundle); the gate table → slice 6.
 - **FR7** Bundles cannot be overwritten. Three controls enforce this:
   - the writer service account has `storage.objectCreator` only;
   - uploads use `ifGenerationMatch=0`;
   - the scorer's service account has read-only access.
 
   Bucket Lock is explicitly rejected because it is irreversible and blocks teardown.
+
+  **Slice 2 (2026-10-11, `notes/eg-new-feature/v2-slice2-model-bundle-and-manifest-2026-10-11.md`):** local no-overwrite done (atomic temp-dir rename, idempotent identical re-export, any other existing entry refused, read-only files); the three GCS controls → slice 3.
 
 **Infrastructure and identity (G4, G16, G17)**
 - **FR8** Terraform manages:
@@ -362,7 +366,7 @@ Proposed `/eg-new-feature` slices, refined there:
 - Closeout work stays on `main`. That includes the five commits that landed during the PRD session, among them the 3.14 move.
 - Once the closeout is done, work switches to the `v2` branch, and the then-current v2 material (the v2 brainstorm note and this PRD) is committed there. **Status 2026-10-10:** `v2` and `origin/v2` were fast-forwarded to `main` (`2242649`), and both notes are staged on `v2`.
 - CI for `v2` needs an open PR `v2 → main`, because push CI runs only on `main` since `51f1d62`.
-2. **Bundle + manifest** (FR4–FR7): guard mapping table; manifest fixtures replace `clone_run`; `forbid_model_loading` still applies; the scorer drops its mlflow import; `champion.json`.
+2. **Bundle + manifest** (FR4–FR7): guard mapping table; manifest fixtures replace `clone_run`; `forbid_model_loading` still applies; the scorer drops its mlflow import; `champion.json`. **Done 2026-10-11** (`notes/eg-new-feature/v2-slice2-model-bundle-and-manifest-2026-10-11.md`).
 3. **Terraform + WIF** (FR8–FR9): bootstrap script; `infra/` directory; one `workflow_dispatch` smoke job that only lists a bucket. Also: `terraform import` the existing CHF 20 budget and create the carried CHF 5 budget.
 4. **Score to BigQuery** (FR17–FR18, part of FR20): a `bigquery_writer` injected into `score_run_date`; `scoring_runs`; `ASSERT` scripts; one manual run on 10k (end of the spine).
 5. **`gs://` Big Join + fingerprint + pilot** (FR10–FR13): `prereg.yaml` lands here, before generation.

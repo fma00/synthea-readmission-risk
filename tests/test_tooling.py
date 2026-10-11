@@ -23,13 +23,14 @@ MAKEFILE = ROOT / "Makefile"
 PRE_COMMIT_CONFIG = ROOT / ".pre-commit-config.yaml"
 
 EXPECTED_TARGETS = {
-    "help", "setup", "hooks", "lint", "test", "pre-commit", "train", "score",
+    "help", "setup", "hooks", "lint", "test", "pre-commit", "train", "export", "score",
     "setup-runtime", "test-runtime", "lock-dev", "lock-runtime",
 }
 # Every variable the Makefile reads, plus make's own propagation variables: a pytest started by `make test X=y` (or a
 # shell exporting VENV=...) must not change what these tests see.
 MAKEFILE_VARIABLES = ("PYTHON", "PYTHON312", "VENV", "RUNTIME_VENV", "LOCK_VENV", "GOLD_DIR", "REFERENCE_DATE",
-                      "TEST_START_DATE", "EXPERIMENT", "RUN_DATE", "TRAIN_EXPERIMENT", "TRAIN_ARGS", "SCORE_ARGS")
+                      "TEST_START_DATE", "EXPERIMENT", "RUN_DATE", "TRAIN_EXPERIMENT", "TRAIN_ARGS", "SCORE_ARGS",
+                      "EXPORT_MODEL", "EXPORT_ARGS")
 SCRUBBED_ENV = ("MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "GNUMAKEFLAGS", "MAKEFILES", *MAKEFILE_VARIABLES)
 EXPECTED_PRE_COMMIT = [
     "repos:",
@@ -107,10 +108,18 @@ def test_make_lint_runs_ruff_and_offline_zizmor_from_the_venv():
 @needs_make
 def test_make_score_passes_the_reference_defaults():
     assert (
-        ".venv/bin/python scripts/score_discharges.py --gold-dir data/gold/full_run_2b"
-        " --experiment-name readmission-risk-v1 --run-date 20250630"
+        ".venv/bin/python scripts/score_discharges.py --gold-dir data/gold/full_run_2b --run-date 20250630"
     ) in _dry_run("score")
+    assert "--experiment-name" not in _dry_run("score")  # the scorer reads the champion bundle, not MLflow
     assert "--run-date 20240115 --show-observed-outcomes" in _dry_run("score", "RUN_DATE=20240115", "SCORE_ARGS=--show-observed-outcomes")
+
+
+@needs_make
+def test_make_export_passes_the_reference_defaults():
+    assert (
+        ".venv/bin/python scripts/export_bundle.py --experiment-name readmission-risk-v1 --model logistic_regression"
+    ) in _dry_run("export")
+    assert "--model xgboost_calibrated --bundles-dir x" in _dry_run("export", "EXPORT_MODEL=xgboost_calibrated", "EXPORT_ARGS=--bundles-dir x")
 
 
 @needs_make

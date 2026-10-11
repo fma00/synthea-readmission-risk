@@ -34,7 +34,7 @@ For ML and MLOps reviewers: seven stops, each a file to open and what to look fo
 2. **Provenance:** [gold_metadata.py](src/readmission_risk/pipeline/gold_metadata.py) writes `_gold_metadata.json` next to every gold table; training refuses a table without it or with mismatched settings.
 3. **The split:** [`chronological_group_split`](src/readmission_risk/models/split.py) is chronological and patient-disjoint, with a censoring buffer, a label-window purge and a label-horizon purge; [test_split.py](tests/models/test_split.py) pins each rule.
 4. **Honest evaluation:** [evaluate.py](src/readmission_risk/models/evaluate.py) and [baselines.py](src/readmission_risk/models/baselines.py) report calibration (Brier score, ECE, reliability curve) next to AUC, with patient-clustered bootstrap intervals and a no-model lookup that the models do not beat ([results](docs/results.md)).
-5. **Guarded scoring:** [`validate_run`](src/readmission_risk/scoring/runs.py) runs 14 checks that refuse a mismatched model/data pair before anything is unpickled; [a real refusal](#what-a-refusal-looks-like) is shown below.
+5. **Guarded scoring:** the scorer reads an immutable, content-addressed model bundle, never MLflow; [`validate_bundle`](src/readmission_risk/scoring/bundle_guard.py) verifies its hashes and runs 14 checks that refuse a mismatched model/data pair before anything is unpickled; [a real refusal](#what-a-refusal-looks-like) is shown below.
 6. **Supply chain:** [requirements.txt](requirements.txt) is hash-locked, and [ci.yml](.github/workflows/ci.yml) uses SHA-pinned actions, a zizmor audit, Python 3.14 tests plus a Dataproc-runtime job (Python 3.12, PySpark 4.0.1, Java 21) for the pipeline tests; local pre-commit hooks (ruff, zizmor) mirror the lint.
 7. **How it was designed:** [notes/](notes/) holds one design document per slice, each stress-tested by independent fresh-context reviewers; where a review did not close, the note says so (see [How this was built](#how-this-was-built)).
 
@@ -105,11 +105,11 @@ Patient ids are synthetic and shortened to eight characters. The table is genera
 Asking for a window of training-period discharges is refused rather than silently scored (exit code 1, nothing written):
 
 ```console
-$ python scripts/score_discharges.py --gold-dir data/gold/full_run_2b --experiment-name readmission-risk-v1 --run-date 20220630
+$ python scripts/score_discharges.py --gold-dir data/gold/full_run_2b --run-date 20220630
 ERROR: window [2022-06-01T00:00:00+00:00, 2022-07-01T00:00:00+00:00) contains 27 in-sample (training-partition) discharge(s) and 9 discharge(s) excluded by the split (neither partition); a held-out Top-N list needs every discharge in the window to be a held-out row
 ```
 
-In the same way, the 14 run checks in [`validate_run`](src/readmission_risk/scoring/runs.py) refuse a model trained on a different gold table, label definition, library version or Python version before it is unpickled; [docs/scoring.md](docs/scoring.md) lists every refusal.
+In the same way, the integrity checks and 14 guards in [`validate_bundle`](src/readmission_risk/scoring/bundle_guard.py) refuse a tampered bundle, or a model trained on a different gold table, label definition, library version or Python version, before it is unpickled; [docs/scoring.md](docs/scoring.md) lists every refusal. The command scores with the committed champion bundle (`deploy/champion.json`); on a fresh clone, train, export and score your own bundle as [docs/scoring.md](docs/scoring.md#model-bundles) describes.
 
 ## Limitations
 
@@ -141,7 +141,7 @@ These items make up v2 (the `v2` branch); the v1 releases (v1.0, then v1.1 with 
 |---|---|---|
 | Data engineering | Schema-first PySpark join (hand-declared `StructType`, no `inferSchema`), planned-stay and continuation logic, gold-table provenance metadata, hash-pinned lockfiles, CI | [big_join.py](src/readmission_risk/pipeline/big_join.py), [schemas.py](src/readmission_risk/pipeline/schemas.py), [gold_metadata.py](src/readmission_risk/pipeline/gold_metadata.py), [requirements.txt](requirements.txt), [ci.yml](.github/workflows/ci.yml) |
 | Data science | Chronological, patient-disjoint split with a censoring buffer and a label-window purge; label-definition work; calibration metrics; clustered-bootstrap intervals; a no-model baseline; an honest weak result | [split.py](src/readmission_risk/models/split.py), [evaluate.py](src/readmission_risk/models/evaluate.py), [baselines.py](src/readmission_risk/models/baselines.py), [results](docs/results.md) |
-| ML engineering | MLflow tracking; guard-checked model loading (14 guards); idempotent, partitioned batch scoring with an injectable writer | [tracking.py](src/readmission_risk/models/tracking.py), [runs.py](src/readmission_risk/scoring/runs.py), [pipeline.py](src/readmission_risk/scoring/pipeline.py), [score_discharges.py](scripts/score_discharges.py) |
+| ML engineering | MLflow tracking; manifest-checked model bundles (14 guards + integrity checks) and a champion pointer; idempotent, partitioned batch scoring with an injectable writer | [tracking.py](src/readmission_risk/models/tracking.py), [bundle_export.py](src/readmission_risk/models/bundle_export.py), [bundle_guard.py](src/readmission_risk/scoring/bundle_guard.py), [pipeline.py](src/readmission_risk/scoring/pipeline.py), [score_discharges.py](scripts/score_discharges.py) |
 
 ## Quick start
 
@@ -171,6 +171,8 @@ src/readmission_risk/pipeline/  # Synthea generation wrapper, PySpark feature jo
 src/readmission_risk/models/    # split, features, training, evaluation, MLflow tracking
 src/readmission_risk/scoring/   # Top-N triage scorer (pure functions)
 src/readmission_risk/reporting/  # README figure and sample table, built from MLflow runs and a predictions file
+src/readmission_risk/bundles/   # model bundle format: manifest, local store, champion pointer
+deploy/champion.json            # the live model bundle (promotion = a PR editing it)
 scripts/                        # command-line entry points
 tests/                          # pytest suite (tests/test_docs.py covers these docs)
 docs/                           # setup, results and scoring write-ups
@@ -178,7 +180,7 @@ notes/                          # design docs, PRDs, measurements (dated records
 .claude/commands/               # the /eg-* design-review workflow
 .github/workflows/              # CI: ruff + pytest, a Dataproc-runtime pipeline job, and a zizmor workflow audit; actions pinned to commit SHAs
 .github/dependabot.yml          # weekly update PRs for the pinned actions
-Makefile                        # common tasks: setup, lint, test, train, score, runtime env, lockfiles
+Makefile                        # common tasks: setup, lint, test, train, export, score, runtime env, lockfiles
 .pre-commit-config.yaml         # ruff + zizmor git hooks (make hooks)
 requirements-dataproc-3.0.txt   # hash-locked Dataproc runtime 3.0 mirror (CI's pipeline job only)
 ```

@@ -54,6 +54,7 @@ EXPECTED_H2 = [
     "License and acknowledgements",
 ]
 MUST_BE_IGNORED = [
+    "bundles/0123/manifest.json",
     ".claude/settings.local.json",
     ".claude/worktrees/x/file",
     ".streamlit/secrets.toml",
@@ -85,6 +86,9 @@ MUST_BE_IGNORED = [
     ".venv-lock312/bin/python",
 ]
 MUST_NOT_BE_IGNORED = [
+    "deploy/champion.json",
+    "src/readmission_risk/bundles/manifest.py",
+    "tests/bundles/test_store.py",
     ".claude/commands/eg-prd.md",
     ".env.example",
     "src/readmission_risk/models/split.py",
