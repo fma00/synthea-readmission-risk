@@ -906,7 +906,15 @@ Recorded under the redaction rule. Implementation 2026-10-11 on branch `v2-slice
 
 **Open:** L-post (the first dispatched `score.yml`, after v2 merges into `main`, together with slice 3's V-post) and the F4 billing check.
 
-**Follow-ups found during the live checks:** the bundle exporter's MLflow import contacts `config.mlflow-telemetry.io` (MLflow telemetry; `MLFLOW_DISABLE_TELEMETRY=true` silences it, so consider setting it in `make export` and `scripts/export_bundle.py`); the untraced bucket-metadata GET in L3.
+**Follow-ups found during the live checks, resolved the same day:**
+- **MLflow telemetry.** Laptop runs of the bundle exporter (and of training and the README assets) contacted `config.mlflow-telemetry.io`. MLflow disables its telemetry by itself only under pytest and in CI. `src/readmission_risk/__init__.py` now does `os.environ.setdefault("MLFLOW_DISABLE_TELEMETRY", "true")` before any `mlflow` import, so an explicit `MLFLOW_DISABLE_TELEMETRY=false` still wins.
+  - Tests: `tests/test_gcp.py::test_importing_the_package_opts_out_of_mlflow_telemetry` runs a subprocess without the CI/test markers and with sockets blocked, and checks that no telemetry client exists. A mutation check confirmed it fails without the opt-out. `test_an_explicit_mlflow_telemetry_choice_wins` covers the override.
+  - Live: a traced re-export made 0 telemetry requests.
+- **The bucket-metadata GET in L3.** Traced to google-cloud-storage 3.16's "App-centric Observability" `BucketMetadataCache`. `_helpers.create_trace_span_helper` queues a background `get_bucket` on the first touch of every bucket, *before* checking whether its OpenTelemetry tracing is on (it is off by default here, so the metadata is never used). On a 403 it caches a fallback. Harmless, but a refused request each time.
+  - Fix: `gcp.storage_client()` sets the library's own switch, `DISABLE_GCS_PYTHON_CLIENT_OTEL_BUCKET_METADATA=true` (`setdefault`).
+  - Test: `test_storage_client_switches_off_the_unused_bucket_metadata_lookup`.
+  - Live: a traced scoring run from the GCS champion sent only the object listing, no `GET /storage/v1/b/<bucket>?projection=noAcl`.
+- Trade-off, stated: both are process-environment defaults set by the package. That is acceptable for this single-owner application package, and `setdefault` never overrides an explicit setting.
 
 ## Teardown additions (docs/setup.md > Teardown checklist)
 

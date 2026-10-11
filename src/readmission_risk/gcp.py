@@ -7,6 +7,7 @@ notes/eg-new-feature/v2-slice4-score-to-bigquery-2026-10-11.md (Interfaces > gcp
 
 from __future__ import annotations
 
+import os
 import re
 from typing import TYPE_CHECKING
 
@@ -67,6 +68,10 @@ def credentials() -> Credentials:
 
 def storage_client() -> storage.Client:
     if "storage" not in _clients:
+        # google-cloud-storage 3.16 queues a background get_bucket for its tracing metadata on the first touch of every
+        # bucket, even with its OpenTelemetry tracing off (the default here), so the lookup is never used; the job roles
+        # lack storage.buckets.get, so it is a refused request each time. This is the library's own switch.
+        os.environ.setdefault("DISABLE_GCS_PYTHON_CLIENT_OTEL_BUCKET_METADATA", "true")
         from google.cloud import storage
 
         _clients["storage"] = storage.Client(project=PROJECT_ID, credentials=credentials())

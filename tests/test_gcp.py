@@ -100,3 +100,59 @@ def test_gcp_imports_without_google():
     )
     done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
     assert done.returncode == 0, done.stderr
+
+
+def test_storage_client_switches_off_the_unused_bucket_metadata_lookup(monkeypatch):
+    from google.cloud import storage
+
+    built = []
+    monkeypatch.delenv("DISABLE_GCS_PYTHON_CLIENT_OTEL_BUCKET_METADATA", raising=False)
+    monkeypatch.setattr(storage, "Client", lambda **kwargs: built.append(kwargs) or object())
+    _adc(monkeypatch, _ExternalAccount())
+    gcp.storage_client()
+    assert built and __import__("os").environ["DISABLE_GCS_PYTHON_CLIENT_OTEL_BUCKET_METADATA"] == "true"
+
+    gcp.configure(impersonate_service_account=None)  # drops the cached client
+    monkeypatch.setenv("DISABLE_GCS_PYTHON_CLIENT_OTEL_BUCKET_METADATA", "false")  # an explicit choice wins
+    gcp.storage_client()
+    assert __import__("os").environ["DISABLE_GCS_PYTHON_CLIENT_OTEL_BUCKET_METADATA"] == "false"
+
+
+_CI_MARKERS = ("PYTEST_CURRENT_TEST", "GITHUB_ACTIONS", "CI", "CIRCLECI", "GITLAB_CI", "JENKINS_URL", "TRAVIS",
+               "BUILDKITE", "TF_BUILD", "CODEBUILD_BUILD_ID", "BITBUCKET_BUILD_NUMBER", "DO_NOT_TRACK")  # fmt: skip
+
+
+def _run_without_ci_markers(code: str, **extra_env) -> subprocess.CompletedProcess:
+    """A fresh interpreter that MLflow does NOT treat as a test or CI run, with every outbound socket connection refused
+    (so even a broken opt-out could not reach the network from this test)."""
+    import os
+
+    env = {k: v for k, v in os.environ.items() if k not in _CI_MARKERS and k != "MLFLOW_DISABLE_TELEMETRY"}
+    env.update(extra_env)
+    guard = (
+        "import socket\n"
+        "def _refuse(*a, **k):\n"
+        "    raise OSError('network disabled in this test')\n"
+        "socket.socket.connect = _refuse\n"
+        "socket.create_connection = _refuse\n"
+    )
+    return subprocess.run([sys.executable, "-c", guard + code], capture_output=True, text=True, check=False, env=env)
+
+
+def test_importing_the_package_opts_out_of_mlflow_telemetry():
+    code = (
+        "import os, readmission_risk.models.tracking\n"
+        "from mlflow.telemetry.client import get_telemetry_client\n"
+        "assert os.environ['MLFLOW_DISABLE_TELEMETRY'] == 'true'\n"
+        "assert get_telemetry_client() is None, 'mlflow created a telemetry client'\n"
+    )
+    done = _run_without_ci_markers(code)
+    assert done.returncode == 0, done.stderr
+
+
+def test_an_explicit_mlflow_telemetry_choice_wins():
+    done = _run_without_ci_markers(
+        "import os, readmission_risk\nassert os.environ['MLFLOW_DISABLE_TELEMETRY'] == 'false'\n",
+        MLFLOW_DISABLE_TELEMETRY="false",
+    )
+    assert done.returncode == 0, done.stderr
