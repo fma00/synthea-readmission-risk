@@ -295,6 +295,45 @@ def test_refusals_happen_before_load_and_before_write(scoring_env, tmp_path):
     assert swapped.partition_path == sentinel and not stub_out.exists()
 
 
+def test_on_validated_called_once_after_validation_and_not_on_earlier_refusals(scoring_env, tmp_path):
+    env = scoring_env
+    calls = []
+    result = score_run_date(_config(env, tmp_path / "ok"), on_validated=lambda b, w: calls.append((b, w)))
+    assert calls == [(result.bundle, DEFAULT_WINDOW_DAYS)]
+
+    # a completeness refusal comes AFTER validation: the callback has already seen the bundle and the window
+    calls.clear()
+    with pytest.raises(ValueError, match="in-sample"):
+        score_run_date(
+            _config(env, tmp_path / "late", run_date="20221130", window_days=30),  # an in-sample window
+            on_validated=lambda b, w: calls.append((b.bundle_id, w)),
+        )
+    assert calls == [(result.bundle.bundle_id, 30)]
+
+    # a refusal before validation (a bad config) never calls it
+    calls.clear()
+    with pytest.raises(ValueError):
+        score_run_date(_config(env, tmp_path / "bad", top_n=0), on_validated=lambda b, w: calls.append(b))
+    assert calls == []
+
+
+def test_validate_bundle_sets_champion_sha256(scoring_env, tmp_path):
+    env = scoring_env
+    by_bundle = score_run_date(_config(env, tmp_path / "a"))
+    assert by_bundle.bundle.champion_sha256 is None
+    champion = write_champion(tmp_path / "champion.json", env.lr_bundle_uri)
+    by_champion = score_run_date(_config(env, tmp_path / "b", champion_path=champion))
+    pin = hashlib.sha256((Path(env.lr_bundle_uri) / "manifest.json").read_bytes()).hexdigest()
+    assert by_champion.bundle.champion_sha256 == pin
+
+
+def test_partition_path_may_be_a_string(scoring_env, tmp_path):
+    result = score_run_date(
+        _config(scoring_env, tmp_path), writer=lambda predictions, output_dir, run_date: f"bigquery://x${run_date:%Y%m%d}"
+    )
+    assert result.partition_path == "bigquery://x$20260630"
+
+
 def test_pipeline_postconditions_raise_runtime_error(scoring_env, tmp_path, monkeypatch):
     real = pipeline.build_predictions
     for label, tamper in (
@@ -409,6 +448,8 @@ def test_scoring_modules_never_import_mlflow():
         "assert 'mlflow' not in sys.modules, 'mlflow was imported'\n"
         "assert 'pyspark' not in sys.modules, 'pyspark was imported'\n"
         "assert 'readmission_risk.pipeline.big_join' not in sys.modules, 'the Big Join (Spark) was imported'\n"
+        "assert 'google.cloud' not in sys.modules, 'a google.cloud client library was imported'\n"
+        "assert 'readmission_risk.warehouse.run' not in sys.modules, 'the scorer imported the warehouse'\n"
     )
     done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False, env={**os.environ, "MLFLOW_DISABLE_AGENT_HINT": "1"})
     assert done.returncode == 0, done.stderr

@@ -146,6 +146,8 @@ Since v2 slice 3, [infra/](../infra/) manages the project's buckets, service acc
 | Buckets (us-central1, uniform access, public access prevention enforced) | `synthea-readmission-risk-tfstate` (Terraform state, versioned), `-raw` (objects deleted after 90 days), `-gold`, `-bundles` (model bundles, versioned) |
 | `gha-smoke` service account | Lists the bundle bucket (`roles/storage.legacyBucketReader`: no object reads); impersonable only by [smoke.yml](../.github/workflows/smoke.yml) on `main` through WIF |
 | `bundle-writer` service account | Creates objects in the bundle bucket (`roles/storage.objectCreator`: no overwrite, no delete, no list); impersonated by the operator for uploads |
+| `scorer` service account (v2 slice 4) | Reads the bundle and gold buckets (`roles/storage.objectViewer`), owns dataset `scratch` (`roles/bigquery.dataEditor`), runs BigQuery jobs (`roles/bigquery.jobUser`), and on `serving.predictions` / `serving.scoring_runs` holds only the custom role `scorerTableWriter` (`tables.get`, `getData`, `updateData`: no create, drop or metadata change); impersonable only by [score.yml](../.github/workflows/score.yml) on `main` through WIF, and by the operator |
+| BigQuery datasets (v2 slice 4, us-central1) | `serving` (`predictions`, partitioned by `as_of_date`; `scoring_runs`, partitioned by `started_at`; both require a partition filter and are deletion-protected; schemas from `src/readmission_risk/warehouse/schemas/`) and `scratch` (tables expire after 1 day) |
 | WIF pool `github`, provider `github-actions` | Accepts a GitHub OIDC token only if repository id `1380503419`, owner id `270004823`, ref `refs/heads/main` and event `workflow_dispatch`/`schedule` all match |
 | Budgets | CHF 20/month (imported, created 2026-10-09) and CHF 5/month early warning; alerts only, not caps |
 
@@ -160,7 +162,7 @@ export CLOUDSDK_CORE_PROJECT=synthea-readmission-risk
 infra/bootstrap.sh
 ```
 
-**Plan and apply.** The first plan should read `Plan: 1 to import, 12 to add, 0 to change, 0 to destroy` (the CHF 20 budget imported with no change; 3 buckets, 2 service accounts, 4 IAM members, the pool, the provider and the CHF 5 budget). Anything else: stop and investigate. Afterwards `terraform plan` must say "No changes".
+**Plan and apply.** The first plan should read `Plan: 1 to import, 12 to add, 0 to change, 0 to destroy` (the CHF 20 budget imported with no change; 3 buckets, 2 service accounts, 4 IAM members, the pool, the provider and the CHF 5 budget). Anything else: stop and investigate. Afterwards `terraform plan` must say "No changes". v2 slice 4's change on top of that state reads `Plan: 15 to add, 0 to change, 0 to destroy` (the BigQuery API, 2 datasets, 2 tables, the custom role, the `scorer` account and 8 IAM members).
 
 ```sh
 terraform -chdir=infra plan
@@ -246,6 +248,37 @@ gcloud iam workload-identity-pools providers describe github-actions --workload-
 
 **V-post (after v2 merges into `main`; open until then).** (1) `gh workflow run smoke.yml --ref main`: green, and the log lists the two bundle prefixes. (2) The negative proof: on a throwaway branch that contains `smoke.yml`, `gh workflow run smoke.yml --ref <branch>`: `auth` succeeds and "List the bundle bucket" fails with the **STS** refusal by the attribute condition (`sts.googleapis.com`, `unauthorized_client`); an IAM denial, a context or a network error does not count. Record both run URLs in the design note and CLAUDE.md. Not proven by these runs: that the `workflow_ref` binding refuses another workflow file on `main` (first exercised in slice 4), and the `event_name` clause (every workflow that can reach the exchange is dispatch-only).
 
+## Scoring into BigQuery (v2 slice 4)
+
+Design and live results: `notes/eg-new-feature/v2-slice4-score-to-bigquery-2026-10-11.md`. Every command below starts from `export CLOUDSDK_CORE_PROJECT=synthea-readmission-risk`; impersonated `gcloud` calls also need `CLOUDSDK_BILLING_QUOTA_PROJECT=LEGACY`. The Python CLIs take `--impersonate-service-account` and handle the quota project themselves.
+
+**The gold table in GCS (once per gold table).** The scorer reads gold from `gs://synthea-readmission-risk-gold/full_run_2b/` (downloaded to a temporary directory, then read by the same loader as a local copy). Upload the Parquet parts and the metadata as yourself (the gold bucket is not create-only), then check the bytes:
+
+```sh
+export CLOUDSDK_CORE_PROJECT=synthea-readmission-risk
+gcloud storage cp data/gold/full_run_2b/part-*.parquet data/gold/full_run_2b/_gold_metadata.json gs://synthea-readmission-risk-gold/full_run_2b/
+# Byte check: GCS stores md5 (base64), not sha256.
+for f in data/gold/full_run_2b/part-*.parquet data/gold/full_run_2b/_gold_metadata.json; do
+  remote=$(gcloud storage objects describe "gs://synthea-readmission-risk-gold/full_run_2b/$(basename "$f")" --format='value(md5_hash)')
+  [ "$remote" = "$(openssl md5 -binary "$f" | base64)" ] && echo "equal $(basename "$f")" || echo "DIFFERENT $(basename "$f")"
+done
+```
+
+**Score and prove the data tests.** `make score-bq RUN_DATE=20250630` and `make m5-check RUN_DATE=20250630` ([scoring.md](scoring.md#scoring-into-bigquery-v2-slice-4)). Read results back as the scorer with a partition filter, for example `bq query --use_legacy_sql=false --maximum_bytes_billed=104857600 "SELECT status, COUNT(*) FROM serving.scoring_runs WHERE started_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY) GROUP BY status"`.
+
+**Bundles in GCS.** `python scripts/export_bundle.py ... --bundles-dir gs://synthea-readmission-risk-bundles --impersonate-service-account bundle-writer@synthea-readmission-risk.iam.gserviceaccount.com` uploads a new bundle create-only. `bundle-writer` cannot read, so verify an upload as yourself (or the scorer): `gcloud storage ls -l gs://synthea-readmission-risk-bundles/<id>/` lists three objects, and scoring with `--bundle gs://synthea-readmission-risk-bundles/<id>` checks every hash. An interrupted upload leaves objects without `manifest.json` (the scorer refuses that bundle as "no manifest"); a re-run reports "already exists". As the owner, delete the partial prefix with `gcloud storage rm --recursive --all-versions gs://synthea-readmission-risk-bundles/<id>/` and export again.
+
+**When the history data test fails** (`DATA TESTS FAILED: RUNS-…` on every run): a `scoring_runs` row breaks an invariant, and every later run reports it until the row is repaired; publishing is not blocked. As the owner, find it (the assertion's ID says which rule), then delete or correct it with DML and note what you did in the slice note or run ledger:
+
+```sh
+bq query --use_legacy_sql=false --maximum_bytes_billed=104857600 \
+  "SELECT * FROM serving.scoring_runs WHERE started_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 400 DAY) AND finished_at < started_at"
+bq query --use_legacy_sql=false --maximum_bytes_billed=104857600 \
+  "DELETE FROM serving.scoring_runs WHERE started_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 400 DAY) AND scoring_run_id = '<id>'"
+```
+
+**Recovering rows** (an accidental `DELETE` or truncation, by anyone): BigQuery time travel keeps the last 7 days. Restore a table's earlier state with `bq cp "serving.scoring_runs@<epoch milliseconds before the change>" scratch.scoring_runs_restored`, inspect it, then re-insert the missing rows with DML.
+
 ## Teardown checklist
 
 Order matters: `prevent_destroy` makes `terraform destroy` refuse while the CHF 20 budget, the state bucket or the bundle bucket is still in state, and the bundle bucket's IAM members must go before the bucket. Start with `export CLOUDSDK_CORE_PROJECT=synthea-readmission-risk`.
@@ -262,6 +295,7 @@ Order matters: `prevent_destroy` makes `terraform destroy` refuse while the CHF 
 4. **Release the state bucket from state:** `terraform -chdir=infra state pull > final.tfstate` (a local record, gitignored), then `terraform -chdir=infra state rm google_storage_bucket.tfstate`.
 5. **Destroy the rest:** `terraform -chdir=infra destroy`. Raw and gold are deleted with their contents; the CHF 5 budget, both service accounts, all IAM members, the pool and the provider go; the APIs stay enabled. The final state is written to the state bucket, which still exists.
 6. **Delete the state bucket last:** `gcloud storage rm --recursive --all-versions "gs://synthea-readmission-risk-tfstate/**"`, then `gcloud storage buckets delete gs://synthea-readmission-risk-tfstate`. `infra/` needs a new bootstrap after this.
-7. **Check for leftovers:** `gcloud storage buckets list --project=synthea-readmission-risk`, `gcloud dataproc batches list --region=us-central1 --project=synthea-readmission-risk`, `gcloud compute instances list --project=synthea-readmission-risk`, `bq ls --project_id=synthea-readmission-risk` (later slices), `gcloud iam service-accounts list --project=synthea-readmission-risk`.
-8. The WIF pool stays soft-deleted for 30 days; re-creating `github` in that window needs `gcloud iam workload-identity-pools undelete github --location=global --project=synthea-readmission-risk`.
-9. The final stop: `gcloud billing projects unlink synthea-readmission-risk`, or delete the project.
+7. **BigQuery (v2 slice 4):** set `deletion_protection = false` on `google_bigquery_table.predictions` and `.scoring_runs` and apply; `serving` does not delete its contents on destroy, so empty it first (`bq rm -r -f -d serving` as the owner, after exporting anything you want to keep); `scratch` deletes its own tables. The custom role `scorerTableWriter` stays soft-deleted for 7-37 days after `destroy`; re-creating it in that window needs `gcloud iam roles undelete scorerTableWriter --project=synthea-readmission-risk`.
+8. **Check for leftovers:** `gcloud storage buckets list --project=synthea-readmission-risk`, `gcloud dataproc batches list --region=us-central1 --project=synthea-readmission-risk`, `gcloud compute instances list --project=synthea-readmission-risk`, `bq ls --project_id=synthea-readmission-risk` (later slices), `gcloud iam service-accounts list --project=synthea-readmission-risk`.
+9. The WIF pool stays soft-deleted for 30 days; re-creating `github` in that window needs `gcloud iam workload-identity-pools undelete github --location=global --project=synthea-readmission-risk`.
+10. The final stop: `gcloud billing projects unlink synthea-readmission-risk`, or delete the project.

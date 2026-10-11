@@ -1,0 +1,158 @@
+[
+  {
+    "name": "scoring_run_id",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "uuid4 hex of the attempt."
+  },
+  {
+    "name": "status",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "succeeded, data_tests_failed, refused or failed."
+  },
+  {
+    "name": "started_at",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "Wall clock (UTC) when the attempt started."
+  },
+  {
+    "name": "finished_at",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "started_at plus the monotonic elapsed time."
+  },
+  {
+    "name": "run_date",
+    "type": "DATE",
+    "mode": "NULLABLE",
+    "description": "The requested run date; null only when it did not parse."
+  },
+  {
+    "name": "trigger",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "laptop, or the GitHub Actions event name."
+  },
+  {
+    "name": "github_run_url",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "The Actions run, when run in Actions."
+  },
+  {
+    "name": "git_commit",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Commit of the scoring code."
+  },
+  {
+    "name": "git_dirty",
+    "type": "BOOLEAN",
+    "mode": "NULLABLE",
+    "description": "Uncommitted changes on a laptop run; null in Actions."
+  },
+  {
+    "name": "python_version",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "Interpreter version."
+  },
+  {
+    "name": "gold_uri",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "The gold table location as given."
+  },
+  {
+    "name": "gold_fingerprint",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Fingerprint of the gold table (from the validated bundle)."
+  },
+  {
+    "name": "champion_sha256",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "The champion pointer's manifest pin, when the champion was used."
+  },
+  {
+    "name": "model_bundle_id",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "The validated bundle."
+  },
+  {
+    "name": "model_name",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "The bundle's model."
+  },
+  {
+    "name": "predictions_table",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "The live predictions table."
+  },
+  {
+    "name": "top_n",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "Requested Top-N."
+  },
+  {
+    "name": "window_days",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "Resolved window length."
+  },
+  {
+    "name": "n_predictions",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "Rows scored and loaded to staging."
+  },
+  {
+    "name": "n_top_n",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "Rows flagged is_top_n."
+  },
+  {
+    "name": "history_tests_passed",
+    "type": "BOOLEAN",
+    "mode": "NULLABLE",
+    "description": "scoring_runs.sql on the table's prior state; null if not run."
+  },
+  {
+    "name": "predictions_tests_passed",
+    "type": "BOOLEAN",
+    "mode": "NULLABLE",
+    "description": "predictions.sql on the staging rows; null if not run."
+  },
+  {
+    "name": "published",
+    "type": "BOOLEAN",
+    "mode": "REQUIRED",
+    "description": "The publish transaction committed."
+  },
+  {
+    "name": "data_test_failure",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "First failing assertion, '<ID>: <message>'."
+  },
+  {
+    "name": "error_type",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Exception class name."
+  },
+  {
+    "name": "error_message",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Exception message (4,000 characters at most)."
+  }
+]

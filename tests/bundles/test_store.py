@@ -12,6 +12,8 @@ from readmission_risk.bundles.manifest import (
     manifest_bytes,
 )
 from readmission_risk.bundles.store import (
+    bundle_uri_leaf,
+    check_bundle_uri,
     list_bundle_entries,
     local_bundle_path,
     read_bundle_file,
@@ -130,15 +132,47 @@ def test_rename_race_with_different_content_is_refused(tmp_path, monkeypatch):
     assert [p.name for p in tmp_path.iterdir()] == [manifest["bundle_id"]]
 
 
-@pytest.mark.parametrize(
-    "uri, message",
-    [("gs://bucket/x", "GCS bundle URIs arrive in v2 slice 4"), ("s3://b/x", "unsupported bundle URI scheme"), ("", "empty")],
-)
-def test_gs_and_other_schemes_are_refused(uri, message):
+def test_local_bundle_path_refuses_gs():
+    # a gs:// URI is not a local path; list_bundle_entries dispatches it to bundles.gcs (tests/bundles/test_gcs.py)
+    with pytest.raises(ValueError, match="not a local bundle path"):
+        local_bundle_path("gs://bucket/x")
+
+
+@pytest.mark.parametrize("uri, message", [("s3://b/x", "unsupported bundle URI scheme"), ("", "empty")])
+def test_other_schemes_are_refused(uri, message):
     with pytest.raises(ValueError, match=message):
         local_bundle_path(uri)
     with pytest.raises(ValueError, match=message):
         list_bundle_entries(uri)
+
+
+@pytest.mark.parametrize(
+    "uri, message",
+    [
+        ("", "empty bundle URI"),
+        ("s3://b/x", "unsupported bundle URI scheme"),
+        ("gs://b/x", "invalid bucket name"),
+        ("gs://bucket", "no object prefix"),
+        ("gs://bucket/a//b", "segment"),
+        ("gs://bucket/../x", "segment"),
+    ],
+)
+def test_check_bundle_uri_refuses(uri, message):
+    with pytest.raises(ValueError, match=message):
+        check_bundle_uri(uri)
+
+
+@pytest.mark.parametrize("uri", ["gs://bucket/abc", "gs://bucket/p/abc/", "bundles/abc", "/tmp/x/abc"])
+def test_check_bundle_uri_accepts(uri):
+    check_bundle_uri(uri)  # no exception, and no client call (the autouse no-GCP guard would raise)
+
+
+def test_bundle_uri_leaf(tmp_path):
+    assert bundle_uri_leaf("gs://bucket/p/q/abc") == "abc"
+    assert bundle_uri_leaf("gs://bucket/abc/") == "abc"
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    assert bundle_uri_leaf(str(tmp_path / "link")) == "real"  # local: the resolved directory name, as before
 
 
 def test_read_refuses_symlink_directory_and_path_traversal(tmp_path):

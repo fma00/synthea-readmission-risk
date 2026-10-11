@@ -13,3 +13,7 @@ greenlet==3.5.6
 typer==0.27.2
 # The scorer unpickles model bundles with cloudpickle directly (v2 slice 2); pinned at the version mlflow already pulled in.
 cloudpickle==3.1.2
+# GCS bundle/gold reads and BigQuery writes (v2 slice 4). Each pin is the newest release at least 7 days old on PyPI when
+# added (the Dependabot cooldown rule): google-cloud-storage 3.17.0 was 3 days old on 2026-10-11, so 3.16.0.
+google-cloud-bigquery==3.46.1
+google-cloud-storage==3.16.0

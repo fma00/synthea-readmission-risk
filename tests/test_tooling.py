@@ -23,14 +23,14 @@ MAKEFILE = ROOT / "Makefile"
 PRE_COMMIT_CONFIG = ROOT / ".pre-commit-config.yaml"
 
 EXPECTED_TARGETS = {
-    "help", "setup", "hooks", "lint", "test", "pre-commit", "train", "export", "score",
+    "help", "setup", "hooks", "lint", "test", "pre-commit", "train", "export", "score", "score-bq", "m5-check",
     "setup-runtime", "test-runtime", "lock-dev", "lock-runtime", "tf-validate",
 }
 # Every variable the Makefile reads, plus make's own propagation variables: a pytest started by `make test X=y` (or a
 # shell exporting VENV=...) must not change what these tests see.
 MAKEFILE_VARIABLES = ("PYTHON", "PYTHON312", "VENV", "RUNTIME_VENV", "LOCK_VENV", "GOLD_DIR", "REFERENCE_DATE",
                       "TEST_START_DATE", "EXPERIMENT", "RUN_DATE", "TRAIN_EXPERIMENT", "TRAIN_ARGS", "SCORE_ARGS",
-                      "EXPORT_MODEL", "EXPORT_ARGS", "TERRAFORM")
+                      "EXPORT_MODEL", "EXPORT_ARGS", "TERRAFORM", "GOLD_URI", "SCORER_SA")
 SCRUBBED_ENV = ("MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "GNUMAKEFLAGS", "MAKEFILES", *MAKEFILE_VARIABLES)
 EXPECTED_PRE_COMMIT = [
     "repos:",
@@ -115,6 +115,23 @@ def test_make_score_passes_the_reference_defaults():
 
 
 @needs_make
+def test_make_score_bq_and_m5_check_run_as_the_scorer_sa():
+    sa = "--impersonate-service-account scorer@synthea-readmission-risk.iam.gserviceaccount.com"
+    assert (
+        ".venv/bin/python scripts/score_to_bigquery.py --gold-dir gs://synthea-readmission-risk-gold/full_run_2b "
+        f"--run-date 20250630 {sa}"
+    ) in _dry_run("score-bq")
+    assert "--bundle bundles/x" in _dry_run("score-bq", "SCORE_ARGS=--bundle bundles/x")
+    assert f".venv/bin/python scripts/seeded_data_test_check.py --run-date 20250630 {sa}" in _dry_run("m5-check")
+
+
+def test_gold_uri_default_matches_infra():
+    from tests.test_infra import expected_gold_uri
+
+    match = re.search(r"^GOLD_URI\s+\?=\s+(\S+)$", MAKEFILE.read_text(), re.MULTILINE)
+    assert match is not None and match.group(1) == expected_gold_uri()
+
+
 def test_make_tf_validate_runs_fmt_init_without_backend_and_validate():
     # The same three commands as ci.yml's terraform-validate job; never a backend, plan or apply.
     assert [line for line in _dry_run("tf-validate").split("\n") if line] == [

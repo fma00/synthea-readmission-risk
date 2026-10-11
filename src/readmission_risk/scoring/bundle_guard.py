@@ -40,8 +40,9 @@ from readmission_risk.bundles.manifest import (
     sha256_hex,
 )
 from readmission_risk.bundles.store import (
+    bundle_uri_leaf,
+    check_bundle_uri,
     list_bundle_entries,
-    local_bundle_path,
     read_bundle_file,
 )
 from readmission_risk.models.constants import MODEL_NAMES
@@ -85,6 +86,7 @@ class ModelBundle:
     git_dirty: str | None
     partition_of: pd.Series  # encounter_id -> "train" | "test" (object dtype, unique index), from split_assignment.csv
     model_bytes: bytes = field(repr=False)  # the sha256-verified model.pkl bytes; load_bundle_model unpickles THESE
+    champion_sha256: str | None = None  # the champion pointer's pin (already proven equal by I2); None for --bundle
 
 
 def installed_versions() -> dict[str, str]:
@@ -125,7 +127,7 @@ def _keyed(key: str, message: str) -> str:
 
 
 def _read_manifest(uri: str, champion_sha: str | None, champion_path: Path | None) -> tuple[dict, list[str]]:
-    _store_call("bundle not found", uri, lambda: local_bundle_path(uri))
+    _store_call("bundle not found", uri, lambda: check_bundle_uri(uri))
     entries = _store_call("bundle not found", uri, lambda: list_bundle_entries(uri))
     # I1 (read)
     if MANIFEST_FILENAME not in entries:
@@ -161,7 +163,7 @@ def _read_manifest(uri: str, champion_sha: str | None, champion_path: Path | Non
         raise ValueError(f"bundle_id: manifest of bundle at {uri} cannot be hashed: {exc}") from exc
     if bundle_id != expected_id:
         raise ValueError(f"bundle_id: manifest of bundle at {uri} says {bundle_id} but its content hash is {expected_id} (edited?)")
-    directory = local_bundle_path(uri).resolve().name
+    directory = bundle_uri_leaf(uri)
     if directory != bundle_id:
         raise ValueError(f"bundle_id: bundle at {uri} lives in directory {directory!r}, not in its id {bundle_id}")
     if raw != manifest_bytes(manifest):
@@ -457,6 +459,7 @@ def validate_bundle(
         git_dirty=manifest["git"]["dirty"],
         partition_of=partition_of,
         model_bytes=contents[MODEL_FILENAME],
+        champion_sha256=expected_manifest_sha256,
     )
 
 

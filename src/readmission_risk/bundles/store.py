@@ -1,7 +1,9 @@
 """Bundles on local disk: <bundles-root>/<bundle_id>/{manifest.json, model.pkl, split_assignment.csv}. The one module
-that knows the storage layout (the same seam as scoring/store.write_partition), so v2 slice 4 adds GCS here. Bundles are
-never overwritten (FR7): written to a temp directory, renamed into place, made read-only. Standard library only. See
-notes/eg-new-feature/v2-slice2-model-bundle-and-manifest-2026-10-11.md (Interfaces > bundles/store.py).
+that knows the storage layout (the same seam as scoring/store.write_partition). Bundles are never overwritten (FR7):
+written to a temp directory, renamed into place, made read-only. gs:// URIs are dispatched to bundles.gcs (imported
+lazily, so this module still imports nothing outside the standard library). See
+notes/eg-new-feature/v2-slice2-model-bundle-and-manifest-2026-10-11.md (Interfaces > bundles/store.py) and
+notes/eg-new-feature/v2-slice4-score-to-bigquery-2026-10-11.md (Interfaces > bundles/store.py changes).
 """
 
 from __future__ import annotations
@@ -25,11 +27,33 @@ def local_bundle_path(bundle_uri: str) -> Path:
     if not bundle_uri:
         raise ValueError("empty bundle URI")
     if bundle_uri.startswith("gs://"):
-        raise ValueError(f"GCS bundle URIs arrive in v2 slice 4: {bundle_uri}")
+        raise ValueError(f"not a local bundle path: {bundle_uri}")
     match = _SCHEME_RE.match(bundle_uri)
     if match:
         raise ValueError(f"unsupported bundle URI scheme {match.group(0)!r}: {bundle_uri}")
     return Path(bundle_uri)
+
+
+def check_bundle_uri(bundle_uri: str) -> None:
+    """Scheme check only: a well-formed gs:// URI or a local path passes; existence is list_bundle_entries' job."""
+    if not bundle_uri:
+        raise ValueError("empty bundle URI")
+    if bundle_uri.startswith("gs://"):
+        from . import gcs
+
+        gcs.parse_gs_uri(bundle_uri)
+        return
+    local_bundle_path(bundle_uri)
+
+
+def bundle_uri_leaf(bundle_uri: str) -> str:
+    """The last path segment of a bundle URI: the directory (or object prefix) a bundle lives in, which I3 compares with
+    its bundle_id."""
+    if bundle_uri.startswith("gs://"):
+        from . import gcs
+
+        return gcs.parse_gs_uri(bundle_uri)[1].rsplit("/", 1)[-1]
+    return local_bundle_path(bundle_uri).resolve().name
 
 
 def _expected_bytes(files: Mapping[str, bytes], manifest: dict) -> dict[str, bytes]:
@@ -82,15 +106,19 @@ def _fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
-def write_bundle(files: Mapping[str, bytes], manifest: dict, bundles_root: Path) -> tuple[str, bool]:
+def write_bundle(files: Mapping[str, bytes], manifest: dict, bundles_root: Path | str) -> tuple[str, bool]:
     """Writes bundles_root/<bundle_id>/ and returns (bundle_uri, created). An identical existing bundle is an idempotent
     no-op (created=False); any other existing entry at that path is a ValueError -- bundles are never overwritten.
     Known limit, accepted for a single-user local store (design note, write_bundle): POSIX rename() silently replaces an
     EMPTY directory, so an empty bundles_root/<bundle_id>/ created by another process between the existence check and the
-    rename is replaced rather than refused (nothing is lost: it was empty). v2 slice 4's GCS writer closes this with
-    ifGenerationMatch=0."""
+    rename is replaced rather than refused (nothing is lost: it was empty). A gs:// root goes to bundles.gcs.write_files
+    (create-only, if_generation_match=0, no idempotent comparison: the writer cannot read)."""
     expected = _expected_bytes(files, manifest)
     bundle_id = manifest["bundle_id"]
+    if isinstance(bundles_root, str) and bundles_root.startswith("gs://"):
+        from . import gcs
+
+        return gcs.write_files(expected, bundles_root, bundle_id)
     bundles_root = Path(bundles_root)
     target = bundles_root / bundle_id
     uri = str(target)
@@ -134,6 +162,10 @@ def write_bundle(files: Mapping[str, bytes], manifest: dict, bundles_root: Path)
 
 def list_bundle_entries(bundle_uri: str) -> list[str]:
     """Sorted names of ALL entries in the bundle directory (files, subdirectories, symlinks alike)."""
+    if bundle_uri.startswith("gs://"):
+        from . import gcs
+
+        return gcs.list_entries(bundle_uri)
     path = local_bundle_path(bundle_uri)
     if not os.path.lexists(path):
         raise FileNotFoundError(f"bundle not found: no bundle at {bundle_uri}")
@@ -147,6 +179,10 @@ def read_bundle_file(bundle_uri: str, name: str) -> bytes:
     outside itself."""
     if name in ("", ".", "..") or "/" in name or "\\" in name:
         raise ValueError(f"invalid bundle file name {name!r}")
+    if bundle_uri.startswith("gs://"):
+        from . import gcs
+
+        return gcs.read_file(bundle_uri, name)
     path = local_bundle_path(bundle_uri) / name
     try:
         mode = os.lstat(path).st_mode

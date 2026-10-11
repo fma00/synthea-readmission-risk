@@ -10,7 +10,10 @@ RuntimeError (a broken model or a violated post-condition) and other errors are 
 as an ordinary traceback because they indicate a bug or a broken environment. Typer's own usage errors (a missing required
 option, a non-integer --top-n) exit 2. --verbose also prints the traceback of the reported errors. The model comes from a
 bundle (notes/eg-new-feature/v2-slice2-model-bundle-and-manifest-2026-10-11.md): deploy/champion.json by default, or
---bundle; it is unpickled only after the bundle's manifest, file hashes and every guard have passed.
+--bundle; it is unpickled only after the bundle's manifest, file hashes and every guard have passed. Since v2 slice 4
+(notes/eg-new-feature/v2-slice4-score-to-bigquery-2026-10-11.md) --gold-dir and --bundle also accept gs:// URIs (the gold
+prefix is downloaded to a temporary directory first), which need Application Default Credentials; offline scoring uses a
+local --gold-dir and --bundle bundles/<id>.
 """
 
 import sys
@@ -20,9 +23,11 @@ from typing import Annotated
 
 import typer
 
+from readmission_risk import gcp
 from readmission_risk.scoring.constants import DEFAULT_TOP_N, DEMO_NOTICE
 from readmission_risk.scoring.pipeline import ScoringConfig, score_run_date
 from readmission_risk.scoring.report import format_report
+from readmission_risk.warehouse.gold_source import materialized_gold_dir
 
 app = typer.Typer(add_completion=False, rich_markup_mode=None, pretty_exceptions_enable=False)
 
@@ -39,11 +44,14 @@ _HELP = (
 
 @app.command(help=_HELP)
 def main(
-    gold_dir: Annotated[Path, typer.Option(help="Gold table directory (Parquet part files + _gold_metadata.json).")],
+    gold_dir: Annotated[
+        str, typer.Option(help="Gold table directory or gs:// prefix (Parquet part files + _gold_metadata.json).")
+    ],
     run_date: Annotated[str, typer.Option(help="YYYYMMDD: the last day of the discharge window.")],
     output_dir: Annotated[Path, typer.Option(help="Root of the prediction partitions.")] = Path("data/predictions"),
     bundle: Annotated[
-        str | None, typer.Option(help="A bundle directory to score with. Mutually exclusive with --champion.")
+        str | None,
+        typer.Option(help="A bundle directory or gs:// bundle URI to score with. Mutually exclusive with --champion."),
     ] = None,
     champion: Annotated[
         Path | None,
@@ -64,22 +72,27 @@ def main(
             "check, joined after scoring and never written to the output file).",
         ),
     ] = False,
+    impersonate_service_account: Annotated[
+        str | None, typer.Option(help="Read gs:// inputs as this service account (laptop; needs ADC).")
+    ] = None,
     verbose: Annotated[
         bool, typer.Option("--verbose", help="Also print the traceback of the errors reported as ERROR.")
     ] = False,
 ) -> None:
-    config = ScoringConfig(
-        gold_dir=gold_dir,
-        run_date=run_date,
-        output_dir=output_dir,
-        bundle_uri=bundle,
-        champion_path=champion,
-        top_n=top_n,
-        window_days=window_days,
-        show_observed_outcomes=show_observed_outcomes,
-    )
     try:
-        result = score_run_date(config)
+        gcp.configure(impersonate_service_account=impersonate_service_account)
+        with materialized_gold_dir(gold_dir) as gold_path:
+            config = ScoringConfig(
+                gold_dir=gold_path,
+                run_date=run_date,
+                output_dir=output_dir,
+                bundle_uri=bundle,
+                champion_path=champion,
+                top_n=top_n,
+                window_days=window_days,
+                show_observed_outcomes=show_observed_outcomes,
+            )
+            result = score_run_date(config)
     except (FileNotFoundError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         if verbose:

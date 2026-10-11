@@ -19,3 +19,14 @@ output "bucket_names" {
     bundles = google_storage_bucket.bundles.name
   }
 }
+
+output "scorer_service_account_email" {
+  value = google_service_account.scorer.email
+}
+
+output "bigquery_datasets" {
+  value = {
+    serving = google_bigquery_dataset.serving.dataset_id
+    scratch = google_bigquery_dataset.scratch.dataset_id
+  }
+}

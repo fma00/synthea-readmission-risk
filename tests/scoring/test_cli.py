@@ -135,3 +135,29 @@ def test_cli_observed_flag(cli, scoring_env, tmp_path):
     for out in ("off", "on"):  # either way the file carries no label or observed column
         frame = pd.read_parquet(tmp_path / out / "run_date=20260630" / "predictions.parquet")
         assert list(frame.columns) == list(PREDICTION_COLUMNS)
+
+
+def test_cli_gs_gold_dir_reaches_the_download_as_the_same_string(cli, monkeypatch, tmp_path):
+    """v2 slice 4: --gold-dir is a str, so gs:// is not collapsed to gs:/ by Path; the download context gets it as given
+    and the scorer gets the downloaded directory."""
+    seen_uris = []
+    downloaded = tmp_path / "downloaded"
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def fake_materialize(uri):
+        seen_uris.append(uri)
+        yield downloaded
+
+    monkeypatch.setattr(cli, "materialized_gold_dir", fake_materialize)
+    seen = _record_config(cli, monkeypatch)
+    result = CliRunner().invoke(cli.app, ["--gold-dir", "gs://bucket/full_run_2b", "--run-date", "20260630"])
+    assert result.exit_code == 0, result.stderr
+    assert seen_uris == ["gs://bucket/full_run_2b"] and seen[-1].gold_dir == downloaded
+
+
+def test_cli_bad_impersonation_email_is_an_error(cli, monkeypatch):
+    _record_config(cli, monkeypatch)
+    result = CliRunner().invoke(cli.app, ["--gold-dir", "g", "--run-date", "20260630", "--impersonate-service-account", "x"])
+    assert result.exit_code == 1 and "service-account email" in result.stderr
