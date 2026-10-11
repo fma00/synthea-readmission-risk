@@ -53,7 +53,7 @@ tools/synthea/
 /models/
 *.pkl
 *.joblib
-# Model bundles (v2 slice 2): local until v2 slice 3 moves them to GCS. Anchored like /data/ and /models/: an unanchored
+# Model bundles (v2 slice 2): local; slice 3 uploads copies to the bundle bucket, slice 4 reads them from there. Anchored like /data/ and /models/: an unanchored
 # `bundles/` would also ignore src/readmission_risk/bundles/ and tests/bundles/.
 /bundles/
 
@@ -100,3 +100,19 @@ client_secret*.json
 *.key
 *.p12
 *.pfx
+
+# Terraform (infra/, v2 slice 3). State lives in GCS and never in git; a local state file only exists during
+# infra/bootstrap.sh. terraform.tfvars holds the billing account id and the operator's email, so every tfvars form is
+# ignored except the committed example. bootstrap.sh writes a temporary *_override.tf.
+infra/.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+crash.log

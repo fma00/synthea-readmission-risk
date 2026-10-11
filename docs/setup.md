@@ -48,6 +48,7 @@ The [Makefile](../Makefile) wraps the commands on this page. Its recipes call th
 | `make score` | Scores run date `20250630` with the champion bundle (`deploy/champion.json`); override `RUN_DATE`, `GOLD_DIR`, extra flags in `SCORE_ARGS` (e.g. `--bundle bundles/<id>`) |
 | `make setup-runtime`, `make test-runtime` | The Dataproc runtime environment, next section |
 | `make lock-dev`, `make lock-runtime` | Recompile `requirements-dev.txt` / `requirements-dataproc-3.0.txt` under Python 3.12 |
+| `make tf-validate` | Checks `infra/` like CI's `terraform-validate` job (`fmt -check`, `init` without a backend, `validate`; no credentials); needs Terraform 1.16.x ([Infrastructure](#infrastructure-terraform)) |
 
 The pre-commit hook (`make hooks`, configured in [.pre-commit-config.yaml](../.pre-commit-config.yaml)) runs ruff on the staged Python files and notebooks, and zizmor offline whenever a file under `.github/` or `.pre-commit-config.yaml` itself is staged (zizmor audits both). Both tools come from the main checkout's `.venv`, so the versions are the hash-pinned ones in `requirements-dev.txt`. Things to know:
 
@@ -113,7 +114,7 @@ The MLflow store records absolute artifact paths, so moving the repository direc
 
 ## Cloud project and cost guard (prepared for the scale-up phase)
 
-Nothing runs in the cloud yet; this records the account-level setup done on 2026-10-09 ahead of the scale-up, so it can be reproduced and later adopted by Terraform (`terraform import`). Replace `<BILLING_ACCOUNT_ID>` with your own (`gcloud billing accounts list`).
+This records the account-level setup done with gcloud on 2026-10-09, before any Terraform existed. Since v2 slice 3 the CHF 20 budget below is imported into Terraform (`infra/budgets.tf`) and the rest of the infrastructure is created there ([next section](#infrastructure-terraform)); the commands stay as the record of how the project and budget were born. Replace `<BILLING_ACCOUNT_ID>` with your own (`gcloud billing accounts list`).
 
 ```sh
 gcloud projects create synthea-readmission-risk --labels=purpose=portfolio,repo=synthea-readmission-risk
@@ -136,3 +137,131 @@ gcloud compute project-info describe --project=synthea-readmission-risk --format
 
 Quotas found on 2026-10-09 (a new project; Google can change defaults): `CPUS` 200 in us-central1, `CPUS_ALL_REGIONS` 32, `DISKS_TOTAL_GB` 4,096, `INSTANCES` 24. A Serverless for Apache Spark batch on the standard tier consumes `CPUS` and `DISKS_TOTAL_GB`; its default footprint is a 4-vCPU driver plus two 4-vCPU executors (12 vCPUs) with 100 GiB of disk per core (1,200 GiB), and it autoscales. The binding limit is therefore `CPUS_ALL_REGIONS` = 32 vCPUs, i.e. a driver plus 7 executors, so the scale-up job should set `spark.dynamicAllocation.maxExecutors=7` rather than let autoscaling run into the quota. No increase was requested; revisit only if the first real run is too slow.
 
+## Infrastructure (Terraform)
+
+Since v2 slice 3, [infra/](../infra/) manages the project's buckets, service accounts, Workload Identity Federation (WIF) and budgets. Design and reasoning: `notes/eg-new-feature/v2-slice3-terraform-wif-2026-10-11.md`. It is applied **from a laptop only**; CI runs `fmt -check`, `init -backend=false` and `validate`, never `plan` or `apply`, and holds no credentials.
+
+| Resource | What |
+|---|---|
+| Buckets (us-central1, uniform access, public access prevention enforced) | `synthea-readmission-risk-tfstate` (Terraform state, versioned), `-raw` (objects deleted after 90 days), `-gold`, `-bundles` (model bundles, versioned) |
+| `gha-smoke` service account | Lists the bundle bucket (`roles/storage.legacyBucketReader`: no object reads); impersonable only by [smoke.yml](../.github/workflows/smoke.yml) on `main` through WIF |
+| `bundle-writer` service account | Creates objects in the bundle bucket (`roles/storage.objectCreator`: no overwrite, no delete, no list); impersonated by the operator for uploads |
+| WIF pool `github`, provider `github-actions` | Accepts a GitHub OIDC token only if repository id `1380503419`, owner id `270004823`, ref `refs/heads/main` and event `workflow_dispatch`/`schedule` all match |
+| Budgets | CHF 20/month (imported, created 2026-10-09) and CHF 5/month early warning; alerts only, not caps |
+
+**Prerequisites.** Terraform 1.16.x (`brew install hashicorp/tap/terraform`; `terraform version`), the gcloud CLI logged in (`gcloud auth login`), Application Default Credentials for Terraform with this project as quota project (`gcloud auth application-default login`, then `gcloud auth application-default set-quota-project synthea-readmission-risk`), and Billing Account Administrator (or Costs Manager) on the billing account. Your gcloud default project can stay whatever it is: every command block below starts with `export CLOUDSDK_CORE_PROJECT=synthea-readmission-risk`.
+
+**Variables.** `cp infra/terraform.tfvars.example infra/terraform.tfvars` and fill in the billing account id, the CHF 20 budget's id (`gcloud billing budgets list --billing-account=<BILLING_ACCOUNT_ID> --billing-project=synthea-readmission-risk`) and your `user:` member. The file is gitignored (it holds the billing account id and your email); run `terraform -chdir=infra fmt` after editing it, because `make tf-validate` and the bootstrap check its formatting too.
+
+**Bootstrap (once).** `infra/bootstrap.sh` enables the six APIs with gcloud, creates the state bucket under a temporary local backend, then migrates the state into `gs://synthea-readmission-risk-tfstate/infra/`. It is safe to re-run: it decides from what exists (state object, bucket, local state file), treats only a 404 as "absent", and never migrates over an existing remote state. Every apply asks for approval.
+
+```sh
+export CLOUDSDK_CORE_PROJECT=synthea-readmission-risk
+infra/bootstrap.sh
+```
+
+**Plan and apply.** The first plan should read `Plan: 1 to import, 12 to add, 0 to change, 0 to destroy` (the CHF 20 budget imported with no change; 3 buckets, 2 service accounts, 4 IAM members, the pool, the provider and the CHF 5 budget). Anything else: stop and investigate. Afterwards `terraform plan` must say "No changes".
+
+```sh
+terraform -chdir=infra plan
+terraform -chdir=infra apply
+```
+
+**Provider lock file.** `infra/.terraform.lock.hcl` is committed with hashes for CI (`linux_amd64`) and an Apple-silicon laptop (`darwin_arm64`); CI refuses to change it (`-lockfile=readonly`). Regenerate it on every provider bump (Dependabot proposes those):
+
+```sh
+terraform -chdir=infra init -backend=false -input=false
+terraform -chdir=infra providers lock -platform=linux_amd64 -platform=darwin_arm64
+```
+
+**Uploading the v1 bundles (slice 3, one-off).** New IAM grants can take minutes to apply: if the first impersonated call fails with an `iam.serviceAccounts.getAccessToken` denial, wait and retry for up to 10 minutes. `gcloud storage cp` cannot be used as `bundle-writer`: it reads the destination's metadata first (`storage.objects.get`), which the create-only role deliberately lacks (found on the first live run, 2026-10-11). The upload therefore calls the Cloud Storage JSON API directly with a short-lived `bundle-writer` token; `ifGenerationMatch=0` refuses to replace anything, and `manifest.json` goes last, so a reader never sees a manifest without its files.
+
+```sh
+export CLOUDSDK_CORE_PROJECT=synthea-readmission-risk
+# set -euo pipefail in a subshell: the first failed upload stops the loop. Re-running resumes: objects that already
+# exist are skipped (checked as YOU, because bundle-writer cannot read or list), and V6 below compares every
+# uploaded object's sha256 with the local file. The token is never printed.
+( set -euo pipefail
+  W=bundle-writer@synthea-readmission-risk.iam.gserviceaccount.com
+  BUCKET=synthea-readmission-risk-bundles
+  TOKEN=$(CLOUDSDK_BILLING_QUOTA_PROJECT=LEGACY gcloud auth print-access-token --impersonate-service-account="$W" 2>/dev/null)
+  for id in 75a1448729ef561c596f5e850f5bedce50ed63355ca2de38dc724c635d24eef4 30009d198070f66db1a0c35b033f11de9e08d88292330e0e71265553c4645d2a; do
+    for f in model.pkl split_assignment.csv manifest.json; do
+      if gcloud storage objects describe "gs://$BUCKET/$id/$f" >/dev/null 2>&1; then echo "exists, skipped: $id/$f"; continue; fi
+      curl -sS --fail-with-body -o /dev/null -w "uploaded $id/$f: HTTP %{http_code}\n" -X POST \
+        -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/octet-stream" --data-binary "@bundles/$id/$f" \
+        "https://storage.googleapis.com/upload/storage/v1/b/$BUCKET/o?uploadType=media&ifGenerationMatch=0&name=$id%2F$f"
+    done
+  done )
+```
+
+The bucket is private: a fresh clone still trains and exports its own bundle ([scoring.md](scoring.md#model-bundles)). Slice 4 adds the Python GCS reader and points `deploy/champion.json` at the bucket.
+
+**Live checks after the apply (V1–V8).** Record results in the design note under its redaction rule (billing account, budget id and your email replaced by placeholders; plans summarised, never pasted).
+
+```sh
+export CLOUDSDK_CORE_PROJECT=synthea-readmission-risk
+W=bundle-writer@synthea-readmission-risk.iam.gserviceaccount.com
+B=gs://synthea-readmission-risk-bundles
+M=$B/75a1448729ef561c596f5e850f5bedce50ed63355ca2de38dc724c635d24eef4/manifest.json
+# V1: "No changes."
+terraform -chdir=infra plan
+# V2: among budgets whose filter contains projects/271458030145, exactly two: CHF 20 (thresholds 0.5/0.9/1.0 actual,
+# 1.0 forecast) and CHF 5 (1.0 actual, 1.0 forecast).
+gcloud billing budgets list --billing-account=<BILLING_ACCOUNT_ID> --billing-project=synthea-readmission-risk --format=json
+# V3: each bucket: US-CENTRAL1, public access prevention enforced, uniform access on, versioning and lifecycle as in infra/storage.tf.
+for b in tfstate raw gold bundles; do gcloud storage buckets describe gs://synthea-readmission-risk-$b --format=json; done
+# V4: the upload above succeeded (6 objects).
+gcloud storage ls --recursive "$B"
+# V5: bundle-writer cannot overwrite or list (JSON API, like the upload). Expected: (a) 412 (or 403), (b) 403, (c) 403;
+# afterwards the generation and sha256 are unchanged and only one generation exists. That, not the status code, is the proof.
+TOKEN=$(CLOUDSDK_BILLING_QUOTA_PROJECT=LEGACY gcloud auth print-access-token --impersonate-service-account="$W" 2>/dev/null)
+U="https://storage.googleapis.com/upload/storage/v1/b/synthea-readmission-risk-bundles/o?uploadType=media&name=75a1448729ef561c596f5e850f5bedce50ed63355ca2de38dc724c635d24eef4%2Fmanifest.json"
+gcloud storage objects describe "$M" --format='value(generation)'; gcloud storage cat "$M" | shasum -a 256
+curl -sS -o /dev/null -w "(a) %{http_code}\n" -X POST -H "Authorization: Bearer $TOKEN" --data-binary 'tampered' "$U&ifGenerationMatch=0"
+curl -sS -o /dev/null -w "(b) %{http_code}\n" -X POST -H "Authorization: Bearer $TOKEN" --data-binary 'tampered' "$U"
+curl -sS -o /dev/null -w "(c) %{http_code}\n" -H "Authorization: Bearer $TOKEN" "https://storage.googleapis.com/storage/v1/b/synthea-readmission-risk-bundles/o"
+gcloud storage objects describe "$M" --format='value(generation)'; gcloud storage cat "$M" | shasum -a 256
+gcloud storage ls --all-versions "$M"
+# V6: every uploaded object's sha256 equals the local file's; manifest.json's equals deploy/champion.json's sha256.
+for id in 75a1448729ef561c596f5e850f5bedce50ed63355ca2de38dc724c635d24eef4 30009d198070f66db1a0c35b033f11de9e08d88292330e0e71265553c4645d2a; do
+  for f in model.pkl split_assignment.csv manifest.json; do
+    echo "$id/$f $(gcloud storage cat "$B/$id/$f" | shasum -a 256 | cut -d' ' -f1) $(shasum -a 256 "bundles/$id/$f" | cut -d' ' -f1)"
+  done
+done
+# V7: no user-managed keys on either account.
+for sa in gha-smoke bundle-writer; do gcloud iam service-accounts keys list --iam-account=$sa@synthea-readmission-risk.iam.gserviceaccount.com --managed-by=user --project=synthea-readmission-risk; done
+# V8: the real policies. gha-smoke: one binding, workloadIdentityUser -> the smoke.yml principalSet; bundle-writer: one
+# binding, serviceAccountTokenCreator -> you; the bucket: the project legacy bindings plus exactly legacyBucketReader ->
+# gha-smoke and objectCreator -> bundle-writer; the provider: the condition literal below and the six mappings.
+gcloud iam service-accounts get-iam-policy gha-smoke@synthea-readmission-risk.iam.gserviceaccount.com --project=synthea-readmission-risk
+gcloud iam service-accounts get-iam-policy bundle-writer@synthea-readmission-risk.iam.gserviceaccount.com --project=synthea-readmission-risk
+gcloud storage buckets get-iam-policy "$B"
+gcloud iam workload-identity-pools providers describe github-actions --workload-identity-pool=github --location=global --project=synthea-readmission-risk --format='value(attributeCondition)'
+# expected: assertion.repository_id == '1380503419' && assertion.repository_owner_id == '270004823' && assertion.ref == 'refs/heads/main' && assertion.event_name in ['workflow_dispatch', 'schedule']
+gcloud iam workload-identity-pools providers describe github-actions --workload-identity-pool=github --location=global --project=synthea-readmission-risk --format='json(attributeMapping)'
+```
+
+**The keyless smoke job.** [smoke.yml](../.github/workflows/smoke.yml) is dispatch-only. Its job holds `id-token: write`, exchanges the GitHub OIDC token for a short-lived `gha-smoke` token, and lists the bundle bucket. Because the WIF condition accepts only `refs/heads/main`, it can only succeed once the workflow is on `main` (`gh workflow run smoke.yml --ref main`). The `auth` step only writes a credentials file; a refused exchange shows up in the "List the bundle bucket" step, as an STS error (the condition refused the token) or an IAM `getAccessToken` denial (the binding did not match).
+
+**V-post (after v2 merges into `main`; open until then).** (1) `gh workflow run smoke.yml --ref main`: green, and the log lists the two bundle prefixes. (2) The negative proof: on a throwaway branch that contains `smoke.yml`, `gh workflow run smoke.yml --ref <branch>`: `auth` succeeds and "List the bundle bucket" fails with the **STS** refusal by the attribute condition (`sts.googleapis.com`, `unauthorized_client`); an IAM denial, a context or a network error does not count. Record both run URLs in the design note and CLAUDE.md. Not proven by these runs: that the `workflow_ref` binding refuses another workflow file on `main` (first exercised in slice 4), and the `event_name` clause (every workflow that can reach the exchange is dispatch-only).
+
+## Teardown checklist
+
+Order matters: `prevent_destroy` makes `terraform destroy` refuse while the CHF 20 budget, the state bucket or the bundle bucket is still in state, and the bundle bucket's IAM members must go before the bucket. Start with `export CLOUDSDK_CORE_PROJECT=synthea-readmission-risk`.
+
+1. **Release the CHF 20 budget**, which pre-dates Terraform and stays as the standing guard while the billing account exists: delete the `import` block and the `google_billing_budget.monthly` resource from `infra/budgets.tf` in your working copy, then `terraform -chdir=infra state rm google_billing_budget.monthly`.
+2. **Keep what you want from the bundle bucket:** `gcloud storage cp --recursive gs://synthea-readmission-risk-bundles/<id> <local dir>`.
+3. **Remove the bundle bucket's IAM members, then the bucket:**
+   ```sh
+   terraform -chdir=infra destroy -target=google_storage_bucket_iam_member.smoke_lists_bundles -target=google_storage_bucket_iam_member.writer_creates_bundles
+   gcloud storage rm --recursive --all-versions "gs://synthea-readmission-risk-bundles/**"
+   terraform -chdir=infra state rm google_storage_bucket.bundles
+   gcloud storage buckets delete gs://synthea-readmission-risk-bundles
+   ```
+4. **Release the state bucket from state:** `terraform -chdir=infra state pull > final.tfstate` (a local record, gitignored), then `terraform -chdir=infra state rm google_storage_bucket.tfstate`.
+5. **Destroy the rest:** `terraform -chdir=infra destroy`. Raw and gold are deleted with their contents; the CHF 5 budget, both service accounts, all IAM members, the pool and the provider go; the APIs stay enabled. The final state is written to the state bucket, which still exists.
+6. **Delete the state bucket last:** `gcloud storage rm --recursive --all-versions "gs://synthea-readmission-risk-tfstate/**"`, then `gcloud storage buckets delete gs://synthea-readmission-risk-tfstate`. `infra/` needs a new bootstrap after this.
+7. **Check for leftovers:** `gcloud storage buckets list --project=synthea-readmission-risk`, `gcloud dataproc batches list --region=us-central1 --project=synthea-readmission-risk`, `gcloud compute instances list --project=synthea-readmission-risk`, `bq ls --project_id=synthea-readmission-risk` (later slices), `gcloud iam service-accounts list --project=synthea-readmission-risk`.
+8. The WIF pool stays soft-deleted for 30 days; re-creating `github` in that window needs `gcloud iam workload-identity-pools undelete github --location=global --project=synthea-readmission-risk`.
+9. The final stop: `gcloud billing projects unlink synthea-readmission-risk`, or delete the project.

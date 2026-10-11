@@ -132,7 +132,7 @@ def test_rename_race_with_different_content_is_refused(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(
     "uri, message",
-    [("gs://bucket/x", "GCS bundle URIs arrive in v2 slice 3"), ("s3://b/x", "unsupported bundle URI scheme"), ("", "empty")],
+    [("gs://bucket/x", "GCS bundle URIs arrive in v2 slice 4"), ("s3://b/x", "unsupported bundle URI scheme"), ("", "empty")],
 )
 def test_gs_and_other_schemes_are_refused(uri, message):
     with pytest.raises(ValueError, match=message):

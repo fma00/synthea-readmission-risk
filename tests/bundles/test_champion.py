@@ -50,5 +50,5 @@ def test_directory_pointer_is_a_value_error(tmp_path):
 
 
 def test_committed_champion_json_is_valid():
-    champion = read_champion(_REPO / "deploy" / "champion.json")  # schema only: the bundle is gitignored until slice 3
+    champion = read_champion(_REPO / "deploy" / "champion.json")  # schema only: the bundle is gitignored (a private-bucket copy since slice 3; read from GCS in slice 4)
     assert champion.bundle_uri.startswith("bundles/")
