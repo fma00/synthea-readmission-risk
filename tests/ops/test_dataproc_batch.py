@@ -82,8 +82,11 @@ def test_submit_argv(env):
     for flag in ("--async", "--batch=bigjoin-pilot-20k-202610131000", "--region=us-central1", "--version=3.0",
                  "--service-account=dataproc-runtime@synthea-readmission-risk.iam.gserviceaccount.com",
                  "--subnet=projects/synthea-readmission-risk/regions/us-central1/subnetworks/spark-us-central1",
-                 "--staging-bucket=synthea-readmission-risk-dataproc-staging", "--ttl=2h"):  # fmt: skip
+                 "--ttl=2h"):  # fmt: skip
         assert flag in argv, flag
+    # 5b: runtime 3.0 rejects the field ("3.0 runtime version does not support configuring Dataproc staging bucket via
+    # the staging_bucket field"; 3.0+ runtimes don't use Cloud Storage staging buckets)
+    assert not [a for a in argv if a.startswith("--staging-bucket")]
     properties = next(a for a in argv if a.startswith("--properties=")).removeprefix("--properties=").split(",")
     assert {"dataproc.tier=standard", "spark.dynamicAllocation.maxExecutors=7", "spark.sql.shuffle.partitions=128"} <= set(properties)
     job = argv[argv.index("--") + 1 :]
