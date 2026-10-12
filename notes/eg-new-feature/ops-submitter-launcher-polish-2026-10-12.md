@@ -224,11 +224,11 @@ None: operations CLIs only. No randomness, split, label or artifact is touched. 
 
 ## Out-of-scope follow-ups
 
-- Automatic IAM-propagation wait or retry in the submitter.
-- Reading audit logs to detect a recent role change.
+- Automatic IAM-propagation wait or retry in the submitter. **Done 2026-10-12** (`notes/eg-new-feature/ops-iam-propagation-and-interrupt-2026-10-12.md`)
+- Reading audit logs to detect a recent role change. **Done 2026-10-12** (`notes/eg-new-feature/ops-iam-propagation-and-interrupt-2026-10-12.md`)
 - Pre-existing, unchanged: a Ctrl-C during the usage wait, after the batch is already terminal, prints "the batch keeps
   running" and writes no batch record (5b's `…1332` has no record for this reason). This change shortens that window for
-  never-run batches but does not fix it.
+  never-run batches but does not fix it. **Done 2026-10-12** (`notes/eg-new-feature/ops-iam-propagation-and-interrupt-2026-10-12.md`)
 - The remaining slice-5 follow-ups (group E infra cleanup, slice-6 items).
 
 ## Revision log

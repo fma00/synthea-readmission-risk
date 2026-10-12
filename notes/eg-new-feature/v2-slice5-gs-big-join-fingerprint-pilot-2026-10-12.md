@@ -1298,7 +1298,7 @@ below); 130 interrupted (the batch keeps running and is bounded by its 2 h `ttl`
   `java.lang.OutOfMemoryError: Java heap space` once (PR #9, passed on rerun): raise the test SparkSession's driver memory
   or split the session; **Done 2026-10-12** (`notes/eg-new-feature/ci-hygiene-lockfiles-2026-10-12.md`): driver heap 2 GiB, measured transient peak, not a leak; (5) `ops/dataproc_batch.py` waits the full 10-minute usage window on a batch that failed before
   running (skip the wait when `stateHistory` never reached RUNNING); **Done 2026-10-12** (`notes/eg-new-feature/ops-submitter-launcher-polish-2026-10-12.md`); (6) the launcher could print an explicit "positive
-  control OK"; **Done 2026-10-12** (`notes/eg-new-feature/ops-submitter-launcher-polish-2026-10-12.md`); (7) after any change to `dataprocRuntimeWorker`, wait ~8 minutes before submitting (IAM propagation); **Partly done 2026-10-12** (same note): a hint on permission pre-check failures; no automatic wait or retry;
+  control OK"; **Done 2026-10-12** (`notes/eg-new-feature/ops-submitter-launcher-polish-2026-10-12.md`); (7) after any change to `dataprocRuntimeWorker`, wait ~8 minutes before submitting (IAM propagation); **Done 2026-10-12** (`notes/eg-new-feature/ops-submitter-launcher-polish-2026-10-12.md`, `notes/eg-new-feature/ops-iam-propagation-and-interrupt-2026-10-12.md`): a failure hint plus a pre-submit audit-log check that waits; no automatic resubmission;
   (8) the 45 encounter-less QALY/DALY/QOLS observation rows that differ across machines (cause unknown; gold unaffected).
 
 ## Revision log
