@@ -862,7 +862,9 @@ below); 130 interrupted (the batch keeps running and is bounded by its 2 h `ttl`
   - SA `dataproc-runtime`: project custom role `dataprocRuntimeWorker` = `roles/dataproc.worker` minus its 28
     `storage.*` permissions (**amended in 5b, 2026-10-12**: live check L2 found that the predefined role, first planned
     here as "the documented minimum", grants `storage.objects.*` on every bucket in the project, which made the gold
-    `v2/` condition below moot; pinned by `test_dataproc_runtime_has_no_project_level_storage_access`); on raw and artifacts
+    `v2/` condition below moot; pinned by `test_dataproc_runtime_has_no_project_level_storage_access`; plus
+    `dataprocrm.nodePools.update`, which runtime 3.0's pre-flight permission validation requires although no predefined
+    role grants it); on raw and artifacts
     `objectViewer` + `legacyBucketReader`; on `dataproc_staging` `roles/storage.objectAdmin` + `legacyBucketReader`;
     on gold `objectViewer` + `legacyBucketReader` (unconditional: reads and listing) plus `roles/storage.objectAdmin`
     **with an IAM condition** `resource.name.startsWith("projects/_/buckets/synthea-readmission-risk-gold/objects/v2/")`

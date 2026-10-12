@@ -457,7 +457,8 @@ def test_gold_object_admin_is_conditioned_on_v2_prefix():
 
 
 # roles/dataproc.worker minus its storage.* permissions (read with `gcloud iam roles describe roles/dataproc.worker`,
-# 2026-10-12: 61 permissions, 28 of them storage.*; all 33 below are supported in custom roles).
+# 2026-10-12: 61 permissions, 28 of them storage.*; all 33 are supported in custom roles), plus
+# dataprocrm.nodePools.update, which runtime 3.0's permission validation requires although no predefined role has it.
 DATAPROC_RUNTIME_PERMISSIONS = [
     "cloudprofiler.profiles.create", "cloudprofiler.profiles.update",
     "datalineage.locations.processOpenLineageMessage",
@@ -466,7 +467,8 @@ DATAPROC_RUNTIME_PERMISSIONS = [
     "dataproc.sessions.sparkApplicationWrite", "dataproc.tasks.lease", "dataproc.tasks.listInvalidatedLeases",
     "dataproc.tasks.reportStatus",
     "dataprocrm.nodePools.create", "dataprocrm.nodePools.delete", "dataprocrm.nodePools.deleteNodes",
-    "dataprocrm.nodePools.get", "dataprocrm.nodePools.list", "dataprocrm.nodePools.resize", "dataprocrm.nodes.get",
+    "dataprocrm.nodePools.get", "dataprocrm.nodePools.list", "dataprocrm.nodePools.resize", "dataprocrm.nodePools.update",
+    "dataprocrm.nodes.get",
     "dataprocrm.nodes.heartbeat", "dataprocrm.nodes.list", "dataprocrm.nodes.mintOAuthToken",
     "dataprocrm.operations.get",
     "logging.logEntries.create", "logging.logEntries.route",

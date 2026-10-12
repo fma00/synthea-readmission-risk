@@ -218,6 +218,9 @@ resource "google_project_iam_member" "generator_writes_logs" {
 # tfstate) and make the gold v2/ condition below moot (5b live check L2, 2026-10-12). Storage access comes only from
 # the bucket-level grants below. Taken from `gcloud iam roles describe roles/dataproc.worker` on 2026-10-12; if Google
 # adds a permission the runtime needs, the batch fails with a permission error and this list is extended.
+# dataprocrm.nodePools.update is NOT in roles/dataproc.worker (nor in any predefined role, checked 2026-10-12), but runtime
+# 3.0's pre-flight permission validation requires it: the first live batch failed with "Service Account ... is missing
+# required permissions: [dataprocrm.nodePools.update]" until it was added (5b, step 6; IAM accepted it in a custom role).
 resource "google_project_iam_custom_role" "dataproc_runtime_worker" {
   role_id     = "dataprocRuntimeWorker"
   title       = "Dataproc runtime worker (no storage)"
@@ -243,6 +246,7 @@ resource "google_project_iam_custom_role" "dataproc_runtime_worker" {
     "dataprocrm.nodePools.get",
     "dataprocrm.nodePools.list",
     "dataprocrm.nodePools.resize",
+    "dataprocrm.nodePools.update",
     "dataprocrm.nodes.get",
     "dataprocrm.nodes.heartbeat",
     "dataprocrm.nodes.list",
