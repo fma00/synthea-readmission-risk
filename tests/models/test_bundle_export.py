@@ -194,3 +194,15 @@ def test_export_restores_the_tracking_uri(scoring_env, tmp_path):
     export_bundle(scoring_env.tracking_dir, scoring_env.lr_run_id, tmp_path / "bundles")
     assert mlflow.get_tracking_uri() == before
     assert os.path.isdir(tmp_path / "bundles")
+
+
+def test_export_uses_rowhash_when_tag_present(scoring_env, tmp_path):
+    """v2 slice 5: a run trained on version-2 gold carries the Spark-computed fingerprint; its bundle names spark-rowhash-v1.
+    The untagged scoring_env runs keep pandas-csv-sha256-v1 (test_manifest_records_the_run_faithfully is that oracle)."""
+    from readmission_risk.models.constants import ROWHASH_TAG
+
+    env = scoring_env
+    run_id = _clone(env, "rowhash-tagged", tags={ROWHASH_TAG: "b" * 64})
+    manifest = _manifest(export_bundle(env.tracking_dir, run_id, tmp_path / "bundles").bundle_uri)
+    assert manifest["gold_fingerprint_definition"] == "spark-rowhash-v1"
+    assert manifest["gold_fingerprint"] == "b" * 64

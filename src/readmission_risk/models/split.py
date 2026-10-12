@@ -23,6 +23,31 @@ class SplitResult:
     summary: dict[str, int | float | str]
 
 
+SPLIT_SUMMARY_KEYS: tuple[str, ...] = (
+    "n_input",
+    "n_dropped_censor_buffer",
+    "n_test",
+    "n_dropped_before_train_start",
+    "n_dropped_label_window_purge",
+    "n_dropped_label_horizon_purge",
+    "n_dropped_patient_overlap",
+    "n_train",
+    "n_train_positive",
+    "n_test_positive",
+    "train_positive_rate",
+    "test_positive_rate",
+    "n_train_patients",
+    "n_test_patients",
+    "train_index_start_min",
+    "train_index_start_max",
+    "test_index_start_min",
+    "test_index_start_max",
+    "censor_buffer_cutoff",
+)
+# The keys of chronological_group_split's summary dict, in order (v2 slice 5: prereg.yaml's metrics.reported_quantities must be
+# members; tests/models/test_split.py::test_split_summary_keys_constant ties it to a real split's summary).
+
+
 def _utc_midnight(d: date) -> pd.Timestamp:
     return pd.Timestamp(d.isoformat(), tz="UTC")
 

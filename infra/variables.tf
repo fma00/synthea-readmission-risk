@@ -72,3 +72,15 @@ variable "operator_member" {
     error_message = "operator_member must be a user: member."
   }
 }
+
+variable "generation_templates" {
+  description = "Generation VM template classes -> max run duration in seconds (v2 slice 5: pilot; slice 6 adds main from the pilot's measurement)."
+  type        = map(number)
+  default     = { pilot = 7200 }
+
+  validation {
+    condition     = alltrue([for k, v in var.generation_templates : contains(["pilot", "main"], k) && v >= 600 && v <= 86400])
+    error_message = "Classes are pilot or main; durations 600-86400 seconds."
+  }
+}
+

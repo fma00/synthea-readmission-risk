@@ -11,6 +11,12 @@ import hashlib
 import json
 import re
 
+# Re-exported so the exporter and the guard import both fingerprint definitions from here (v2 slice 5). Its home is
+# pipeline/gold_metadata.py, which the Spark job writes and which, like this module, is standard library only.
+from readmission_risk.pipeline.gold_metadata import (
+    FINGERPRINT_DEFINITION_ROWHASH_V1 as FINGERPRINT_DEFINITION_ROWHASH_V1,
+)
+
 MANIFEST_FILENAME = "manifest.json"
 MODEL_FILENAME = "model.pkl"
 SPLIT_FILENAME = "split_assignment.csv"

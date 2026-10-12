@@ -11,6 +11,11 @@ locals {
     "storage.googleapis.com",
     "billingbudgets.googleapis.com",
     "bigquery.googleapis.com",
+    # v2 slice 5: compute and dataproc were already enabled outside Terraform (checked 2026-10-12), so these two are adopted;
+    # policytroubleshooter is a real enable (free), used by the live IAM check L2.
+    "compute.googleapis.com",
+    "dataproc.googleapis.com",
+    "policytroubleshooter.googleapis.com",
   ])
 }
 

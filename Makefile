@@ -22,6 +22,10 @@ EXPORT_ARGS      ?=
 TERRAFORM        ?= terraform
 GOLD_URI         ?= gs://synthea-readmission-risk-gold/full_run_2b
 SCORER_SA        ?= scorer@synthea-readmission-risk.iam.gserviceaccount.com
+RUN              ?=
+JDK_TARBALL      ?=
+GEN_ARGS         ?=
+BATCH_ARGS       ?=
 BIN := $(VENV)/bin
 
 # $(call check_python,<venv dir>,<major>,<minor>,<variable to override>)
@@ -37,7 +41,7 @@ define fresh_venv
 case "$(1)" in */*|*..*) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; .venv-*) ;; *) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; esac; rm -rf "$(1)" && $(2) -m venv "$(1)"
 endef
 
-.PHONY: help setup hooks lint test pre-commit train export score score-bq m5-check setup-runtime test-runtime lock-dev lock-runtime tf-validate
+.PHONY: help setup hooks lint test pre-commit train export score score-bq m5-check setup-runtime test-runtime lock-dev lock-runtime tf-validate spark-zip generate-vm bigjoin-batch
 .DEFAULT_GOAL := help
 
 help: ## List the targets
@@ -119,3 +123,17 @@ tf-validate: ## Check infra/ like CI's terraform-validate job: fmt -check, init 
 	$(TERRAFORM) -chdir=infra fmt -check -recursive -diff
 	$(TERRAFORM) -chdir=infra init -backend=false -input=false -lockfile=readonly
 	$(TERRAFORM) -chdir=infra validate
+
+spark-zip: ## Build the Spark job's --py-files zip into dist/ and print its sha256 (FR3)
+	$(BIN)/python scripts/build_spark_zip.py
+
+generate-vm: ## LIVE, COSTS MONEY: generate the prereg population RUN on a spot VM (needs RUN, JDK_TARBALL; extra flags via GEN_ARGS)
+	@test -n "$(RUN)" || { echo "ERROR: set RUN=<a population in prereg.yaml, e.g. pilot_20k>" >&2; exit 1; }
+	@test -n "$(JDK_TARBALL)" || { echo "ERROR: set JDK_TARBALL=<the Temurin tarball pinned in prereg.yaml>" >&2; exit 1; }
+	@echo "COST: creates a spot n2-standard-32 VM in synthea-readmission-risk (about \$$0.30/h, bounded by the template's max run duration)"
+	$(BIN)/python scripts/launch_generation.py --run $(RUN) --jdk-tarball $(JDK_TARBALL) $(GEN_ARGS)
+
+bigjoin-batch: ## LIVE, COSTS MONEY: run the Big Join for RUN on Dataproc Serverless 3.0 (needs RUN; extra flags via BATCH_ARGS)
+	@test -n "$(RUN)" || { echo "ERROR: set RUN=<a population in prereg.yaml, e.g. pilot_20k>" >&2; exit 1; }
+	@echo "COST: submits a Dataproc Serverless batch (maxExecutors=7, ttl 2h) in synthea-readmission-risk"
+	$(BIN)/python scripts/submit_big_join_batch.py --run $(RUN) $(BATCH_ARGS)

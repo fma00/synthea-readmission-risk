@@ -29,7 +29,15 @@ SRC = ROOT / "src"
 # name that must be hash-pinned in requirements-dataproc-3.0.txt, so the pipeline-dataproc-runtime CI job tests it.
 # Widening: confirm the package is on the runtime-3.0 page, add it here AND to requirements-dataproc-3.0.in, recompile
 # (e.g. a future {"google.cloud.storage": "google-cloud-storage"}; never a bare "google").
-RUNTIME_BUNDLED_IMPORTS_ALLOWED: dict[str, str] = {"pyspark": "pyspark", "pandas": "pandas", "numpy": "numpy", "pyarrow": "pyarrow"}
+RUNTIME_BUNDLED_IMPORTS_ALLOWED: dict[str, str] = {
+    "pyspark": "pyspark",
+    "pandas": "pandas",
+    "numpy": "numpy",
+    "pyarrow": "pyarrow",
+    # v2 slice 5: pipeline/storage.py catches py4j.protocol.Py4JJavaError from Hadoop FileSystem calls. py4j is PySpark's own hard
+    # dependency (every PySpark install ships it, Dataproc's included) and is already hash-pinned in both lockfiles.
+    "py4j": "py4j",
+}
 # The code that ships to Dataproc: the package root (executed on import), the whole pipeline subpackage (recursive),
 # and its CLI entry point.
 SPARK_JOB_SOURCES = [

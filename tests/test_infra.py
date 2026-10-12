@@ -189,7 +189,7 @@ def test_bundle_writer_is_create_only():
 def test_iam_is_additive_only():
     types = {t for t, _, _ in _resources(_all_tf())}
     assert [t for t in types if t.endswith(("_iam_policy", "_iam_binding"))] == []
-    assert len(_iam_members()) == 12
+    assert len(_iam_members()) == 28  # 12 (slices 3-4) + 16 (slice 5: synthea-generator 6, dataproc-runtime 10)
 
 
 def test_no_service_account_keys_in_infra_or_workflows():
@@ -203,7 +203,7 @@ def test_no_service_account_keys_in_infra_or_workflows():
 
 def test_buckets_enforce_uniform_access_and_public_access_prevention():
     buckets = [(n, _collapse(body)) for t, n, body in _resources(_all_tf()) if t == "google_storage_bucket"]
-    assert sorted(n for n, _ in buckets) == ["bundles", "gold", "raw", "tfstate"]
+    assert sorted(n for n, _ in buckets) == ["artifacts", "bundles", "dataproc_staging", "gold", "raw", "tfstate"]
     for name, body in buckets:
         assert "uniform_bucket_level_access = true" in body, name
         assert 'public_access_prevention = "enforced"' in body, name
@@ -426,3 +426,63 @@ def test_every_resource_depends_on_enabled_apis():
 
 def test_bigquery_api_is_enabled():
     assert '"bigquery.googleapis.com",' in _tf("apis.tf")
+
+
+# ---------------------------------------------------------------- v2 slice 5: generation VM and Dataproc runtime
+
+
+def _members_of(sa: str) -> list[dict[str, str]]:
+    return [m for m in _iam_members() if f"google_service_account.{sa}.email" in m.get("member", "")]
+
+
+def test_generator_cannot_delete_raw():
+    """Create + read + list on raw, never a role with storage.objects.delete (objectAdmin/objectUser/admin)."""
+    raw = [m["role"] for m in _members_of("synthea_generator") if m.get("bucket") == "google_storage_bucket.raw.name"]
+    assert sorted(raw) == ['"roles/storage.legacyBucketReader"', '"roles/storage.objectCreator"', '"roles/storage.objectViewer"']
+    assert len(_members_of("synthea_generator")) == 6
+
+
+def test_gold_object_admin_is_conditioned_on_v2_prefix():
+    body = _collapse(_resource("google_storage_bucket_iam_member", "dataproc_writes_gold_v2"))
+    assert 'role = "roles/storage.objectAdmin"' in body
+    assert "condition { title = \"gold-v2-prefix-only\"" in body
+    assert 'resource.name.startsWith(\\"projects/_/buckets/${google_storage_bucket.gold.name}/objects/v2/\\")' in body
+    unconditioned_admin = [
+        m for m in _members_of("dataproc_runtime")
+        if m["role"] == '"roles/storage.objectAdmin"' and m.get("bucket") == "google_storage_bucket.gold.name"
+        and m["_name"] != "dataproc_writes_gold_v2"
+    ]  # fmt: skip
+    assert unconditioned_admin == []
+    assert len(_members_of("dataproc_runtime")) == 10
+
+
+def test_no_resource_uses_default_compute_sa():
+    assert "-compute@developer.gserviceaccount.com" not in _all_tf()
+    assert "service_account { email = google_service_account.synthea_generator.email" in _collapse(
+        _resource("google_compute_instance_template", "synthea_generator")
+    )
+
+
+def test_template_has_cost_bounds():
+    body = _collapse(_resource("google_compute_instance_template", "synthea_generator"))
+    for fragment in (
+        'provisioning_model = "SPOT"',
+        'instance_termination_action = "DELETE"',
+        "max_run_duration { seconds = each.value }",
+        "auto_delete = true",
+        'machine_type = "n2-standard-32"',
+        'name = "synthea-generator-${each.key}-${each.value}s"',
+    ):
+        assert fragment in body, fragment
+    assert "access_config" not in body  # no external IP
+    assert "create_before_destroy" not in body  # a same-name replacement created first fails with alreadyExists
+    assert "startup-script" not in body  # passed per instance by the launcher
+
+
+def test_spark_subnet_has_private_google_access_and_internal_firewall():
+    subnet = _collapse(_resource("google_compute_subnetwork", "spark_us_central1"))
+    assert "private_ip_google_access = true" in subnet
+    firewall = _collapse(_resource("google_compute_firewall", "spark_internal"))
+    assert 'direction = "INGRESS"' in firewall and 'allow { protocol = "all" }' in firewall
+    assert "source_ranges = [google_compute_subnetwork.spark_us_central1.ip_cidr_range]" in firewall
+

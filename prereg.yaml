@@ -1,0 +1,106 @@
+# Pre-registration for the v2 scale-up (PRD FR10, M6), Phase A. Shaped after Hofman et al.'s Phase A; Phase B (the results
+# against these rules) is appended as a new top-level key after validation (slice 6), never by editing what is here.
+# Committed BEFORE any v2 population is generated: the generation launcher and the Big Join submitter refuse to run unless
+# this file is committed, unmodified and on a remote branch, and every value below matches the code
+# (src/readmission_risk/ops/prereg.py, checks P1 and P1b). Values signed off by the owner on 2026-10-12 (gate G-a).
+# A later change is made in place AND recorded under `deviations` (old, new, reason, commit).
+# Design: notes/eg-new-feature/v2-slice5-gs-big-join-fingerprint-pilot-2026-10-12.md (Interfaces section 9).
+
+prereg_version: 1
+phase: A
+registered_on: "2026-10-12"
+
+populations:
+  # The pilot's seed differs from the validation population's: with the same seed, a smaller run is the first patients of a
+  # larger one (measured 2026-10-12). The pilot is used for operational and pipeline-sanity checks only, never for any model,
+  # threshold or rule choice (the population_adjustment rule below is the one pre-registered exception).
+  pilot_20k: {seed: 17, clinician_seed: 17, population: 20000, role: operational_pilot}
+  main_200k: {seed: 29, clinician_seed: 29, population: 200000, role: validation}
+
+generation:
+  reference_date: "20261012"
+  # Synthea -e. The Big Join observes up to the END of reference_date (exclusive end reference_date + 1 day), and without -e the
+  # simulation ends at the generation's wall clock; so the simulation must end exactly one day after reference_date.
+  end_date: "20261013"
+  # -Duser.timezone. Synthea's output depends on the JVM time zone (measured 2026-10-12: UTC vs America/New_York differ).
+  jvm_timezone: UTC
+  state: Massachusetts
+  years_of_history: 10
+  included_files: [patients.csv, encounters.csv, conditions.csv, medications.csv, procedures.csv,
+                   careplans.csv, observations.csv, payers.csv, providers.csv, organizations.csv]
+  # tools/synthea/synthea-with-dependencies.jar (= scripts/setup_synthea.sh EXPECTED_SHA256)
+  synthea_jar_sha256: "ed43c20ad40ba5c3bc724503a5af032715fe3c491620b766148e7c2361e6ecc1"
+  synthea_build_version: "v3.4.0-18-ga07a65555"
+  # Adoptium's published .sha256.txt for this file (release 2026-08-19); recomputed by the launcher before upload
+  jdk:
+    distribution: temurin
+    version: "21.0.12.1+1"
+    file: OpenJDK21U-jdk_x64_linux_hotspot_21.0.12.1_1.tar.gz
+    sha256: "ce79869e1307ed8ee1e2baa86a412b1eb5b75d10a01006d788a6f968bcfaee94"
+
+label:
+  definition: unplanned_readmission_v1
+  planned_procedure_codes: ["33195004", "367336001", "703423002"]
+  readmission_window_days: 30
+  lookback_years: 1
+
+split:
+  test_start_rule: {kind: jan1_of_reference_year_minus_years, years: 3}
+  test_start_date_resolved: "20230101"
+  train_start_date: null
+  patient_disjoint: true
+  label_horizon_purge: true
+
+training:
+  seed: 42
+  logistic_regression: {C: 1.0, solver: lbfgs, max_iter: 2000, class_weight: null}
+  xgboost: {n_estimators: 300, max_depth: 4, learning_rate: 0.05, subsample: 0.8, colsample_bytree: 0.8,
+            min_child_weight: 5, reg_lambda: 1.0, tree_method: hist, n_jobs: 1}
+  calibration: {method: sigmoid, cv_folds: 5, ensemble: true}
+
+metrics:
+  primary: roc_auc
+  secondary: [brier_score, brier_skill_score, observed_expected_ratio, expected_calibration_error, pr_auc, log_loss]
+  definitions:
+    observed_expected_ratio: sum(y_true) / sum(y_prob)
+    expected_calibration_error: {n_bins: 10, binning: quantile}
+    brier_skill_score_reference: train_prevalence
+  reported_quantities: [n_test, n_test_positive, n_dropped_label_horizon_purge, n_dropped_label_window_purge,
+                        n_dropped_censor_buffer]
+
+# Slice 6's evaluation reads these; the training CLI's own --n-bootstrap default (500) and seed do not apply to it.
+bootstrap: {kind: patient_clustered_paired_percentile, n_resamples: 2000, seed: 20261012, ci_level: 0.95}
+
+power:
+  min_test_positives: 400
+  population_adjustment:
+    projected_test_positives: pilot_test_window_positives * main_population / pilot_population
+    trigger_below: 500
+    action: raise main_200k.population once, before its generation, to the smallest multiple of 50000 whose projection is >= 500, via a logged deviation; seeds unchanged; never lowered
+    cap: 400000
+    pilot_test_window_positives: n_test_positive of models.split.chronological_group_split on the pilot gold with this prereg's split settings
+
+promotion:
+  comparators: [champion, reason_code_lookup]
+  roc_auc_rule: paired_ci_lower_gt_zero
+  brier_noninferiority: {margin_fraction_of_champion_brier: 0.05}
+  reason_code_lookup_smoothing: 10.0
+
+frozen_v1:
+  models: [logistic_regression, xgboost_calibrated]
+  report: [roc_auc, brier_score, observed_expected_ratio]
+  acceptance: {roc_auc_ci_lower_min: 0.80, observed_expected_ci_must_overlap: [0.80, 1.25]}
+
+monitoring:
+  matured_cohort_weeks: 13
+  min_positives_floor: 20
+  alert_rule: {metric: observed_expected_ratio, ci: exact_poisson_95_on_observed, condition: ci_excludes_1_and_point_outside_band, band: [0.80, 1.25]}
+  auc: report_only
+
+outcomes:
+  lookup_still_wins: >-
+    If the challenger does not beat the reason-code lookup on ROC-AUC under the rule above, the champion is not
+    replaced, and docs/results.md leads with "the lookup is at least as good as the models" with its intervals. This is
+    a reported finding, not a failure.
+
+deviations: []

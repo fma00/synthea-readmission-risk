@@ -895,7 +895,9 @@ Recorded under the redaction rule. Implementation 2026-10-11 on branch `v2-slice
 - **L9 (operator):**
   - **F6:** `run_data_tests` with a 1 MiB cap is refused ("Query exceeded limit for bytes billed").
   - **Bytes billed:** today's scorer jobs billed at most 20 MiB per job (the scripts) and about 755 MB in total, mostly M5's 19 CTAS copies; the load jobs billed nothing.
-  - **F4:** the billing report is still due, 24 h after the run.
+  - **F4: done 2026-10-12.** The owner read the billing report (Cloud console > Billing > Reports, project
+    `synthea-readmission-risk`, from 2026-10-11): **CHF 0** for slice 4's runs, so the BigQuery load jobs, DML and queries
+    and the Storage use all stayed within the free tiers, as projected.
 - **L10 (operator):** the live IAM matches the design:
   - `scorer`: 0 user-managed keys;
   - on the account: `serviceAccountTokenCreator` → `<OPERATOR>` and `workloadIdentityUser` → `score.yml@refs/heads/main`;
@@ -904,7 +906,7 @@ Recorded under the redaction rule. Implementation 2026-10-11 on branch `v2-slice
   - **no entry in the `serving` ACL**, `WRITER` on `scratch`;
   - `scorerTableWriter` on exactly the two serving tables.
 
-**Open:** L-post (the first dispatched `score.yml`, after v2 merges into `main`, together with slice 3's V-post) and the F4 billing check.
+**Open:** L-post (the first dispatched `score.yml`, after v2 merges into `main`, together with slice 3's V-post). The F4 billing check is done (CHF 0, 2026-10-12).
 
 **Follow-ups found during the live checks, resolved the same day:**
 - **MLflow telemetry.** Laptop runs of the bundle exporter (and of training and the README assets) contacted `config.mlflow-telemetry.io`. MLflow disables its telemetry by itself only under pytest and in CI. `src/readmission_risk/__init__.py` now does `os.environ.setdefault("MLFLOW_DISABLE_TELEMETRY", "true")` before any `mlflow` import, so an explicit `MLFLOW_DISABLE_TELEMETRY=false` still wins.

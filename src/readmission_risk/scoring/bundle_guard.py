@@ -27,6 +27,7 @@ from sklearn.exceptions import InconsistentVersionWarning
 
 from readmission_risk.bundles.manifest import (
     FILE_ROLES,
+    FINGERPRINT_DEFINITION_ROWHASH_V1,
     FINGERPRINT_DEFINITION_V1,
     HEX64_RE,
     MANIFEST_FILENAME,
@@ -54,6 +55,7 @@ from readmission_risk.models.data import (
     gold_fingerprint,
 )
 from readmission_risk.models.versions import current_python_version
+from readmission_risk.pipeline.fingerprint import rowhash_fingerprint
 from readmission_risk.pipeline.gold_metadata import GoldMetadata, parse_yyyymmdd
 
 from .constants import PARTITION_TEST, PARTITION_TRAIN
@@ -67,7 +69,10 @@ _DISTRIBUTIONS = {
     "pandas_version": "pandas",
     "numpy_version": "numpy",
 }
-_FINGERPRINT_DEFINITIONS: dict[str, Callable[[pd.DataFrame], str]] = {FINGERPRINT_DEFINITION_V1: gold_fingerprint}
+_FINGERPRINT_DEFINITIONS: dict[str, Callable[[pd.DataFrame], str]] = {
+    FINGERPRINT_DEFINITION_V1: gold_fingerprint,
+    FINGERPRINT_DEFINITION_ROWHASH_V1: rowhash_fingerprint,  # v2 slice 5: bundles trained on version-2 gold
+}
 _EXPECTED_SIGNATURE_TYPES = {
     **{c: "double" for c in (*COUNT_FEATURES, *NUMERIC_OTHER_FEATURES)},
     **{c: "string" for c in CATEGORICAL_FEATURES},
@@ -395,6 +400,17 @@ def validate_bundle(
         raise ValueError(
             f"{who} has gold_fingerprint {manifest['gold_fingerprint']!r}, but this gold table's is {fingerprint!r}: the "
             "model was not trained on this table (or the table was edited)"
+        )
+    # Defence in depth for direct callers: the real scoring path loads gold through load_gold_table_with_metadata, which
+    # already refuses a version-2 table whose recorded fingerprint differs from its content.
+    if (
+        definition == FINGERPRINT_DEFINITION_ROWHASH_V1
+        and metadata.metadata_version == 2
+        and metadata.gold_fingerprint != fingerprint
+    ):
+        raise ValueError(
+            f"{who}: the gold metadata records spark-rowhash-v1 fingerprint {metadata.gold_fingerprint!r}, but this gold "
+            f"table's is {fingerprint!r}: the table or its metadata was edited"
         )
 
     # 7 (each defect names only the offending param)

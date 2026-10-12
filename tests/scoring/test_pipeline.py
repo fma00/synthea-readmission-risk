@@ -460,3 +460,17 @@ def test_scoring_source_has_no_mlflow_import():
     offenders = [str(p) for p in _SCORER_SOURCES if pattern.search(p.read_text())]
     assert offenders == []
     assert len(_SCORER_SOURCES) >= 12  # the globs really found both packages
+
+
+def test_score_refuses_edited_v2_gold(scoring_env, tmp_path):
+    """v2 slice 5, end to end: a version-2 gold table edited without changing its counts is refused by the LOADER (before any
+    bundle is read), whatever fingerprint definition the bundle names."""
+    env = scoring_env
+    gold = write_gold_dir(tmp_path / "gold-v2", env.df, n_parts=1, version=2)
+    part = next(gold.glob("part-*.parquet"))
+    edited = pd.read_parquet(part)
+    i, j = edited.index[edited["gender"] == "F"][0], edited.index[edited["gender"] == "M"][0]
+    edited.loc[[i, j], "gender"] = ["M", "F"]
+    edited.to_parquet(part, index=False)
+    with pytest.raises(ValueError, match="the table was edited, or is not the one its metadata describes"):
+        score_run_date(_config(env, tmp_path / "out", gold_dir=gold))

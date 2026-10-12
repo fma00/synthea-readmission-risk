@@ -24,20 +24,16 @@ from mlflow.tracking import MlflowClient
 from readmission_risk.models.data import (
     EXPECTED_GOLD_COLUMNS,
     FEATURE_COLUMNS,
-    LABEL_COLUMN,
     prepare_features,
 )
 from readmission_risk.models.tracking import load_logged_model, mlflow_tracking_uri
-from readmission_risk.pipeline.gold_metadata import (
-    LABEL_DEFINITION,
-    PLANNED_PROCEDURE_CODES,
-    GoldMetadata,
-    write_gold_metadata,
+from tests.gold_helpers import (  # noqa: F401 -- REFERENCE_DATE_STR is re-exported to tests/models and tests/scoring
+    REFERENCE_DATE_STR,
+    write_gold_metadata_for_frame,
 )
 
 REFERENCE_DATE = date(2026, 9, 16)
 TEST_START = date(2023, 1, 1)
-REFERENCE_DATE_STR = "20260916"
 TEST_START_STR = "20230101"
 
 
@@ -196,29 +192,10 @@ def pad_rows() -> list[dict]:
     ]
 
 
-def write_test_gold_metadata(directory: Path, df: pd.DataFrame, **overrides) -> Path:
-    """Writes a valid _gold_metadata.json for `df` via the PRODUCTION write_gold_metadata. Defaults: label_definition=LABEL_DEFINITION,
-    reference_date=REFERENCE_DATE_STR, readmission_window_days=30, lookback_years=1, planned_procedure_codes=PLANNED_PROCEDURE_CODES,
-    n_rows=len(df), n_positive=the number of label==1 rows (0 if the frame has no label column), n_planned_stays=0,
-    n_continuation_stays=0, n_nonterminal_stays=0, and n_inpatient_stays = the FINAL n_rows + the FINAL n_planned_stays (both after
-    overrides are applied, so a test planting n_rows=len(df)+1 or a nonzero n_planned_stays still yields metadata that passes
-    validation). Any keyword in `overrides` replaces the matching default (used to plant mismatches). Counts come from the frame
-    actually written, so the malformed-frame cases still reach their intended load_gold_table error."""
-    values = {
-        "label_definition": LABEL_DEFINITION,
-        "reference_date": REFERENCE_DATE_STR,
-        "readmission_window_days": 30,
-        "lookback_years": 1,
-        "planned_procedure_codes": PLANNED_PROCEDURE_CODES,
-        "n_rows": len(df),
-        "n_positive": int((df[LABEL_COLUMN] == 1).sum()) if LABEL_COLUMN in df.columns else 0,
-        "n_planned_stays": 0,
-        "n_continuation_stays": 0,
-        "n_nonterminal_stays": 0,
-    }
-    values.update(overrides)
-    values.setdefault("n_inpatient_stays", values["n_rows"] + values["n_planned_stays"])
-    return write_gold_metadata(Path(directory), GoldMetadata(**values))
+def write_test_gold_metadata(directory: Path, df: pd.DataFrame, *, version: int = 1, **overrides) -> Path:
+    """Kept under its historical name; see tests.gold_helpers.write_gold_metadata_for_frame (mlflow-free) for the defaults and
+    the version=2 behaviour."""
+    return write_gold_metadata_for_frame(directory, df, version=version, **overrides)
 
 
 # ---------------------------------------------------------------------------------------------------------------

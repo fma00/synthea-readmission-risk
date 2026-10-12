@@ -142,3 +142,161 @@ resource "google_service_account_iam_member" "operator_impersonates_scorer" {
 
   depends_on = [google_project_service.enabled]
 }
+
+# ---------------------------------------------------------------- v2 slice 5: generation VM and Dataproc runtime
+# Neither workload uses the default compute service account (which holds project roles/editor; removing that grant is an
+# owner decision, not made here). legacyBucketReader gives storage.buckets.get + objects.list, which object-level roles and
+# object-name conditions cannot grant and which gcloud and the Hadoop GCS connector may call.
+
+resource "google_service_account" "synthea_generator" {
+  account_id   = "synthea-generator"
+  display_name = "Synthea generation VM: reads artifacts, creates raw objects (never deletes)"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_service_account" "dataproc_runtime" {
+  account_id   = "dataproc-runtime"
+  display_name = "Dataproc Serverless Big Join: reads raw and artifacts, writes gold under v2/ only"
+
+  depends_on = [google_project_service.enabled]
+}
+
+# Create-only on raw: no storage.objects.delete, so a finished run's objects cannot be replaced (and composite uploads are off).
+resource "google_storage_bucket_iam_member" "generator_creates_raw" {
+  bucket = google_storage_bucket.raw.name
+  role   = "roles/storage.objectCreator"
+  member = "serviceAccount:${google_service_account.synthea_generator.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+# gcloud storage cp reads object metadata (slice 3's finding).
+resource "google_storage_bucket_iam_member" "generator_reads_raw" {
+  bucket = google_storage_bucket.raw.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.synthea_generator.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_storage_bucket_iam_member" "generator_lists_raw" {
+  bucket = google_storage_bucket.raw.name
+  role   = "roles/storage.legacyBucketReader"
+  member = "serviceAccount:${google_service_account.synthea_generator.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_storage_bucket_iam_member" "generator_reads_artifacts" {
+  bucket = google_storage_bucket.artifacts.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.synthea_generator.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_storage_bucket_iam_member" "generator_lists_artifacts" {
+  bucket = google_storage_bucket.artifacts.name
+  role   = "roles/storage.legacyBucketReader"
+  member = "serviceAccount:${google_service_account.synthea_generator.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+# The startup script's output in Cloud Logging.
+resource "google_project_iam_member" "generator_writes_logs" {
+  project = var.project_id
+  role    = "roles/logging.logWriter"
+  member  = "serviceAccount:${google_service_account.synthea_generator.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+# The documented minimum role for a Dataproc Serverless workload's service account.
+resource "google_project_iam_member" "dataproc_runtime_worker" {
+  project = var.project_id
+  role    = "roles/dataproc.worker"
+  member  = "serviceAccount:${google_service_account.dataproc_runtime.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_storage_bucket_iam_member" "dataproc_reads_raw" {
+  bucket = google_storage_bucket.raw.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.dataproc_runtime.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_storage_bucket_iam_member" "dataproc_lists_raw" {
+  bucket = google_storage_bucket.raw.name
+  role   = "roles/storage.legacyBucketReader"
+  member = "serviceAccount:${google_service_account.dataproc_runtime.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_storage_bucket_iam_member" "dataproc_reads_artifacts" {
+  bucket = google_storage_bucket.artifacts.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.dataproc_runtime.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_storage_bucket_iam_member" "dataproc_lists_artifacts" {
+  bucket = google_storage_bucket.artifacts.name
+  role   = "roles/storage.legacyBucketReader"
+  member = "serviceAccount:${google_service_account.dataproc_runtime.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_storage_bucket_iam_member" "dataproc_uses_staging" {
+  bucket = google_storage_bucket.dataproc_staging.name
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.dataproc_runtime.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_storage_bucket_iam_member" "dataproc_lists_staging" {
+  bucket = google_storage_bucket.dataproc_staging.name
+  role   = "roles/storage.legacyBucketReader"
+  member = "serviceAccount:${google_service_account.dataproc_runtime.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_storage_bucket_iam_member" "dataproc_reads_gold" {
+  bucket = google_storage_bucket.gold.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.dataproc_runtime.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_storage_bucket_iam_member" "dataproc_lists_gold" {
+  bucket = google_storage_bucket.gold.name
+  role   = "roles/storage.legacyBucketReader"
+  member = "serviceAccount:${google_service_account.dataproc_runtime.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+# Write and delete under v2/ only (IAM condition on the object name).
+resource "google_storage_bucket_iam_member" "dataproc_writes_gold_v2" {
+  bucket = google_storage_bucket.gold.name
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.dataproc_runtime.email}"
+
+  condition {
+    title       = "gold-v2-prefix-only"
+    description = "Spark's committer creates and deletes objects; never outside v2/ (full_run_2b/ is the scorer's v1 gold)."
+    expression  = "resource.name.startsWith(\"projects/_/buckets/${google_storage_bucket.gold.name}/objects/v2/\")"
+  }
+
+  depends_on = [google_project_service.enabled]
+}

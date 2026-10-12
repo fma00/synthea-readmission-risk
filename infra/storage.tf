@@ -102,3 +102,49 @@ resource "google_storage_bucket" "bundles" {
 
   depends_on = [google_project_service.enabled]
 }
+
+# v2 slice 5: content-addressed run artifacts (the Synthea jar, the JDK, the Spark --py-files zip, the two scripts) under
+# sha256/<hex>/<file>, uploaded create-only by the operator's CLIs; read by the generation VM and the Dataproc runtime.
+resource "google_storage_bucket" "artifacts" {
+  name                        = "synthea-readmission-risk-artifacts"
+  location                    = upper(var.region)
+  storage_class               = "STANDARD"
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+  # Everything here is rebuildable from the repo and the pinned upstream releases.
+  force_destroy = true
+  labels = {
+    purpose = "artifacts"
+  }
+
+  depends_on = [google_project_service.enabled]
+}
+
+# Dataproc Serverless staging/temp. Named explicitly: otherwise Dataproc creates its own unmanaged per-location buckets.
+resource "google_storage_bucket" "dataproc_staging" {
+  name                        = "synthea-readmission-risk-dataproc-staging"
+  location                    = upper(var.region)
+  storage_class               = "STANDARD"
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+  force_destroy               = true
+  labels = {
+    purpose = "dataproc-staging"
+  }
+
+  lifecycle_rule {
+    condition {
+      age = 30
+    }
+    action {
+      type = "Delete"
+    }
+  }
+
+  soft_delete_policy {
+    retention_duration_seconds = 0
+  }
+
+  depends_on = [google_project_service.enabled]
+}
+

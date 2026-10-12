@@ -279,6 +279,46 @@ bq query --use_legacy_sql=false --maximum_bytes_billed=104857600 \
 
 **Recovering rows** (an accidental `DELETE` or truncation, by anyone): BigQuery time travel keeps the last 7 days. Restore a table's earlier state with `bq cp "serving.scoring_runs@<epoch milliseconds before the change>" scratch.scoring_runs_restored`, inspect it, then re-insert the missing rows with DML.
 
+## Scale-up pilot: generation VM and Dataproc (v2 slice 5)
+
+Design, live runbook (L0-L9) and results: `notes/eg-new-feature/v2-slice5-gs-big-join-fingerprint-pilot-2026-10-12.md`. Both commands below **cost money** and run only from the laptop, as you (ADC), after you confirm. Start every shell with `export CLOUDSDK_CORE_PROJECT=synthea-readmission-risk`.
+
+**What is pre-registered.** `prereg.yaml` (repo root) fixes the seeds, dates, label, split rule, metrics, bootstrap, promotion and monitoring rules before any v2 population exists. Both CLIs refuse unless it is committed, the working tree is clean, `HEAD` is on an `origin/*` branch (after `git fetch`), and every value matches the code (preflights P1 and P1b). A later change is made in place **and** recorded under `deviations`.
+
+**Generation** (a spot `n2-standard-32` from the Terraform template `synthea-generator-pilot-7200s`, no external IP, deleted by the launcher or after 2 h at the latest):
+
+```sh
+# The JDK tarball pinned in prereg.yaml (generation.jdk): download it from Adoptium's GitHub release and check the hash.
+# Into tools/jdk/ (gitignored): any untracked file elsewhere makes the launcher's clean-tree check (P1) refuse.
+mkdir -p tools/jdk
+curl -L -o tools/jdk/OpenJDK21U-jdk_x64_linux_hotspot_21.0.12.1_1.tar.gz \
+  "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_x64_linux_hotspot_21.0.12.1_1.tar.gz"
+shasum -a 256 tools/jdk/OpenJDK21U-jdk_x64_linux_hotspot_21.0.12.1_1.tar.gz   # ce79869e...aee94, as in prereg.yaml
+make generate-vm RUN=pilot_20k JDK_TARBALL=tools/jdk/OpenJDK21U-jdk_x64_linux_hotspot_21.0.12.1_1.tar.gz GEN_ARGS=--dry-run   # no gcloud call
+make generate-vm RUN=pilot_20k JDK_TARBALL=tools/jdk/OpenJDK21U-jdk_x64_linux_hotspot_21.0.12.1_1.tar.gz
+```
+
+It uploads the jar, JDK, Spark zip and generation script to `gs://synthea-readmission-risk-artifacts/sha256/<hex>/` (create-only), creates the VM, checks it (labels, startup script, spot, DELETE, run duration, no external IP, its own service account, the disk label), waits for `gs://synthea-readmission-risk-raw/v2/pilot_20k/_DONE`, deletes the VM and **proves** no labelled instance or disk remains. Exit codes: 0 done, 1 refused, 2 failed, 3 a labelled instance or disk remains (the message prints its delete command), 130 interrupted. Timings and peak memory are saved under `data/pilot/pilot_20k/`. A failed or preempted run leaves a partial raw prefix that the next attempt refuses; delete it first: `gcloud storage rm -r gs://synthea-readmission-risk-raw/v2/pilot_20k/`.
+
+**Big Join on Dataproc Serverless 3.0** (`maxExecutors=7`, standard tier, ttl 2 h, the `dataproc-runtime` service account; never while a generation VM exists, since both draw on the 32-vCPU `CPUS_ALL_REGIONS` quota):
+
+```sh
+make bigjoin-batch RUN=pilot_20k BATCH_ARGS=--dry-run   # no gcloud call
+make bigjoin-batch RUN=pilot_20k
+```
+
+It checks that the raw run matches `prereg.yaml` (P7), writes gold to `gs://synthea-readmission-risk-gold/v2/pilot_20k/` with metadata version 2 (the Spark-computed `spark-rowhash-v1` fingerprint, the raw run's generation summary and the build provenance), and records wall-clock and DCU-hours (`runtimeInfo.approximateUsage.milliDcuSeconds / 3.6e6`) in `data/pilot/pilot_20k/batch_<id>.json`. A failed batch may leave partial output that the next submit refuses; delete it first: `gcloud storage rm -r gs://synthea-readmission-risk-gold/v2/pilot_20k/`. Ctrl-C leaves the batch running (bounded by its ttl); cancel it with `gcloud dataproc batches cancel <id> --region=us-central1`.
+
+**Proving nothing is left running:**
+
+```sh
+gcloud compute instances list --filter=labels.purpose=synthea-generation
+gcloud compute disks list --filter=labels.purpose=synthea-generation
+gcloud dataproc batches list --region=us-central1 --filter="state=RUNNING OR state=PENDING"
+```
+
+All three must print nothing.
+
 ## Teardown checklist
 
 Order matters: `prevent_destroy` makes `terraform destroy` refuse while the CHF 20 budget, the state bucket or the bundle bucket is still in state, and the bundle bucket's IAM members must go before the bucket. Start with `export CLOUDSDK_CORE_PROJECT=synthea-readmission-risk`.
@@ -295,7 +335,8 @@ Order matters: `prevent_destroy` makes `terraform destroy` refuse while the CHF 
 4. **Release the state bucket from state:** `terraform -chdir=infra state pull > final.tfstate` (a local record, gitignored), then `terraform -chdir=infra state rm google_storage_bucket.tfstate`.
 5. **Destroy the rest:** `terraform -chdir=infra destroy`. Raw and gold are deleted with their contents; the CHF 5 budget, both service accounts, all IAM members, the pool and the provider go; the APIs stay enabled. The final state is written to the state bucket, which still exists.
 6. **Delete the state bucket last:** `gcloud storage rm --recursive --all-versions "gs://synthea-readmission-risk-tfstate/**"`, then `gcloud storage buckets delete gs://synthea-readmission-risk-tfstate`. `infra/` needs a new bootstrap after this.
-7. **BigQuery (v2 slice 4):** set `deletion_protection = false` on `google_bigquery_table.predictions` and `.scoring_runs` and apply; `serving` does not delete its contents on destroy, so empty it first (`bq rm -r -f -d serving` as the owner, after exporting anything you want to keep); `scratch` deletes its own tables. The custom role `scorerTableWriter` stays soft-deleted for 7-37 days after `destroy`; re-creating it in that window needs `gcloud iam roles undelete scorerTableWriter --project=synthea-readmission-risk`.
-8. **Check for leftovers:** `gcloud storage buckets list --project=synthea-readmission-risk`, `gcloud dataproc batches list --region=us-central1 --project=synthea-readmission-risk`, `gcloud compute instances list --project=synthea-readmission-risk`, `bq ls --project_id=synthea-readmission-risk` (later slices), `gcloud iam service-accounts list --project=synthea-readmission-risk`.
-9. The WIF pool stays soft-deleted for 30 days; re-creating `github` in that window needs `gcloud iam workload-identity-pools undelete github --location=global --project=synthea-readmission-risk`.
-10. The final stop: `gcloud billing projects unlink synthea-readmission-risk`, or delete the project.
+7. **Slice 5 resources:** no generation VM or Dataproc batch may be running (the three commands above print nothing). Raw and gold `v2/` objects go with their buckets in step 5; the artifacts and Dataproc staging buckets are `force_destroy` and go there too. The `spark` network, subnet and firewall, the instance template and the `synthea-generator` and `dataproc-runtime` service accounts are destroyed by step 5.
+8. **BigQuery (v2 slice 4):** set `deletion_protection = false` on `google_bigquery_table.predictions` and `.scoring_runs` and apply; `serving` does not delete its contents on destroy, so empty it first (`bq rm -r -f -d serving` as the owner, after exporting anything you want to keep); `scratch` deletes its own tables. The custom role `scorerTableWriter` stays soft-deleted for 7-37 days after `destroy`; re-creating it in that window needs `gcloud iam roles undelete scorerTableWriter --project=synthea-readmission-risk`.
+9. **Check for leftovers:** `gcloud storage buckets list --project=synthea-readmission-risk`, `gcloud dataproc batches list --region=us-central1 --project=synthea-readmission-risk`, `gcloud compute instances list --project=synthea-readmission-risk`, `gcloud compute disks list --project=synthea-readmission-risk`, `gcloud compute instance-templates list --project=synthea-readmission-risk`, `bq ls --project_id=synthea-readmission-risk` (later slices), `gcloud iam service-accounts list --project=synthea-readmission-risk`.
+10. The WIF pool stays soft-deleted for 30 days; re-creating `github` in that window needs `gcloud iam workload-identity-pools undelete github --location=global --project=synthea-readmission-risk`.
+11. The final stop: `gcloud billing projects unlink synthea-readmission-risk`, or delete the project.

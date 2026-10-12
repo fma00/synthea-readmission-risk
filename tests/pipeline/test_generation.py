@@ -1,5 +1,7 @@
+import ast
 import json
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,6 +16,8 @@ from readmission_risk.pipeline.generation import (
     SyntheaValidationError,
     ValidationResult,
     build_synthea_command,
+    count_alive_patients,
+    parse_provenance_args,
     run_synthea_generation,
     validate_generation_output,
 )
@@ -282,3 +286,170 @@ def test_run_synthea_generation_raises_validation_error_on_empty_required_table(
 
     assert "patients.csv" in excinfo.value.validation_result.missing_tables
     assert not (config.output_dir / "generation_summary.json").exists()
+
+
+# --- v2 slice 5: -cs, -e, JVM time zone, included files, heap, alive-population check, provenance ---
+# (notes/eg-new-feature/v2-slice5-gs-big-join-fingerprint-pilot-2026-10-12.md, Interfaces section 8)
+
+REPO = Path(__file__).resolve().parents[2]
+
+
+def test_command_unchanged_without_new_options(tmp_path):
+    argv = build_synthea_command(make_config(tmp_path))
+    assert not any(a.startswith(("-D", "-X")) or a in ("-cs", "-e", "--exporter.csv.included_files") for a in argv)
+
+
+def test_clinician_seed_and_end_date_positions(tmp_path):
+    argv = build_synthea_command(make_config(tmp_path, clinician_seed=17, end_date="20260917"))
+    assert argv[argv.index("-s") : argv.index("-s") + 6] == ["-s", "42", "-cs", "17", "-r", "20260916"]
+    assert argv[argv.index("-r") + 2 : argv.index("-r") + 4] == ["-e", "20260917"]
+
+
+def test_included_files_flag_before_state(tmp_path):
+    argv = build_synthea_command(make_config(tmp_path, included_files=EXPECTED_CSV_TABLES))
+    assert argv[-3:] == ["--exporter.csv.included_files", ",".join(EXPECTED_CSV_TABLES), "Massachusetts"]
+
+
+def test_jvm_options_position_and_format(tmp_path):
+    argv = build_synthea_command(make_config(tmp_path, jvm_timezone="UTC", java_max_heap="96g"))
+    assert argv[:5] == ["java", "-Duser.timezone=UTC", "-Xmx96g", "-XX:+ExitOnOutOfMemoryError", "-jar"]
+
+
+def test_exit_on_oom_only_with_heap(tmp_path):
+    assert "-XX:+ExitOnOutOfMemoryError" not in build_synthea_command(make_config(tmp_path, jvm_timezone="UTC"))
+
+
+@pytest.mark.parametrize(
+    "overrides, match",
+    [
+        ({"included_files": EXPECTED_CSV_TABLES[:-1]}, "missing"),
+        ({"included_files": (*EXPECTED_CSV_TABLES, "patients.csv")}, "distinct"),
+        ({"included_files": (*EXPECTED_CSV_TABLES, "claims.txt")}, "distinct"),
+        ({"java_max_heap": "96G"}, "java_max_heap"),
+        ({"java_max_heap": "0g"}, "java_max_heap"),
+        ({"jvm_timezone": "UTC; rm -rf /"}, "jvm_timezone"),
+        ({"end_date": "20260916"}, "after reference_date"),
+        ({"end_date": "2026-09-17"}, "end_date"),
+        ({"clinician_seed": True}, "clinician_seed"),
+        ({"clinician_seed": -1}, "clinician_seed"),
+        ({"provenance": {"run": ""}}, "provenance"),
+    ],
+)
+def test_config_validation(tmp_path, overrides, match):
+    with pytest.raises(ValueError, match=match):
+        make_config(tmp_path, **overrides)
+
+
+def test_summary_has_new_keys(tmp_path):
+    config = make_config(tmp_path, clinician_seed=17, end_date="20260917", jvm_timezone="UTC",
+                         included_files=EXPECTED_CSV_TABLES, provenance={"run": "pilot_20k"})
+
+    def fake_run(*args, **kwargs):
+        _populate_fixture_csv_dir(config.output_dir)
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        run_synthea_generation(config)
+    summary = json.loads((config.output_dir / "generation_summary.json").read_text())
+    assert summary["clinician_seed"] == 17
+    assert summary["end_date"] == "20260917"
+    assert summary["jvm_timezone"] == "UTC"
+    assert summary["included_files"] == list(EXPECTED_CSV_TABLES)
+    assert summary["years_of_history"] == 10
+    assert summary["state"] == "Massachusetts"
+    assert summary["java_max_heap"] is None
+    assert summary["n_alive_patients"] is None  # not counted unless required
+    assert summary["provenance"] == {"run": "pilot_20k"}
+    assert isinstance(summary["peak_child_rss_bytes"], int)
+
+
+def test_summary_new_keys_null_by_default(tmp_path):
+    config = make_config(tmp_path)
+
+    def fake_run(*args, **kwargs):
+        _populate_fixture_csv_dir(config.output_dir)
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        run_synthea_generation(config)
+    summary = json.loads((config.output_dir / "generation_summary.json").read_text())
+    for key in ("clinician_seed", "end_date", "jvm_timezone", "included_files", "java_max_heap", "provenance"):
+        assert summary[key] is None, key
+
+
+@pytest.mark.parametrize("platform, raw, expected", [("darwin", 5000, 5000), ("linux", 5000, 5000 * 1024)])
+def test_peak_rss_normalised_per_platform(monkeypatch, platform, raw, expected):
+    import resource
+
+    from readmission_risk.pipeline import generation
+
+    monkeypatch.setattr(generation.sys, "platform", platform)
+    monkeypatch.setattr(
+        generation.resource, "getrusage", lambda who: type("R", (), {"ru_maxrss": raw})() if who == resource.RUSAGE_CHILDREN else None
+    )
+    assert generation._peak_child_rss_bytes() == expected
+
+
+def _write_patients(path: Path, alive: int, dead: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = ["Id,BIRTHDATE,DEATHDATE"] + [f"a{i},1980-01-01," for i in range(alive)] + [f"d{i},1980-01-01,2020-01-01" for i in range(dead)]
+    path.write_text("\n".join(rows) + "\n")
+
+
+@pytest.mark.parametrize("population, ok", [(3, True), (4, False)])
+def test_alive_population_check(tmp_path, population, ok):
+    config = make_config(tmp_path, population_size=population, require_alive_population=True)
+
+    def fake_run(*args, **kwargs):
+        _populate_fixture_csv_dir(config.output_dir)
+        _write_patients(config.output_dir / "csv" / "patients.csv", alive=3, dead=2)
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        if ok:
+            run_synthea_generation(config)
+            assert json.loads((config.output_dir / "generation_summary.json").read_text())["n_alive_patients"] == 3
+        else:
+            with pytest.raises(SyntheaValidationError, match="produced 3 alive patients, expected 4"):
+                run_synthea_generation(config)
+
+
+def test_alive_check_off_by_default(tmp_path):
+    config = make_config(tmp_path, population_size=1000)
+
+    def fake_run(*args, **kwargs):
+        _populate_fixture_csv_dir(config.output_dir)
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        run_synthea_generation(config)  # 5 placeholder patient rows, population 1000: no check, no error
+
+
+def test_count_alive_patients(tmp_path):
+    _write_patients(tmp_path / "patients.csv", alive=4, dead=1)
+    assert count_alive_patients(tmp_path / "patients.csv") == 4
+
+
+def test_parse_provenance_args():
+    assert parse_provenance_args(None) == {}
+    assert parse_provenance_args(["run=pilot_20k", "x=a=b"]) == {"run": "pilot_20k", "x": "a=b"}
+    for bad in (["norun"], ["=v"], ["k="], ["k=1", "k=2"]):
+        with pytest.raises(ValueError, match="provenance"):
+            parse_provenance_args(bad)
+
+
+def test_generation_code_is_stdlib_only():
+    """The generation VM runs pipeline/generation.py from the Spark zip on the image's system Python (no third-party packages)."""
+    files = [
+        REPO / "src/readmission_risk/pipeline/generation.py",
+        REPO / "src/readmission_risk/__init__.py",
+        REPO / "src/readmission_risk/pipeline/__init__.py",
+        REPO / "scripts/generate_synthea_data.py",
+    ]
+    allowed = {"readmission_risk", "readmission_risk.pipeline.generation"}
+    bad = []
+    for path in files:
+        for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
+            names = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module] if isinstance(node, ast.ImportFrom) and node.level == 0 else []
+            bad += [f"{path.name}: {n}" for n in names if n.split(".")[0] not in sys.stdlib_module_names and n not in allowed and n != "__future__"]
+    assert bad == []

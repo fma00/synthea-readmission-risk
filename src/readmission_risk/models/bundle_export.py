@@ -21,6 +21,7 @@ from mlflow.exceptions import MlflowException
 from mlflow.tracking import MlflowClient
 
 from readmission_risk.bundles.manifest import (
+    FINGERPRINT_DEFINITION_ROWHASH_V1,
     FINGERPRINT_DEFINITION_V1,
     MANIFEST_SCHEMA_VERSION,
     MODEL_FILENAME,
@@ -32,6 +33,7 @@ from readmission_risk.bundles.manifest import (
 )
 from readmission_risk.bundles.store import write_bundle
 
+from .constants import ROWHASH_TAG
 from .tracking import _require_store, mlflow_tracking_uri
 
 _ABSENT = object()  # feature_columns.json without a "features" key
@@ -85,8 +87,13 @@ def build_manifest(run, model_info, features_value, files: Mapping[str, bytes]) 
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "model_name": tags.get("model_name"),
         "gold_label_definition": tags.get("gold_label_definition"),
-        "gold_fingerprint": tags.get("gold_fingerprint"),
-        "gold_fingerprint_definition": FINGERPRINT_DEFINITION_V1,  # the only recipe today (models/data.py)
+        # v2 slice 5: a run trained on version-2 gold carries the Spark-computed spark-rowhash-v1 fingerprint; older runs (the v1
+        # champion included) keep pandas-csv-sha256-v1, so re-exporting them is still an idempotent no-op
+        **(
+            {"gold_fingerprint": tags[ROWHASH_TAG], "gold_fingerprint_definition": FINGERPRINT_DEFINITION_ROWHASH_V1}
+            if ROWHASH_TAG in tags
+            else {"gold_fingerprint": tags.get("gold_fingerprint"), "gold_fingerprint_definition": FINGERPRINT_DEFINITION_V1}
+        ),
         "params": {k: params.get(k) for k in ("reference_date", "readmission_window_days", "test_start_date")},
         "library_versions": {k: tags.get(k) for k in _LIBRARY_TAGS},
         "python_version": tags.get("python_version"),

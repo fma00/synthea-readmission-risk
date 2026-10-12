@@ -24,13 +24,14 @@ PRE_COMMIT_CONFIG = ROOT / ".pre-commit-config.yaml"
 
 EXPECTED_TARGETS = {
     "help", "setup", "hooks", "lint", "test", "pre-commit", "train", "export", "score", "score-bq", "m5-check",
-    "setup-runtime", "test-runtime", "lock-dev", "lock-runtime", "tf-validate",
+    "setup-runtime", "test-runtime", "lock-dev", "lock-runtime", "tf-validate", "spark-zip", "generate-vm", "bigjoin-batch",
 }
 # Every variable the Makefile reads, plus make's own propagation variables: a pytest started by `make test X=y` (or a
 # shell exporting VENV=...) must not change what these tests see.
 MAKEFILE_VARIABLES = ("PYTHON", "PYTHON312", "VENV", "RUNTIME_VENV", "LOCK_VENV", "GOLD_DIR", "REFERENCE_DATE",
                       "TEST_START_DATE", "EXPERIMENT", "RUN_DATE", "TRAIN_EXPERIMENT", "TRAIN_ARGS", "SCORE_ARGS",
-                      "EXPORT_MODEL", "EXPORT_ARGS", "TERRAFORM", "GOLD_URI", "SCORER_SA")
+                      "EXPORT_MODEL", "EXPORT_ARGS", "TERRAFORM", "GOLD_URI", "SCORER_SA", "RUN", "JDK_TARBALL", "GEN_ARGS",
+                      "BATCH_ARGS")
 SCRUBBED_ENV = ("MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "GNUMAKEFLAGS", "MAKEFILES", *MAKEFILE_VARIABLES)
 EXPECTED_PRE_COMMIT = [
     "repos:",
@@ -227,3 +228,19 @@ def test_pre_commit_config_validates():
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "deprecat" not in (result.stdout + result.stderr).lower()
+
+
+@needs_make
+def test_live_targets_refuse_without_required_variables(tmp_path):
+    """v2 slice 5: the two targets that spend money refuse to run without their variables, and pass them through."""
+    for target, needed in (("generate-vm", "set RUN="), ("bigjoin-batch", "set RUN=")):
+        result = run_make(target, f"VENV={tmp_path}/novenv")
+        assert result.returncode != 0 and needed in result.stderr, target
+    no_jdk = run_make("generate-vm", f"VENV={tmp_path}/novenv", "RUN=pilot_20k")
+    assert no_jdk.returncode != 0 and "set JDK_TARBALL=" in no_jdk.stderr
+    assert "scripts/launch_generation.py --run pilot_20k --jdk-tarball /x/jdk.tgz --dry-run" in _dry_run(
+        "generate-vm", "RUN=pilot_20k", "JDK_TARBALL=/x/jdk.tgz", "GEN_ARGS=--dry-run"
+    )
+    assert "scripts/submit_big_join_batch.py --run pilot_20k --dry-run" in _dry_run("bigjoin-batch", "RUN=pilot_20k", "BATCH_ARGS=--dry-run")
+    assert ".venv/bin/python scripts/build_spark_zip.py" in _dry_run("spark-zip")
+
