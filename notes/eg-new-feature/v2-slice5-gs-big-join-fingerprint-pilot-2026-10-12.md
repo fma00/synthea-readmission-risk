@@ -19,6 +19,31 @@ Shorthand used below (all from the PRD): FR = functional requirement; M = succes
 precedes the 200k generation; M7 ≥ 400 test positives at 200k); G = PRD goal; F4 = slice 4's open follow-up "read the
 billing report for slice 4's runs"; L0-L9 = this note's live checks; P1-P6 = preflight refusals; G-a/G-b = gates.
 
+## 5b hand-over (read this first)
+
+5a is committed (`c9427b2`, branch `v2-slice5-gs-big-join`); nothing has been applied, uploaded, generated or run on GCP.
+5b is the live 20k pilot. Every step marked **[confirm]** costs money or changes GCP and needs the owner's explicit go-ahead
+at that moment. Start every shell with `export CLOUDSDK_CORE_PROJECT=synthea-readmission-risk`. Commands:
+`docs/setup.md` > "Scale-up pilot". Pass criteria: "Verification criteria > 5b live checks" below (L0-L9).
+
+| # | Step | Done when | Stop and investigate if |
+|---|---|---|---|
+| 0 | 5a's PR into `v2` merged, CI green on all jobs; local `v2` pulled, tree clean; F4 (slice 4 billing) done: CHF 0 (2026-10-12) | `git status` empty | CI red (especially `pipeline-dataproc-runtime`: the FR12 agreement test on Java 21) |
+| 1 | Record `prereg.yaml`'s commit, committer date and PR merge time (M6 evidence) | written to `data/pilot/pilot_20k/live-checks.md` | |
+| 2 | **[confirm]** `terraform -chdir=infra plan`, then `apply` | plan = exactly 27 to add, 0 change, 0 destroy (L1); second plan = no changes | any change or destroy in the plan |
+| 3 | IAM checks with Policy Troubleshooter (L2) | every GRANTED/NOT_GRANTED as listed | any UNKNOWN: owner decides (L2) |
+| 4 | Download the JDK into `tools/jdk/`, check its sha256; `make generate-vm … GEN_ARGS=--dry-run` | dry run prints the plan, no gcloud call | any REFUSED |
+| 5 | **[confirm]** `make generate-vm RUN=pilot_20k JDK_TARBALL=tools/jdk/…` (spot VM, ≤ 2 h, ≈ $0.30/h) | exit 0; teardown proof empty; timings in `data/pilot/pilot_20k/` (L4) | exit 2 or 3 (3: delete the printed leftovers first) |
+| 6 | **[confirm]** `make bigjoin-batch RUN=pilot_20k` (Dataproc, ttl 2 h) | exit 0; gold layout check (L5); DCU-hours recorded | exit 2 |
+| 7 | Pilot acceptance A1-A7 (L5a); fingerprint across environments (L6) | all pass | any failure: stop, no slice 6 |
+| 8 | **[confirm]** download the raw pilot (≈ 4.4 GB, ≈ $0.5 egress); local Big Join equality and laptop regeneration (L7) | L7a equal; L7c recorded either way | L7a differs |
+| 9 | Nothing left running (L8); about 24 h later, the billing report (L9) | the three list commands print nothing | anything still running |
+| 10 | Transcribe `data/pilot/pilot_20k/*` into "Results" below, plus the 200k projection; one docs PR into `v2` | merged | |
+
+Rule while 5b runs: write nothing into tracked files (the CLIs refuse a dirty tree); results go to the gitignored
+`data/pilot/pilot_20k/` until step 10. Locally, `make test-runtime` needs JDK 17 (`JAVA_HOME=$(/usr/libexec/java_home -v 17)`):
+JDK 25 cannot run Spark 4.0, and no JDK 21 is installed.
+
 ## Owner decisions (Step 0, 2026-10-12)
 
 | # | Question | Decision |

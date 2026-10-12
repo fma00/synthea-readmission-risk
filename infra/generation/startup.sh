@@ -40,7 +40,7 @@ on_error() {
     local token bucket object
     token=$(curl -sf -H "Metadata-Flavor: Google" "$MD/instance/service-accounts/default/token" | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])' || true)
     bucket=${prefix#gs://}; bucket=${bucket%%/*}
-    object=${prefix#gs://$bucket/}/_FAILED
+    object=${prefix#gs://"$bucket"/}/_FAILED
     curl -sf -X POST -H "Authorization: Bearer $token" -H "Content-Type: text/plain" --data-binary @/work/_FAILED \
       "https://storage.googleapis.com/upload/storage/v1/b/$bucket/o?uploadType=media&ifGenerationMatch=0&name=$object" || true
   fi

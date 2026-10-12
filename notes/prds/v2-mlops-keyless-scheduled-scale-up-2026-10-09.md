@@ -395,7 +395,7 @@ Notes:
   - whether `event_name` / `workflow_ref` can be mapped in the WIF condition; **Resolved on documentation (slice 3):** both are GitHub OIDC claims and Google allows mapping any claim; live proof at V-post.
   - connector 0.44.0 direct-write overwrite / DYNAMIC partition behaviour;
   - the Storage Write API free tier (reported 2 TiB/month);
-  - batch load jobs being free; **measured (slice 4):** load jobs billed 0 bytes (`INFORMATION_SCHEMA.JOBS_BY_PROJECT`); the billing-report check is pending;
+  - batch load jobs being free; **measured (slice 4):** load jobs billed 0 bytes (`INFORMATION_SCHEMA.JOBS_BY_PROJECT`); the billing report showed CHF 0 for slice 4's runs (owner, 2026-10-12);
   - the GCS backend's native state locking; **Resolved (slice 3):** HashiCorp's docs say the gcs backend supports locking; observed ("Acquiring state lock") during the migration.
   - whether Python 3.14 is selectable on Community Cloud today;
   - whether uv enforces `--hash` on Community Cloud;
