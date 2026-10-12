@@ -45,8 +45,8 @@ SPARK_JOB_SOURCES = [
     *sorted((SRC / "readmission_risk" / "pipeline").rglob("*.py")),
     ROOT / "scripts" / "run_big_join.py",
 ]
-# Runtime 3.0.14 per the page cited in requirements-dataproc-3.0.in, checked 2026-10-11.
-RUNTIME_3_0 = {"python": (3, 12), "java_major": 21, "pyspark": "4.0.1", "pandas": "2.3", "pyarrow": "19.0", "numpy": "2.1"}
+# Runtime 3.0 as run on 2026-10-12 (Spark 4.0.2 measured; library minors from Google's page): requirements-dataproc-3.0.in.
+RUNTIME_3_0 = {"python": (3, 12), "java_major": 21, "pyspark": "4.0.2", "pandas": "2.3", "pyarrow": "19.0", "numpy": "2.1"}
 LOCKFILE = ROOT / "requirements-dataproc-3.0.txt"
 DEV_LOCKFILE = ROOT / "requirements-dev.txt"
 PIPELINE = ("readmission_risk", "pipeline")
@@ -92,8 +92,8 @@ def forbidden_imports(source: str, *, filename: str, package: tuple[str, ...] | 
 
 
 def _pins(path: Path) -> dict[str, str]:
-    """`name==version` lines of a pip-compile lockfile, by the name as written."""
-    return dict(re.findall(r"^([A-Za-z0-9_.\-]+)==([^\s;\\]+)", path.read_text(), flags=re.MULTILINE))
+    """`name==version` lines of a pip-compile lockfile, by the name as written, extras dropped."""
+    return dict(re.findall(r"^([A-Za-z0-9_.\-]+)(?:\[[^\]]*\])?==([^\s;\\=][^\s;\\]*)", path.read_text(), flags=re.MULTILINE))
 
 
 def test_spark_job_imports_only_stdlib_the_pipeline_and_runtime_bundled_packages():

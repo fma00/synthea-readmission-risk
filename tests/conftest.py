@@ -2,10 +2,18 @@ import pytest
 
 from readmission_risk.pipeline.spark_session import make_spark_session
 
+# One JVM serves the whole test session. Its default 1 GiB driver heap ran out once in CI (run 38253244020, a Big Join
+# test after 316 pipeline tests). Measured 2026-10-12: ~200 MiB stays live after GC, but the heap fills to ~900 MiB
+# between collections, so the failure was a transient peak, not a leak (notes/eg-new-feature/ci-hygiene-lockfiles-2026-10-12.md).
+# spark.driver.memory only takes effect if this fixture is the first code in the pytest process to start the JVM:
+# a test that calls make_spark_session() itself before this fixture runs would start a 1 GiB JVM that every later
+# session reuses.
+TEST_SPARK_CONF = {"spark.driver.memory": "2g"}
+
 
 @pytest.fixture(scope="session")
 def spark():
-    session = make_spark_session("test")
+    session = make_spark_session("test", conf=TEST_SPARK_CONF)
     yield session
     session.stop()
 

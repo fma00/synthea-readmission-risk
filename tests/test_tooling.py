@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -24,12 +25,12 @@ PRE_COMMIT_CONFIG = ROOT / ".pre-commit-config.yaml"
 
 EXPECTED_TARGETS = {
     "help", "setup", "hooks", "lint", "test", "pre-commit", "train", "export", "score", "score-bq", "m5-check",
-    "setup-runtime", "test-runtime", "lock-dev", "lock-runtime", "tf-validate", "spark-zip", "generate-vm", "bigjoin-batch",
+    "setup-runtime", "test-runtime", "lock-main", "lock-dev", "lock-runtime", "tf-validate", "spark-zip", "generate-vm", "bigjoin-batch",
 }
 # Every variable the Makefile reads, plus make's own propagation variables: a pytest started by `make test X=y` (or a
 # shell exporting VENV=...) must not change what these tests see.
-MAKEFILE_VARIABLES = ("PYTHON", "PYTHON312", "VENV", "RUNTIME_VENV", "LOCK_VENV", "GOLD_DIR", "REFERENCE_DATE",
-                      "TEST_START_DATE", "EXPERIMENT", "RUN_DATE", "TRAIN_EXPERIMENT", "TRAIN_ARGS", "SCORE_ARGS",
+MAKEFILE_VARIABLES = ("PYTHON", "PYTHON312", "VENV", "RUNTIME_VENV", "LOCK_VENV", "LOCK314_VENV", "GOLD_DIR",
+                      "REFERENCE_DATE", "TEST_START_DATE", "EXPERIMENT", "RUN_DATE", "TRAIN_EXPERIMENT", "TRAIN_ARGS", "SCORE_ARGS",
                       "EXPORT_MODEL", "EXPORT_ARGS", "TERRAFORM", "GOLD_URI", "SCORER_SA", "RUN", "JDK_TARBALL", "GEN_ARGS",
                       "BATCH_ARGS")
 SCRUBBED_ENV = ("MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "GNUMAKEFLAGS", "MAKEFILES", *MAKEFILE_VARIABLES)
@@ -48,7 +49,14 @@ EXPECTED_PRE_COMMIT = [
     "        language: unsupported",
     "        files: ^(\\.github/|\\.pre-commit-config\\.yaml$)",
     "        pass_filenames: false",
+    "      - id: terraform-fmt",
+    "        name: terraform fmt -check (infra/)",
+    """        entry: sh -c 'command -v terraform >/dev/null 2>&1 || { echo "terraform not on PATH, skipped (CI terraform-validate checks formatting)"; exit 0; }; exec terraform fmt -check -diff "$@"' --""",
+    "        language: unsupported",
+    "        files: ^infra/.*\\.tf$",
+    "        verbose: true",
 ]
+TERRAFORM_SKIP_NOTICE = "terraform not on PATH, skipped (CI terraform-validate checks formatting)"
 
 needs_make = pytest.mark.skipif(shutil.which("make") is None, reason="needs make")
 
@@ -65,8 +73,9 @@ def _dry_run(*args: str) -> str:
 
 
 def _pins(path: Path) -> dict[str, str]:
-    """`name==version` lines of a pip-compile lockfile, keyed by the PEP 503 normalised name."""
-    found = re.findall(r"^([A-Za-z0-9_.\-]+)==([^\s;\\]+)", path.read_text(), flags=re.MULTILINE)
+    """`name==version` lines of a pip-compile lockfile (extras such as `[grpc]` allowed), keyed by the PEP 503 normalised
+    name without the extras."""
+    found = re.findall(r"^([A-Za-z0-9_.\-]+)(?:\[[^\]]*\])?==([^\s;\\=][^\s;\\]*)", path.read_text(), flags=re.MULTILINE)
     return {re.sub(r"[-_.]+", "-", name).lower(): version for name, version in found}
 
 
@@ -184,23 +193,53 @@ def test_make_runtime_and_lock_venvs_are_recreated_and_guarded(tmp_path):
 
 
 @needs_make
-def test_make_lock_targets_compile_under_python_3_12():
+def test_make_lock_targets_compile_under_the_intended_python():
+    # requirements.txt and requirements-dev.txt: Python 3.14, macOS only; the Dataproc mirror: Python 3.12.
     runtime = _dry_run("lock-runtime")
     assert 'python3.12 -m venv ".venv-lock312"' in runtime
     assert (
         ".venv-lock312/bin/pip-compile --upgrade --generate-hashes"
         " --output-file=requirements-dataproc-3.0.txt requirements-dataproc-3.0.in"
     ) in runtime
+    assert "uname" not in runtime
+    dev = _dry_run("lock-dev")
+    assert 'test "$(uname -s)" = Darwin' in dev
+    assert 'python3.14 -m venv ".venv-lock314"' in dev
     assert (
-        ".venv-lock312/bin/pip-compile --allow-unsafe --generate-hashes"
+        ".venv-lock314/bin/pip-compile --allow-unsafe --generate-hashes"
         " --output-file=requirements-dev.txt requirements-dev.in"
-    ) in _dry_run("lock-dev")
+    ) in dev
+    main = _dry_run("lock-main")
+    assert 'test "$(uname -s)" = Darwin' in main
+    assert 'python3.14 -m venv ".venv-lock314"' in main
+    assert ".venv-lock314/bin/pip-compile --generate-hashes --output-file=requirements.txt requirements.in" in main
+    assert "--upgrade" not in main
+
+
+@needs_make
+@pytest.mark.skipif(sys.platform != "darwin", reason="lock-main venv guard: macOS only (the OS guard refuses first elsewhere)")
+def test_make_lock_main_venv_is_guarded(tmp_path):
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_text("must survive")
+    for value in (str(tmp_path), f".venv-x/../{os.path.relpath(tmp_path, ROOT)}", ".venv-a..b"):
+        result = run_make("lock-main", f"LOCK314_VENV={value}")
+        assert result.returncode != 0, value
+        assert "must name a .venv-* directory" in result.stderr, value
+        assert sentinel.exists(), value
+
+
+@needs_make
+@pytest.mark.skipif(sys.platform == "darwin", reason="lock-main OS guard: off-macOS only")
+def test_make_lock_main_refuses_off_macos():
+    result = run_make("lock-main")
+    assert result.returncode != 0
+    assert "run lock-main on macOS" in result.stderr
 
 
 # ---------------------------------------------------------------- pre-commit and the dev lockfile
 
 
-def test_pre_commit_config_is_local_hooks_from_the_main_checkouts_venv_only():
+def test_pre_commit_config_is_exactly_the_expected_local_hooks():
     lines = [line.rstrip() for line in PRE_COMMIT_CONFIG.read_text().split("\n")]
     assert [line for line in lines if line.strip() and not line.lstrip().startswith("#")] == EXPECTED_PRE_COMMIT
 
@@ -228,6 +267,39 @@ def test_pre_commit_config_validates():
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "deprecat" not in (result.stdout + result.stderr).lower()
+
+
+def _terraform_fmt_script() -> str:
+    """The shell script of the terraform-fmt hook's entry (`sh -c '<script>' --`), read from the config, not duplicated."""
+    yaml = pytest.importorskip("yaml")  # PyYAML comes with pre-commit (requirements-dev.txt)
+    config = yaml.safe_load(PRE_COMMIT_CONFIG.read_text())
+    (hook,) = [h for repo in config["repos"] for h in repo["hooks"] if h["id"] == "terraform-fmt"]
+    argv = shlex.split(hook["entry"])
+    assert argv[:2] == ["sh", "-c"] and argv[3:] == ["--"], argv
+    return argv[2]
+
+
+def test_terraform_fmt_hook_skips_without_terraform(tmp_path):
+    # tmp_path is empty, so `terraform` is not found; `command` and `echo` are shell builtins.
+    result = subprocess.run(
+        ["/bin/sh", "-c", _terraform_fmt_script(), "--", "infra/x.tf"],
+        env={"PATH": str(tmp_path)}, cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == TERRAFORM_SKIP_NOTICE + "\n"
+
+
+@pytest.mark.skipif(shutil.which("terraform") is None, reason="terraform-fmt hook: needs terraform on PATH")
+def test_terraform_fmt_hook_flags_unformatted_file(tmp_path):
+    script = _terraform_fmt_script()
+    bad = tmp_path / "bad.tf"
+    bad.write_text('resource "x" "y" {\na=1\n}\n')
+
+    def run(path: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["/bin/sh", "-c", script, "--", path], cwd=ROOT, capture_output=True, text=True, check=False)
+
+    assert run(str(bad)).returncode == 3
+    assert run("infra/versions.tf").returncode == 0
 
 
 @needs_make

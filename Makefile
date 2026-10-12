@@ -9,6 +9,7 @@ PYTHON312        ?= python3.12
 VENV             ?= .venv
 RUNTIME_VENV     ?= .venv-dataproc
 LOCK_VENV        ?= .venv-lock312
+LOCK314_VENV     ?= .venv-lock314
 GOLD_DIR         ?= data/gold/full_run_2b
 REFERENCE_DATE   ?= 20260916
 TEST_START_DATE  ?= 20230101
@@ -41,7 +42,7 @@ define fresh_venv
 case "$(1)" in */*|*..*) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; .venv-*) ;; *) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; esac; rm -rf "$(1)" && $(2) -m venv "$(1)"
 endef
 
-.PHONY: help setup hooks lint test pre-commit train export score score-bq m5-check setup-runtime test-runtime lock-dev lock-runtime tf-validate spark-zip generate-vm bigjoin-batch
+.PHONY: help setup hooks lint test pre-commit train export score score-bq m5-check setup-runtime test-runtime lock-main lock-dev lock-runtime tf-validate spark-zip generate-vm bigjoin-batch
 .DEFAULT_GOAL := help
 
 help: ## List the targets
@@ -57,7 +58,7 @@ setup: ## Create .venv (Python 3.14) and install the three hash-locked dependenc
 
 # --allow-missing-config: the hook in .git/hooks/ is shared by every branch and worktree, and a branch without
 # .pre-commit-config.yaml (main, until the v2 work merges) would otherwise refuse every commit.
-hooks: ## Install the git pre-commit hook (ruff, offline zizmor)
+hooks: ## Install the git pre-commit hook (ruff, offline zizmor, terraform fmt)
 	$(BIN)/pre-commit install --allow-missing-config
 
 lint: ## Run ruff and the offline zizmor workflow audit, like CI's lint step
@@ -100,14 +101,28 @@ test-runtime: ## Run tests/pipeline in .venv-dataproc (needs JDK 17 or 21)
 	@echo "PySpark uses JAVA_HOME=$${JAVA_HOME:-<unset: the java on PATH>}; Spark 4.0 supports JDK 17 or 21 only."
 	$(RUNTIME_VENV)/bin/pytest tests/pipeline
 
-# The lockfiles are compiled under Python 3.12 (their headers say so). The header records how pip-compile was invoked,
-# not this recipe: run these targets rather than the header's command.
-lock-dev: ## Recompile requirements-dev.txt under Python 3.12, keeping existing pins
-	@$(call fresh_venv,$(LOCK_VENV),$(PYTHON312),LOCK_VENV)
-	@$(call check_python,$(LOCK_VENV),3,12,PYTHON312)
-	@$(LOCK_VENV)/bin/python -c 'import sys; print("pip-compile interpreter:", sys.version.split()[0], sys.executable)'
-	$(LOCK_VENV)/bin/pip install --require-hashes -r requirements-dev.txt
-	$(LOCK_VENV)/bin/pip-compile --allow-unsafe --generate-hashes --output-file=requirements-dev.txt requirements-dev.in
+# requirements.txt and requirements-dev.txt are compiled under Python 3.14, the interpreter that installs them (since
+# 2026-10-12), and on macOS: pip-compile resolves environment markers for the host only, and requirements-linux-extras.txt
+# holds what a macOS compile cannot see (on Linux, nvidia-nccl-cu13 would land in requirements.txt unmarked).
+# requirements-dataproc-3.0.txt is compiled under 3.12, the Dataproc runtime's interpreter. The header records how
+# pip-compile was invoked, not this recipe: run these targets rather than the header's command. tests/test_lockfiles.py
+# checks the result.
+lock-main: ## Recompile requirements.txt under Python 3.14 on macOS, keeping existing pins
+	@test "$$(uname -s)" = Darwin || { echo "ERROR: run lock-main on macOS (see the comment above lock-main in the Makefile)" >&2; exit 1; }
+	@$(call fresh_venv,$(LOCK314_VENV),$(PYTHON),LOCK314_VENV)
+	@$(call check_python,$(LOCK314_VENV),3,14,PYTHON)
+	@$(LOCK314_VENV)/bin/python -c 'import sys; print("pip-compile interpreter:", sys.version.split()[0], sys.executable)'
+	$(LOCK314_VENV)/bin/pip install --require-hashes -r requirements-dev.txt
+	$(LOCK314_VENV)/bin/pip-compile --generate-hashes --output-file=requirements.txt requirements.in
+	@echo "requirements-linux-extras.txt is hand-maintained: if a Linux-only dependency changed, update it (docs/setup.md)."
+
+lock-dev: ## Recompile requirements-dev.txt under Python 3.14 on macOS, keeping existing pins
+	@test "$$(uname -s)" = Darwin || { echo "ERROR: run lock-dev on macOS (see the comment above lock-main in the Makefile)" >&2; exit 1; }
+	@$(call fresh_venv,$(LOCK314_VENV),$(PYTHON),LOCK314_VENV)
+	@$(call check_python,$(LOCK314_VENV),3,14,PYTHON)
+	@$(LOCK314_VENV)/bin/python -c 'import sys; print("pip-compile interpreter:", sys.version.split()[0], sys.executable)'
+	$(LOCK314_VENV)/bin/pip install --require-hashes -r requirements-dev.txt
+	$(LOCK314_VENV)/bin/pip-compile --allow-unsafe --generate-hashes --output-file=requirements-dev.txt requirements-dev.in
 
 # --upgrade on purpose: the runtime mirror is defined as the newest patch of each bundled minor at compile time.
 lock-runtime: ## Recompile requirements-dataproc-3.0.txt under Python 3.12 (re-resolves to the newest allowed patches)

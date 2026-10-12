@@ -1319,7 +1319,7 @@ def test_gold_column_kinds_match_spark_gold_schema(spark, built_gold):
 
 def test_spark_and_python_fingerprints_agree(spark, tmp_path):
     """FR12: the Spark-side fingerprint (Arrow batches in Python workers) equals the pandas-side one, on a frame with the value
-    shapes where the two paths could differ. Runs in CI's pipeline-dataproc-runtime job too (Python 3.12, Spark 4.0.1, Java 21)."""
+    shapes where the two paths could differ. Runs in CI's pipeline-dataproc-runtime job too (Python 3.12, Spark 4.0.2, Java 21)."""
     from readmission_risk.models.data import load_gold_table
 
     frame = build_agreement_frame(spark)

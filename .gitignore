@@ -13,7 +13,7 @@ dist/
 venv/
 env/
 env*/
-# Extra venvs the Makefile creates and recreates (.venv-dataproc, .venv-lock312)
+# Extra venvs the Makefile creates and recreates (.venv-dataproc, .venv-lock312, .venv-lock314)
 .venv-*/
 
 # Environment variables / secrets

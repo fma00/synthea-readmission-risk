@@ -4,7 +4,7 @@
 
 ## Setup
 
-Developed and CI-tested on Python 3.14 (pinned via [.python-version](../.python-version)). The pipeline subpackage is also CI-tested on Python 3.12 with PySpark 4.0.1, the stack of the Dataproc Serverless runtime the scale-up phase targets (see [Testing against the Dataproc runtime](#testing-against-the-dataproc-runtime)). The rest of the package is not tested on 3.12, although `requires-python` still admits it.
+Developed and CI-tested on Python 3.14 (pinned via [.python-version](../.python-version)). The pipeline subpackage is also CI-tested on Python 3.12 with PySpark 4.0.2, the stack of the Dataproc Serverless runtime the scale-up phase targets (see [Testing against the Dataproc runtime](#testing-against-the-dataproc-runtime)). The rest of the package is not tested on 3.12, although `requires-python` still admits it.
 
 ```sh
 # Create and activate the virtualenv
@@ -47,10 +47,11 @@ The [Makefile](../Makefile) wraps the commands on this page. Its recipes call th
 | `make export` | Exports the `EXPORT_MODEL` run (default `logistic_regression`) of `EXPERIMENT` (default `readmission-risk-v1`) as a model bundle under the gitignored `bundles/` and prints the `deploy/champion.json` text that would promote it; extra flags in `EXPORT_ARGS` ([scoring.md](scoring.md#model-bundles)) |
 | `make score` | Scores run date `20250630` with the champion bundle (`deploy/champion.json`); override `RUN_DATE`, `GOLD_DIR`, extra flags in `SCORE_ARGS` (e.g. `--bundle bundles/<id>`) |
 | `make setup-runtime`, `make test-runtime` | The Dataproc runtime environment, next section |
-| `make lock-dev`, `make lock-runtime` | Recompile `requirements-dev.txt` / `requirements-dataproc-3.0.txt` under Python 3.12 |
+| `make lock-main`, `make lock-dev` | Recompile `requirements.txt` / `requirements-dev.txt` under Python 3.14, on macOS (keeps existing pins) |
+| `make lock-runtime` | Recompile `requirements-dataproc-3.0.txt` under Python 3.12 (re-resolves to the newest allowed patches) |
 | `make tf-validate` | Checks `infra/` like CI's `terraform-validate` job (`fmt -check`, `init` without a backend, `validate`; no credentials); needs Terraform 1.16.x ([Infrastructure](#infrastructure-terraform)) |
 
-The pre-commit hook (`make hooks`, configured in [.pre-commit-config.yaml](../.pre-commit-config.yaml)) runs ruff on the staged Python files and notebooks, and zizmor offline whenever a file under `.github/` or `.pre-commit-config.yaml` itself is staged (zizmor audits both). Both tools come from the main checkout's `.venv`, so the versions are the hash-pinned ones in `requirements-dev.txt`. Things to know:
+The pre-commit hook (`make hooks`, configured in [.pre-commit-config.yaml](../.pre-commit-config.yaml)) runs ruff on the staged Python files and notebooks, and zizmor offline whenever a file under `.github/` or `.pre-commit-config.yaml` itself is staged (zizmor audits both). Both tools come from the main checkout's `.venv`, so the versions are the hash-pinned ones in `requirements-dev.txt`. A third hook runs `terraform fmt -check` on staged `infra/*.tf` files with the `terraform` on PATH, and skips with a notice when there is none (CI's `terraform-validate` job is the gate). Things to know:
 
 - `make setup` does not install the hook; `make hooks` does. `pre-commit install` fails outside a git checkout and refuses to run when `core.hooksPath` is set.
 - The hook is installed with `--allow-missing-config`: it is shared by every branch, and a branch without `.pre-commit-config.yaml` commits with a skip notice instead of being refused.
@@ -59,7 +60,7 @@ The pre-commit hook (`make hooks`, configured in [.pre-commit-config.yaml](../.p
 
 ## Testing against the Dataproc runtime
 
-The feature join runs on Dataproc Serverless runtime 3.0 in the scale-up phase: Python 3.12, Spark 4.0.1 and Java 21, with the runtime's own pandas 2.3, pyarrow 19.0 and numpy 2.1. [requirements-dataproc-3.0.txt](../requirements-dataproc-3.0.txt) is a hash-locked mirror of those libraries ([requirements-dataproc-3.0.in](../requirements-dataproc-3.0.in) names the source page and date). It is used only for testing; it is never installed on Dataproc or combined with `requirements.txt`. CI's `pipeline-dataproc-runtime` job runs `tests/pipeline` under it and asserts the exact stack, Java 21 included. To run the same tests locally:
+The feature join runs on Dataproc Serverless runtime 3.0 in the scale-up phase: Python 3.12, Spark 4.0.x (4.0.2 ran on 2026-10-12; Google's page still lists 4.0.1) and Java 21, with the runtime's own pandas 2.3, pyarrow 19.0 and numpy 2.1. [requirements-dataproc-3.0.txt](../requirements-dataproc-3.0.txt) is a hash-locked mirror of those libraries ([requirements-dataproc-3.0.in](../requirements-dataproc-3.0.in) names its sources and dates). It is used only for testing; it is never installed on Dataproc or combined with `requirements.txt`. CI's `pipeline-dataproc-runtime` job runs `tests/pipeline` under it and asserts the exact stack, Java 21 included. To run the same tests locally:
 
 ```sh
 make setup-runtime   # deletes and recreates .venv-dataproc with python3.12 (override PYTHON312=/path/to/python3.12)
@@ -68,7 +69,7 @@ make test-runtime    # pytest tests/pipeline in .venv-dataproc
 
 `make test-runtime` needs a JDK that Spark 4.0 supports, 17 or 21; PySpark uses `JAVA_HOME` if set, otherwise the `java` on `PATH` (JDK 25, for example, is not supported). The Java version and exact library versions are asserted only in CI. The test `tests/pipeline/test_runtime_dependencies.py` also enforces that the code shipped to Dataproc (`src/readmission_risk/pipeline/`, the package `__init__.py` and `scripts/run_big_join.py`) imports only the standard library, its own subpackage and the runtime-bundled packages.
 
-When Google's runtime page changes a bundled version, edit `requirements-dataproc-3.0.in` (and the version constants in that test), then run `make lock-runtime` and `make test-runtime`. `make lock-runtime` re-resolves to the newest allowed patches. The command recorded in a lockfile's header is not the recipe, so use the Makefile targets: `make lock-dev` keeps existing pins, `make lock-runtime` passes `--upgrade`. The `.venv-*` directories are deleted and recreated by these targets.
+The library minors follow Google's runtime page; the Spark patch follows what the live runtime ran (the page lags), as recorded in a batch's gold metadata (`spark_version`). When either changes, edit `requirements-dataproc-3.0.in` and `RUNTIME_3_0` in `tests/pipeline/test_runtime_dependencies.py`, run `make lock-runtime` and `make test-runtime`, and commit the `.in` file, the lockfile and the test together (any one of them alone fails `tests/test_lockfiles.py` or `test_runtime_lockfile_mirrors_runtime_3_0`). `make lock-runtime` re-resolves to the newest allowed patches. The command recorded in a lockfile's header is not the recipe, so use the Makefile targets: `make lock-main` and `make lock-dev` keep existing pins (Python 3.14, macOS only), `make lock-runtime` passes `--upgrade` (Python 3.12). `tests/test_lockfiles.py` fails when a lockfile no longer matches its `.in` file. The `.venv-*` directories are deleted and recreated by these targets.
 
 ## Running the actual pipeline (Slice 1: Synthea generation)
 

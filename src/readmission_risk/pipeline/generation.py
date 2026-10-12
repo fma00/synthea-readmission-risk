@@ -17,8 +17,9 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
-# Synthea CLI/config facts below were verified directly against the v4.0.0 release tag's source
-# and synthea.properties, not assumed.
+# Synthea CLI/config facts below were verified against the v4.0.0 release tag's source and synthea.properties, not
+# assumed. The jar scripts/setup_synthea.sh downloads from the v4.0.0 release reports build v3.4.0-18-ga07a65555 (pinned
+# as synthea_build_version in prereg.yaml); the flags used here were exercised against that jar in the slice-5 pilot.
 
 EXPECTED_CSV_TABLES: tuple[str, ...] = (
     "patients.csv",
