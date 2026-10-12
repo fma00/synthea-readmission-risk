@@ -116,3 +116,6 @@ override.tf.json
 *_override.tf
 *_override.tf.json
 crash.log
+# v2 slice 5: the Temurin tarball pinned in prereg.yaml (download target of docs/setup.md's recipe); untracked files would
+# make the launchers' clean-tree check (P1) refuse
+tools/jdk/

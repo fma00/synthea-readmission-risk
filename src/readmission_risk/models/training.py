@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import time
 import warnings
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
@@ -25,11 +25,12 @@ from mlflow.tracking import MlflowClient
 
 from readmission_risk.pipeline.gold_metadata import (
     GOLD_METADATA_FILENAME,
+    metadata_to_dict,
     parse_yyyymmdd,
 )
 
 from . import tracking
-from .constants import MODEL_NAMES
+from .constants import MODEL_NAMES, ROWHASH_TAG
 from .data import (
     EXCLUDED_COLUMN_REASONS,
     FEATURE_COLUMNS,
@@ -72,6 +73,9 @@ class TrainingConfig:
     calibration_cv_folds: int = 5
     calibration_method: str = "sigmoid"
     n_bootstrap: int = 500
+    # v2 slice 5: what the caller passed as --gold-dir (e.g. a gs:// URI that the CLI downloaded to a temporary gold_dir);
+    # logged as the run param gold_source. None -> str(gold_dir).
+    gold_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -253,12 +257,17 @@ def train_and_evaluate(config: TrainingConfig) -> TrainingResult:
                     "readmission_window_days": config.readmission_window_days,
                     "gold_lookback_years": metadata.lookback_years,
                     "n_bootstrap": config.n_bootstrap,
+                    "gold_source": config.gold_source if config.gold_source is not None else str(config.gold_dir),
                 }
                 params.update({f"split_{k}": v for k, v in split.summary.items()})
                 if name == _CHALLENGER:
                     params["calibration_method"] = config.calibration_method
                     params["calibration_cv_folds"] = config.calibration_cv_folds
                 mlflow.log_params(params)
+                if metadata.metadata_version == 2:
+                    # the Spark-computed fingerprint the loader has just verified against the frame; the bundle exporter
+                    # records it (definition spark-rowhash-v1) for runs that carry this tag
+                    mlflow.set_tag(ROWHASH_TAG, metadata.gold_fingerprint)
                 mlflow.set_tags(
                     {
                         "model_name": name,
@@ -290,7 +299,7 @@ def train_and_evaluate(config: TrainingConfig) -> TrainingResult:
 
                 mlflow.log_dict({"calibration_curve": result.calibration_curve}, "calibration_curve.json")
                 mlflow.log_dict(dict(split.summary), "split_summary.json")
-                mlflow.log_dict(asdict(metadata), "gold_metadata.json")
+                mlflow.log_dict(metadata_to_dict(metadata), "gold_metadata.json")
                 mlflow.log_dict(
                     {"features": list(FEATURE_COLUMNS), "excluded": dict(EXCLUDED_COLUMN_REASONS)},
                     "feature_columns.json",

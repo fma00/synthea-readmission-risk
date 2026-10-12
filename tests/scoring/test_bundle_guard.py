@@ -161,3 +161,58 @@ def test_unreadable_bundle_file_is_a_keyed_value_error(scoring_env, loaded_gold,
             validate_bundle(uri, gold=gold, metadata=metadata)
     finally:
         os.chmod(Path(uri) / "model.pkl", 0o644)
+
+
+# --- v2 slice 5: guard 6 with the spark-rowhash-v1 definition (called directly: the real scoring path's loader already
+# refuses a version-2 table whose recorded fingerprint differs from its content) ---
+
+
+def _as_v2(metadata, fingerprint):
+    from dataclasses import replace
+
+    return replace(
+        metadata,
+        metadata_version=2,
+        gold_fingerprint=fingerprint,
+        gold_fingerprint_definition="spark-rowhash-v1",
+        spark_version="test",
+        generation_summary={"reference_date": metadata.reference_date},
+        build_provenance={},
+    )
+
+
+def _rowhash_bundle(scoring_env, tmp_path, fingerprint):
+    return tamper_bundle(
+        scoring_env.lr_bundle_uri,
+        tmp_path,
+        set={"gold_fingerprint_definition": "spark-rowhash-v1", "gold_fingerprint": fingerprint},
+    )
+
+
+def test_rowhash_bundle_matches_own_gold(scoring_env, loaded_gold, tmp_path):
+    from readmission_risk.pipeline.fingerprint import rowhash_fingerprint
+
+    gold, metadata = loaded_gold
+    fingerprint = rowhash_fingerprint(gold)
+    bundle = validate_bundle(_rowhash_bundle(scoring_env, tmp_path, fingerprint), gold=gold, metadata=_as_v2(metadata, fingerprint))
+    assert bundle.gold_fingerprint == fingerprint
+
+
+def test_rowhash_bundle_refuses_edited_gold(scoring_env, loaded_gold, tmp_path):
+    from readmission_risk.pipeline.fingerprint import rowhash_fingerprint
+
+    gold, metadata = loaded_gold
+    fingerprint = rowhash_fingerprint(gold)
+    edited = gold.copy()
+    edited.loc[edited.index[0], "gender"] = "X"
+    with pytest.raises(ValueError, match="was not trained on this table"):
+        validate_bundle(_rowhash_bundle(scoring_env, tmp_path, fingerprint), gold=edited, metadata=_as_v2(metadata, fingerprint))
+
+
+def test_rowhash_bundle_refuses_metadata_fingerprint_mismatch(scoring_env, loaded_gold, tmp_path):
+    from readmission_risk.pipeline.fingerprint import rowhash_fingerprint
+
+    gold, metadata = loaded_gold
+    fingerprint = rowhash_fingerprint(gold)
+    with pytest.raises(ValueError, match="the gold metadata records spark-rowhash-v1 fingerprint"):
+        validate_bundle(_rowhash_bundle(scoring_env, tmp_path, fingerprint), gold=gold, metadata=_as_v2(metadata, "f" * 64))

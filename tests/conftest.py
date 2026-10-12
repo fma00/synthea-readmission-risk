@@ -40,3 +40,10 @@ def _no_real_gcp(request, monkeypatch):
 
     for name in ("credentials", "storage_client", "bigquery_client"):
         monkeypatch.setattr(f"readmission_risk.gcp.{name}", refuse)
+
+    def refuse_gcloud(argv, *_args, **_kwargs):
+        raise RuntimeError(f"tests must not run gcloud ({' '.join(argv[:3])} ...): pass a fake Runner")
+
+    # v2 slice 5: the operations CLIs' gcloud subprocesses (ops/gcloud.py is stdlib + readmission_risk.gcp, so this import is
+    # safe in CI's Dataproc-runtime job too)
+    monkeypatch.setattr("readmission_risk.ops.gcloud.default_runner", refuse_gcloud)
