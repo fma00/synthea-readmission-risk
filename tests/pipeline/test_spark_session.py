@@ -14,6 +14,18 @@ def test_python_workers_run_the_drivers_python_version(spark):
     assert worker == [tuple(sys.version_info[:2])]
 
 
+def test_session_fixture_has_a_two_gib_driver_heap(spark):
+    from tests.conftest import TEST_SPARK_CONF
+
+    # _jvm is a private PySpark API; it works in classic local mode, which is what the session fixture creates.
+    max_heap = spark.sparkContext._jvm.java.lang.Runtime.getRuntime().maxMemory()
+    assert max_heap >= 1.75 * 2**30, (
+        f"driver heap is {max_heap / 2**30:.2f} GiB, not 2 GiB: was the JVM started before the session fixture "
+        "(a direct make_spark_session() call in a test)? See tests/conftest.py"
+    )
+    assert spark.sparkContext.getConf().get("spark.driver.memory") == TEST_SPARK_CONF["spark.driver.memory"]
+
+
 # v2 slice 5 (FR11): the caller chooses master and config; builder_settings is pure, so no second SparkContext starts here.
 
 

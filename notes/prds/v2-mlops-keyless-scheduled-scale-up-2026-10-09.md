@@ -224,7 +224,7 @@ Each requirement is testable; slice designs refine them.
 **Infrastructure and identity (G4, G16, G17)**
 - **FR8** Terraform manages:
   - a GCS state bucket (bootstrap: create with a local backend, then `-migrate-state`; versioning on, public access prevention enforced);
-  - the raw, gold and bundle buckets in **us-central1**, with a lifecycle rule deleting `raw/` after **90 days** (OQ5; covers FR16 and Big Join re-runs; afterwards regenerate, ≈ $1, deterministic per seed);
+  - the raw, gold and bundle buckets in **us-central1**, with a lifecycle rule deleting `raw/` after **90 days** (OQ5; covers FR16 and Big Join re-runs; afterwards regenerate, ≈ $1, content-deterministic given seed, clinician seed, end date and JVM time zone, except row order and, across machines, 45 encounter-less QALY/DALY/QOLS rows of observations.csv; the gold fingerprint is the reproducible unit (slice 5));
   - the BigQuery datasets and tables;
   - the service accounts and IAM;
   - the WIF pool and provider;
@@ -312,9 +312,9 @@ Each requirement is testable; slice designs refine them.
   - If WIF is not working by day 9, one narrowly documented workaround is allowed, never service-account keys in CI.
 - **Reproducibility:**
   - Every run records its bundle id, git commit, `prereg.yaml` hash, Dataproc runtime sub-version and seed.
-  - Synthea generation is deterministic per seed.
+  - Synthea generation is deterministic per seed. **Corrected 2026-10-12 (slice 5):** content is deterministic only with `-s`, `-cs`, `-e` and a pinned JVM time zone; row order varies.
   - The lockfiles stay hash-checked.
-  - A lockfile-drift CI check is added, because the library-version guard would otherwise refuse a scheduled run after drift.
+  - A lockfile-drift CI check is added, because the library-version guard would otherwise refuse a scheduled run after drift. **Partly met 2026-10-12** (`notes/eg-new-feature/ci-hygiene-lockfiles-2026-10-12.md`): `tests/test_lockfiles.py` proves each lockfile matches its `.in`; a champion-compatibility check for guard 8 is still open.
 - **Cost:**
   - One-off ≤ $50 (extrap ≈ $10–30: VM ≈ $1, Dataproc ≈ $1–3 per run × 5–10 runs, GCS ≈ $1–3 over 90 days).
   - Steady state ≤ $20/month (extrap ≈ $0–1).
