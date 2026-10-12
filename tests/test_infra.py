@@ -456,6 +456,41 @@ def test_gold_object_admin_is_conditioned_on_v2_prefix():
     assert len(_members_of("dataproc_runtime")) == 10
 
 
+# roles/dataproc.worker minus its storage.* permissions (read with `gcloud iam roles describe roles/dataproc.worker`,
+# 2026-10-12: 61 permissions, 28 of them storage.*; all 33 below are supported in custom roles).
+DATAPROC_RUNTIME_PERMISSIONS = [
+    "cloudprofiler.profiles.create", "cloudprofiler.profiles.update",
+    "datalineage.locations.processOpenLineageMessage",
+    "dataproc.agents.create", "dataproc.agents.delete", "dataproc.agents.get", "dataproc.agents.list",
+    "dataproc.agents.update", "dataproc.batches.computeTuningConfig", "dataproc.batches.sparkApplicationWrite",
+    "dataproc.sessions.sparkApplicationWrite", "dataproc.tasks.lease", "dataproc.tasks.listInvalidatedLeases",
+    "dataproc.tasks.reportStatus",
+    "dataprocrm.nodePools.create", "dataprocrm.nodePools.delete", "dataprocrm.nodePools.deleteNodes",
+    "dataprocrm.nodePools.get", "dataprocrm.nodePools.list", "dataprocrm.nodePools.resize", "dataprocrm.nodes.get",
+    "dataprocrm.nodes.heartbeat", "dataprocrm.nodes.list", "dataprocrm.nodes.mintOAuthToken",
+    "dataprocrm.operations.get",
+    "logging.logEntries.create", "logging.logEntries.route",
+    "monitoring.metricDescriptors.create", "monitoring.metricDescriptors.get", "monitoring.metricDescriptors.list",
+    "monitoring.monitoredResourceDescriptors.get", "monitoring.monitoredResourceDescriptors.list",
+    "monitoring.timeSeries.create",
+]  # fmt: skip
+
+
+def test_dataproc_runtime_has_no_project_level_storage_access():
+    """5b L2 finding: project roles/dataproc.worker carries storage.objects.* on every bucket (raw, gold incl.
+    full_run_2b, bundles, tfstate), which made the gold v2/ condition moot. Storage comes only from bucket-level grants."""
+    project = [m["role"] for m in _members_of("dataproc_runtime") if m["_type"] == "google_project_iam_member"]
+    assert project == ["google_project_iam_custom_role.dataproc_runtime_worker.id"]
+    role = _collapse(_resource("google_project_iam_custom_role", "dataproc_runtime_worker"))
+    assert 'role_id = "dataprocRuntimeWorker"' in role
+    permissions = re.search(r"permissions = \[ (.*?),? \]", role)
+    assert permissions is not None
+    granted = [p.strip().strip('"') for p in permissions.group(1).split(",")]
+    assert granted == DATAPROC_RUNTIME_PERMISSIONS
+    assert not [p for p in granted if p.startswith("storage.")]
+    assert '"roles/dataproc.worker"' not in _all_tf()
+
+
 def test_no_resource_uses_default_compute_sa():
     assert "-compute@developer.gserviceaccount.com" not in _all_tf()
     assert "service_account { email = google_service_account.synthea_generator.email" in _collapse(

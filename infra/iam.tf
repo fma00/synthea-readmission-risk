@@ -213,10 +213,57 @@ resource "google_project_iam_member" "generator_writes_logs" {
   depends_on = [google_project_service.enabled]
 }
 
-# The documented minimum role for a Dataproc Serverless workload's service account.
+# roles/dataproc.worker (the documented role for a Dataproc Serverless workload's service account) minus its 28
+# storage.* permissions: granted at project level they reach every bucket (raw, gold incl. full_run_2b, bundles,
+# tfstate) and make the gold v2/ condition below moot (5b live check L2, 2026-10-12). Storage access comes only from
+# the bucket-level grants below. Taken from `gcloud iam roles describe roles/dataproc.worker` on 2026-10-12; if Google
+# adds a permission the runtime needs, the batch fails with a permission error and this list is extended.
+resource "google_project_iam_custom_role" "dataproc_runtime_worker" {
+  role_id     = "dataprocRuntimeWorker"
+  title       = "Dataproc runtime worker (no storage)"
+  description = "roles/dataproc.worker without storage.*; storage is granted per bucket."
+  permissions = [
+    "cloudprofiler.profiles.create",
+    "cloudprofiler.profiles.update",
+    "datalineage.locations.processOpenLineageMessage",
+    "dataproc.agents.create",
+    "dataproc.agents.delete",
+    "dataproc.agents.get",
+    "dataproc.agents.list",
+    "dataproc.agents.update",
+    "dataproc.batches.computeTuningConfig",
+    "dataproc.batches.sparkApplicationWrite",
+    "dataproc.sessions.sparkApplicationWrite",
+    "dataproc.tasks.lease",
+    "dataproc.tasks.listInvalidatedLeases",
+    "dataproc.tasks.reportStatus",
+    "dataprocrm.nodePools.create",
+    "dataprocrm.nodePools.delete",
+    "dataprocrm.nodePools.deleteNodes",
+    "dataprocrm.nodePools.get",
+    "dataprocrm.nodePools.list",
+    "dataprocrm.nodePools.resize",
+    "dataprocrm.nodes.get",
+    "dataprocrm.nodes.heartbeat",
+    "dataprocrm.nodes.list",
+    "dataprocrm.nodes.mintOAuthToken",
+    "dataprocrm.operations.get",
+    "logging.logEntries.create",
+    "logging.logEntries.route",
+    "monitoring.metricDescriptors.create",
+    "monitoring.metricDescriptors.get",
+    "monitoring.metricDescriptors.list",
+    "monitoring.monitoredResourceDescriptors.get",
+    "monitoring.monitoredResourceDescriptors.list",
+    "monitoring.timeSeries.create",
+  ]
+
+  depends_on = [google_project_service.enabled]
+}
+
 resource "google_project_iam_member" "dataproc_runtime_worker" {
   project = var.project_id
-  role    = "roles/dataproc.worker"
+  role    = google_project_iam_custom_role.dataproc_runtime_worker.id
   member  = "serviceAccount:${google_service_account.dataproc_runtime.email}"
 
   depends_on = [google_project_service.enabled]
