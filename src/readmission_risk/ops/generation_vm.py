@@ -291,6 +291,15 @@ def positive_control(ctx: LaunchContext, name: str, zone: str, max_run_seconds: 
     return problems
 
 
+def positive_control_ok_message(name: str, max_run_seconds: int) -> str:
+    """The pass line, naming exactly the checks positive_control makes, in its order."""
+    return (
+        f"POSITIVE CONTROL OK: {name} is labelled purpose=synthea-generation, runs the pinned startup script, is SPOT with "
+        f"termination action DELETE and maxRunDuration {max_run_seconds}s, has no external IP and runs as {GENERATOR_SA}; "
+        "its boot disk is labelled; both label filters list exactly this instance and disk"
+    )
+
+
 def instance_exists(ctx: LaunchContext, name: str) -> bool:
     return name in [i.get("name") for i in list_labelled(ctx.run, "instances")]
 
@@ -398,6 +407,7 @@ def launch(options: LaunchOptions, ctx: LaunchContext) -> int:
             ctx.echo("POSITIVE CONTROL FAILED (deleting the VM): " + "; ".join(problems))
             outcome = EXIT_FAILED
         else:
+            ctx.echo(positive_control_ok_message(name, max_run_seconds))
             state = wait_for_marker(ctx, options.run, name, max_run_seconds + WAIT_MARGIN_SECONDS, options.poll_seconds)
             if state != "done":
                 messages = {

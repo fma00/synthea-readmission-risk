@@ -110,6 +110,7 @@ def test_batch_record_and_usage_printed(env):
     record = json.loads((env["repo"] / "data/pilot/pilot_20k/batch_bigjoin-pilot-20k-202610131000.json").read_text())
     assert record["usage"]["dcu_hours"] == pytest.approx(2.0)
     assert record["provenance"]["head_commit"] == "a" * 40
+    assert record["never_ran"] is False
     assert "DCU-hours=2.000" in text(env) and "runtime=3.0.14" in text(env)
 
 
@@ -137,6 +138,97 @@ def test_failed_batch_exit_2_prints_cleanup(env):
     env["fake"].batch_states = ["RUNNING", "FAILED"]
     assert submit(env) == db.EXIT_FAILED
     assert "gcloud storage rm -r gs://synthea-readmission-risk-gold/v2/pilot_20k/" in text(env)
+
+
+# --- a batch that never ran (ops bundle, notes/eg-new-feature/ops-submitter-launcher-polish-2026-10-12.md) ---
+
+# Verbatim from the 5b pilot's refused batch bigjoin-pilot-20k-202610121318 (2026-10-12)
+PERMISSION_FAILURE_5B = (
+    "Permission validation failed for operation e5cc8693-6dc6-3f0c-b137-92d436f891e2: Service Account "
+    "'dataproc-runtime@synthea-readmission-risk.iam.gserviceaccount.com' is missing required permissions: "
+    "[dataprocrm.nodePools.update]."
+)
+
+
+def _history(*states: str) -> list[dict]:
+    return [{"state": s} for s in states]
+
+
+@pytest.mark.parametrize(
+    ("describe", "expected"),
+    [
+        ({"state": "FAILED", "stateHistory": _history("PENDING")}, True),
+        ({"state": "CANCELLED", "stateHistory": _history("PENDING")}, True),
+        ({"state": "FAILED", "stateHistory": _history("PENDING", "RUNNING")}, False),
+        ({"state": "SUCCEEDED", "stateHistory": _history("PENDING", "RUNNING")}, False),
+        ({"state": "SUCCEEDED", "stateHistory": _history("PENDING")}, False),  # a SUCCEEDED batch always ran
+        ({"state": "RUNNING", "stateHistory": _history("PENDING")}, False),  # not terminal
+        ({"state": "FAILED"}, False),  # no history: wait as before
+        ({"state": "FAILED", "stateHistory": []}, False),
+        ({"state": "FAILED", "stateHistory": "PENDING"}, False),
+        ({"state": "FAILED", "stateHistory": ["PENDING"]}, False),
+        ({"state": "FAILED", "stateHistory": [{}]}, False),
+        ({"state": "FAILED", "stateHistory": [{"state": None}]}, False),
+    ],
+)
+def test_never_ran(describe, expected):
+    assert db.never_ran(describe) is expected
+
+
+def test_permission_hint():
+    assert db.permission_hint(PERMISSION_FAILURE_5B) == db.PERMISSION_HINT
+    for message in ("simulated", "", None, 42, "permission validation failed"):
+        assert db.permission_hint(message) is None, message
+
+
+def test_fake_state_history_matches_real_shape():
+    fake = FakeGcloud(batch_states=["RUNNING", "SUCCEEDED"])
+    fake(["gcloud", "dataproc", "batches", "submit", "pyspark", "gs://x/main.py", "--batch=b1"])
+    describe = ["gcloud", "dataproc", "batches", "describe", "b1", "--region=us-central1"]
+    fake(describe)
+    second = json.loads(fake(describe).stdout)
+    assert second["state"] == "SUCCEEDED"
+    assert [h["state"] for h in second["stateHistory"]] == ["PENDING", "RUNNING"]
+
+
+def _record(env) -> dict:
+    return json.loads((env["repo"] / "data/pilot/pilot_20k/batch_bigjoin-pilot-20k-202610131000.json").read_text())
+
+
+def test_never_ran_batch_skips_usage_wait(env):
+    fake = env["fake"]
+    fake.batch_states, fake.batch_usage, fake.batch_state_message = ["FAILED"], None, PERMISSION_FAILURE_5B
+    slept: list[float] = []
+    env["ctx"].sleep = slept.append
+    assert submit(env) == db.EXIT_FAILED
+    assert len(fake.ran("gcloud", "dataproc", "batches", "describe")) == 1
+    assert slept == []
+    out = text(env)
+    assert "stateHistory never reached RUNNING: skipping the usage wait" in out
+    assert "DCU-hours=none (stateHistory never reached RUNNING" in out
+    assert "holds partial output" in out  # the cleanup line is always printed
+    assert db.PERMISSION_HINT in out
+    assert _record(env)["never_ran"] is True
+
+
+def test_usage_present_wins_over_never_ran(env):
+    env["fake"].batch_states = ["FAILED"]  # the fake's default usage is present
+    assert submit(env) == db.EXIT_FAILED
+    assert len(env["fake"].ran("gcloud", "dataproc", "batches", "describe")) == 1
+    out = text(env)
+    assert "stateHistory never reached RUNNING: skipping the usage wait" in out
+    assert "DCU-hours=2.000" in out and "DCU-hours=none" not in out
+    assert _record(env)["never_ran"] is True
+
+
+def test_failed_after_running_still_waits_for_usage(env):
+    env["fake"].batch_states, env["fake"].batch_usage = ["RUNNING", "FAILED"], None
+    assert submit(env) == db.EXIT_FAILED
+    assert len(env["fake"].ran("gcloud", "dataproc", "batches", "describe")) == 2 + db.USAGE_WAIT_SECONDS // 30
+    out = text(env)
+    assert "holds partial output" in out and db.PERMISSION_HINT not in out
+    assert "skipping the usage wait" not in out
+    assert _record(env)["never_ran"] is False
 
 
 def test_keyboard_interrupt_exit_130_prints_cancel(env):

@@ -637,5 +637,5 @@ numbers below were measured on the owner's laptop (macOS arm64, Python 3.14.7) o
   lock_main"`: PASSED `test_make_lock_main_venv_is_guarded`, `test_terraform_fmt_hook_skips_without_terraform`,
   `test_terraform_fmt_hook_flags_unformatted_file`; SKIPPED "lock-main OS guard: off-macOS only". Each of the three skip
   reasons is used by exactly one test (git grep).
-- **V9** CI: pending (the PR into `v2`).
+- **V9** CI on PR #12 (run 38302549542, head 570ac07, merged as 050cf50): all four jobs green. `pipeline-dataproc-runtime`: 318 passed (the environment check ran and asserted pyspark 4.0.2). `lint-and-test`: 1225 passed, 4 skipped; the `-rs` list shows "lock-main venv guard: macOS only …" and "terraform-fmt hook: needs terraform on PATH" (the runner has no Terraform) and does not show "lock-main OS guard: off-macOS only" (so it ran); the other two skips are the Dataproc-environment check and `tests/reporting/test_style.py:82` (light font face, not listed in CLAUDE.md before; added by the ops bundle).
 - **V10** docs: all "Documentation surfaces" rows and the CLAUDE.md lines applied; `tests/test_docs.py` passes in V6.

@@ -92,6 +92,7 @@ def test_done_marker_then_delete_then_proof(env):
     saved = env["repo"] / "data/pilot/pilot_20k"
     assert json.loads((saved / "generation_summary.json").read_text())["seed"] == 17
     assert "generation_wall_seconds=300" in text(env)
+    assert gv.positive_control_ok_message(gv.instance_name("pilot_20k", env["ctx"].now()), 7200) in text(env)
 
 
 def test_create_argv_uses_template_prereg_values_and_explicit_purpose(env):
@@ -237,6 +238,7 @@ def test_positive_control_mismatch_deletes_and_exits_2(env):
     env["fake"].instance_overrides = {"scheduling": {"provisioningModel": "STANDARD"}}
     assert launch(env) == gv.EXIT_FAILED
     assert "POSITIVE CONTROL FAILED" in text(env) and env["fake"].instances == {}
+    assert "POSITIVE CONTROL OK" not in text(env)
 
 
 def test_positive_control_missing_disk_label(env):

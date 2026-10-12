@@ -72,6 +72,14 @@ SPARK_PROPERTIES = {
 MAIN_SCRIPT = Path("scripts/run_big_join.py")
 TERMINAL_STATES = ("SUCCEEDED", "FAILED", "CANCELLED")
 USAGE_WAIT_SECONDS = 600
+NEVER_RAN_STATES = ("FAILED", "CANCELLED")  # a SUCCEEDED batch certainly ran
+PERMISSION_FAILURE_MARKER = "Permission validation failed"  # Dataproc's pre-check message prefix (5b, 2026-10-12)
+PERMISSION_HINT = (
+    "HINT: Dataproc's permission pre-check refused the batch before it ran (no cost). If an IAM role or binding for "
+    f"{RUNTIME_SA} changed in the last ~8 minutes (e.g. the dataprocRuntimeWorker custom role), it may not have propagated "
+    "yet: wait and resubmit. Otherwise grant the listed permissions in infra/iam.tf. See docs/setup.md, 'Lessons from the "
+    "first live run'."
+)
 
 
 @dataclass(frozen=True)
@@ -111,6 +119,25 @@ def parse_batch_usage(describe: dict) -> BatchUsage:
         dcu_hours=int(milli_dcu) / 3.6e6 if milli_dcu is not None else None,
         shuffle_gb_hours=int(shuffle) / 3600 if shuffle is not None else None,
     )
+
+
+def never_ran(describe: dict) -> bool:
+    """True when the batch ended FAILED or CANCELLED and Dataproc never moved it to RUNNING: it failed or was cancelled in
+    validation/PENDING, so no usage will ever be computed (5b: batch ...1318, stateHistory PENDING only, FAILED after 5 s).
+    False when the history is missing or malformed: then the usage wait runs as before (the conservative default)."""
+    if describe.get("state") not in NEVER_RAN_STATES:
+        return False
+    history = describe.get("stateHistory")
+    if not isinstance(history, list) or not history:
+        return False
+    if not all(isinstance(entry, dict) and isinstance(entry.get("state"), str) for entry in history):
+        return False
+    return not any(entry["state"] == "RUNNING" for entry in history)
+
+
+def permission_hint(state_message: object) -> str | None:
+    """PERMISSION_HINT when Dataproc's stateMessage reports a failed permission pre-check, else None."""
+    return PERMISSION_HINT if isinstance(state_message, str) and PERMISSION_FAILURE_MARKER in state_message else None
 
 
 def submit_argv(
@@ -234,8 +261,11 @@ def submit(options: SubmitOptions, ctx: LaunchContext) -> int:
             if describe.get("state") in TERMINAL_STATES:
                 break
             ctx.sleep(options.poll_seconds)
+        skipped_wait = never_ran(describe)
+        if skipped_wait:
+            ctx.echo(f"Batch {batch_id} ended {describe.get('state')}; stateHistory never reached RUNNING: skipping the usage wait")
         waited = 0.0
-        while not (describe.get("runtimeInfo") or {}).get("approximateUsage") and waited < USAGE_WAIT_SECONDS:
+        while not skipped_wait and not (describe.get("runtimeInfo") or {}).get("approximateUsage") and waited < USAGE_WAIT_SECONDS:
             ctx.sleep(30)
             waited += 30
             describe = run_json(ctx.run, describe_argv)
@@ -253,20 +283,30 @@ def submit(options: SubmitOptions, ctx: LaunchContext) -> int:
         "batch_id": batch_id,
         "argv": argv,
         "usage": usage.__dict__,
+        "never_ran": skipped_wait,
         "describe": describe,
         "provenance": {"head_commit": record.head_commit, "zip_sha256": zip_.sha256, "main_sha256": main.sha256,
                        "prereg_commit": record.prereg_commit},
     }  # fmt: skip
     (out / f"batch_{batch_id}.json").write_text(json.dumps(record_json, indent=2, default=str) + "\n")
-    dcu = "not yet populated (re-run gcloud dataproc batches describe later)" if usage.dcu_hours is None else f"{usage.dcu_hours:.3f}"
+    if usage.dcu_hours is not None:
+        dcu = f"{usage.dcu_hours:.3f}"
+    elif skipped_wait:
+        dcu = "none (stateHistory never reached RUNNING; if it did run, re-run gcloud dataproc batches describe later)"
+    else:
+        dcu = "not yet populated (re-run gcloud dataproc batches describe later)"
     ctx.echo(
         f"Batch {batch_id}: {usage.state} runtime={usage.runtime_version} wall={usage.wall_seconds}s DCU-hours={dcu} "
         f"shuffle GB-hours={usage.shuffle_gb_hours}\n  recorded in {out / f'batch_{batch_id}.json'}"
     )
     if usage.state != "SUCCEEDED":
+        ctx.echo(f"FAILED: {describe.get('stateMessage')}")
+        # always, also for a batch whose stateHistory never reached RUNNING: harmless on an empty prefix
         ctx.echo(
-            f"FAILED: {describe.get('stateMessage')}\n  if {gold_prefix(options.run)}/ holds partial output, the owner deletes it: "
-            f"gcloud storage rm -r {gold_prefix(options.run)}/"
+            f"  if {gold_prefix(options.run)}/ holds partial output, the owner deletes it: gcloud storage rm -r {gold_prefix(options.run)}/"
         )
+        hint = permission_hint(describe.get("stateMessage"))
+        if hint is not None:
+            ctx.echo(hint)
         return EXIT_FAILED
     return EXIT_OK
