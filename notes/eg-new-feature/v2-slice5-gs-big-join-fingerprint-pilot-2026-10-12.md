@@ -851,6 +851,10 @@ below); 130 interrupted (the batch keeps running and is bounded by its 2 h `ttl`
 - `storage.tf`: `artifacts` bucket (us-central1, uniform access, PAP enforced, `force_destroy = true`, label
   `purpose = artifacts`) and `dataproc_staging` bucket (same, 30-day delete lifecycle, `soft_delete_policy` 0, label
   `purpose = dataproc-staging`). The raw bucket's existing 90-day rule covers `v2/`.
+  **Amended in 5b (2026-10-12):** the submitter no longer passes `--staging-bucket`: runtime 3.0 rejects it at submit
+  ("3.0 runtime version does not support configuring Dataproc staging bucket via the staging_bucket field"; 3.0+
+  runtimes don't use Cloud Storage staging buckets). The bucket and `dataproc-runtime`'s two grants on it are unused
+  (follow-up: remove them).
 - `iam.tf` (additive `*_iam_member` only):
   - SA `synthea-generator`: on raw `roles/storage.objectCreator` + `roles/storage.objectViewer` (create-only plus read:
     `gcloud storage cp` reads object metadata, slice 3's finding) + `roles/storage.legacyBucketReader`
