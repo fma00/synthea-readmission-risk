@@ -319,6 +319,8 @@ gcloud dataproc batches list --region=us-central1 --filter="state=RUNNING OR sta
 
 All three must print nothing.
 
+**Lessons from the first live run (slice 5b, 2026-10-12; details in the slice-5 note's Results).** Runtime 3.0 rejects `--staging-bucket` (the submitter no longer passes it). Its pre-flight permission check requires `dataprocrm.nodePools.update`, which no predefined role grants; `dataproc-runtime` uses the custom role `dataprocRuntimeWorker` (`roles/dataproc.worker` minus `storage.*`, plus that permission), so after changing that role wait about 8 minutes before submitting, or the batch fails in validation (no cost). Policy Troubleshooter cannot check object-level or object-prefix-conditioned storage access: pass the bucket as the resource and the object as `--resource-name=projects/_/buckets/<b>/objects/<o> --resource-service=storage.googleapis.com --resource-type=storage.googleapis.com/Object`, and expect a prefix condition to evaluate `false` regardless; prove such grants with a live probe instead.
+
 ## Teardown checklist
 
 Order matters: `prevent_destroy` makes `terraform destroy` refuse while the CHF 20 budget, the state bucket or the bundle bucket is still in state, and the bundle bucket's IAM members must go before the bucket. Start with `export CLOUDSDK_CORE_PROJECT=synthea-readmission-risk`.
