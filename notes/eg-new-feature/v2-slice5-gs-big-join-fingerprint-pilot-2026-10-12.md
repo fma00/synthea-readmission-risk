@@ -21,6 +21,9 @@ billing report for slice 4's runs"; L0-L9 = this note's live checks; P1-P6 = pre
 
 ## 5b hand-over (read this first)
 
+**Status (2026-10-12): 5b ran; all live checks pass except L9 (billing, pending). Results: "Results" at the end. Three
+defects fixed in PRs #8-#10; A7's criterion corrected by owner decision.**
+
 5a is committed (`c9427b2`, branch `v2-slice5-gs-big-join`); nothing has been applied, uploaded, generated or run on GCP.
 5b is the live 20k pilot. Every step marked **[confirm]** costs money or changes GCP and needs the owner's explicit go-ahead
 at that moment. Start every shell with `export CLOUDSDK_CORE_PROJECT=synthea-readmission-risk`. Commands:
@@ -1232,7 +1235,9 @@ below); 130 interrupted (the batch keeps running and is bounded by its 2 h `ttl`
   values are computed by a short documented snippet (pandas, on the downloaded gold) whose output is pasted into
   Results. A7 (on the raw data downloaded at L7): the latest `START` and `STOP` in `encounters.csv` are
   `< reference_date + 1 day` 00:00Z and the latest `START` is `>= reference_date` 00:00Z (the simulation covered the
-  reference day and no more). If a failed check leads to a fix that changes an analysis value (label rules or codes,
+  reference day and no more). **Corrected in 5b (owner decision 2026-10-12, see Results > A7):** `-e` does not
+  guarantee this; A7 is now (i) latest START >= `reference_date`, (ii) every START >= `reference_date + 1 day` is a
+  posthumous "Death Certification", (iii) 0 modeling rows after the split with `label_horizon` >= `reference_date + 1 day`. If a failed check leads to a fix that changes an analysis value (label rules or codes,
   split, features), the fix is NOT made inside this slice: the slice stops, the change goes through a new decision
   (`/eg-prd`), and it is recorded as a `deviations` entry with reason prefix `pilot-sanity:` before `main_200k` exists;
   a label change also follows the `LABEL_DEFINITION` identity rule (`gold_metadata.py:28-32`, bump to `_v2`).
@@ -1285,6 +1290,15 @@ below); 130 interrupted (the batch keeps running and is bounded by its 2 h `ttl`
   byte-for-byte; `generation.py`'s comment names Synthea v4.0.0 while the jar reports `v3.4.0-18-ga07a65555`.
 - Still-open TODOs carried unchanged: V-post and L-post (after v2 merges into `main`), F4, the terraform-fmt pre-commit
   hook, the lockfile-drift CI check, the pandas 3 check.
+- **Added by 5b (2026-10-12):** (1) slice 6 measures corrected-A7 (iii) on `main_200k` before training (latent
+  post-reference STOP risk; see Results > A7); (2) the CI mirror pins pyspark 4.0.1 while Dataproc runtime 3.0 already
+  runs Spark 4.0.2 (fingerprints agree; decide whether to bump the mirror); (3) remove the unused `dataproc-staging`
+  bucket and `dataproc-runtime`'s two grants on it (a destroy; owner decision); (4) `pipeline-dataproc-runtime` hit a
+  `java.lang.OutOfMemoryError: Java heap space` once (PR #9, passed on rerun): raise the test SparkSession's driver memory
+  or split the session; (5) `ops/dataproc_batch.py` waits the full 10-minute usage window on a batch that failed before
+  running (skip the wait when `stateHistory` never reached RUNNING); (6) the launcher could print an explicit "positive
+  control OK"; (7) after any change to `dataprocRuntimeWorker`, wait ~8 minutes before submitting (IAM propagation);
+  (8) the 45 encounter-less QALY/DALY/QOLS observation rows that differ across machines (cause unknown; gold unaffected).
 
 ## Revision log
 
@@ -1379,4 +1393,159 @@ prereg sections are validated by the strict schema and kept as the parsed mappin
 
 ## Results
 
-(5b fills this in.)
+5b ran on 2026-10-12, laptop-driven, every live step confirmed by the owner. Interim notes were kept in the gitignored
+`data/pilot/pilot_20k/live-checks.md` and are transcribed here. **Verdict: all live checks pass** (A7 after an
+owner-approved criterion correction, below); three defects found on first live contact were fixed through PRs into `v2`
+(#8, #9, #10). **L9 (billing report) is pending** (due about 2026-10-13).
+
+### L0, L3: preconditions and pre-registration (M6)
+
+- `v2` at `3f72b0a` (PR #7), tree clean; CI on PR #4 green on all four jobs (run 38242320206, including
+  `pipeline-dataproc-runtime`'s FR12 agreement test on Java 21). F4: CHF 0.
+- `prereg.yaml`: added in `c9427b2` (committer date 2026-10-12T10:48:06Z, the only commit touching it), merged via PR #7
+  at **2026-10-12T11:23:13Z**; sha256 `042af605…5b95`. Before any generation, `gs://…-raw/v2/` and `gs://…-gold/v2/` held
+  no objects. Every artifact of the run carries `prereg_commit` `c9427b2` and this sha256 (VM metadata and labels,
+  `generation_summary.provenance`, the batch labels, the gold's `build_provenance`).
+
+### L1: Terraform
+
+- Plan: exactly **27 to add, 0 to change, 0 to destroy**; apply "27 added"; second plan "No changes". Image for the first VM:
+  `debian-13-trixie-v20261006`. The template describes as SPOT, DELETE, `maxRunDuration` 7200 s, no access config.
+
+### L2: IAM (one real defect, fixed in PR #8)
+
+- **Command-form correction:** Policy Troubleshooter rejects object resource names
+  (`//storage.googleapis.com/projects/_/buckets/<b>/objects/<o>`, also `%2F`-encoded: `INVALID_RESOURCE_NAME`). The
+  working form is the bucket as the resource plus `--resource-name=projects/_/buckets/<b>/objects/<o>
+  --resource-service=storage.googleapis.com --resource-type=storage.googleapis.com/Object`; answers are v3
+  (`CAN_ACCESS`/`CANNOT_ACCESS`).
+- **Defect:** first run 14 PASS / 1 FAIL: `dataproc-runtime` could delete `gold/full_run_2b/x`. Cause: project-level
+  `roles/dataproc.worker` contains 28 `storage.*` permissions (`objects.create/delete/update/…`) on every bucket (raw,
+  gold incl. `full_run_2b/`, bundles, tfstate), which made the gold `v2/` condition moot. **Fix (PR #8, merged
+  2026-10-12T12:18:40Z):** custom role `dataprocRuntimeWorker` = `dataproc.worker` minus `storage.*` (33 permissions, all
+  custom-role supported); `test_dataproc_runtime_has_no_project_level_storage_access` pins it. Plan 2 add / 1 destroy (the
+  member replaced), applied, re-plan clean.
+- **Troubleshooter limitation:** it evaluates `resource.name` as the bucket, so the object-prefix condition is `false` for
+  every context (also realistic `part-*.parquet` names); the allow side is unprovable with it. Owner chose the pre-agreed
+  live probe: temporary `serviceAccountTokenCreator` for the owner on `dataproc-runtime` only (12:38:32Z-12:40:33Z,
+  removed; the SA's policy afterwards has no bindings), impersonated JSON-API calls: create `gold/v2/_l2_probe` 200, delete
+  it 204, create `gold/full_run_2b/_l2_probe` **403**, create `bundles/_l2_probe` 403, list bundles 403 (delete of an
+  absent object returns 404 regardless of permission, so it is not evidence). Final L2: 18 checks (the 15 listed plus
+  3 extra NOT_GRANTED: delete on bundles, create on tfstate, delete on raw) pass, the `v2/` allow side live-proven.
+  **L2: PASS.**
+
+### L4: generation
+
+- `make generate-vm RUN=pilot_20k …` exit 0; VM `synthea-gen-pilot-20k-202610121245` (us-central1-a, n2-standard-32 spot).
+  Timeline: VM up 12:47:16Z, Synthea 12:47:25Z-12:50:57Z (**`duration_seconds` 205.3**, wall 212 s), upload finished
+  12:51:49Z, **VM total 367 s** (create to proven gone). All artifacts verified on the VM (sha256 OK).
+- 20,000 alive patients (`patients.csv` 23,003 incl. deceased), warnings none. Rows: encounters 1,384,198; observations
+  17,494,131; procedures 2,964,356; medications 1,089,958; conditions 814,269; careplans 76,485; organizations and
+  providers 1,190; payers 10. **Raw 4,560,628,575 B** (4.25 GiB).
+- **`peak_child_rss_bytes` 97,114,660,864 (90.4 GiB) at `-Xmx96g`**: see L7c, the JVM grows into the heap it is allowed.
+- Positive control passed (the launcher prints only on failure and proceeded to wait for `_DONE`); teardown proof empty
+  (launcher exit 0; independently: no labelled instance or disk).
+
+### L5: Big Join on Dataproc Serverless 3.0 (two defects fixed in PRs #9 and #10)
+
+- **Defect 1 (PR #9, merged 13:16:42Z):** runtime 3.0 rejects `--staging-bucket` at submit ("3.0 runtime version does not
+  support configuring Dataproc staging bucket via the staging_bucket field"; Google's runtime 3.0 page: "3.0+ runtimes don't
+  use Cloud Storage staging buckets"). No batch created. The argv test now requires the flag absent. The staging bucket
+  and its two grants are unused (follow-up).
+- **Defect 2 (PR #10, merged 15:18:04Z):** runtime 3.0's pre-flight permission validation failed the batch in 5 s (no
+  compute): `missing required permissions: [dataprocrm.nodePools.update]`. No predefined role grants it (scanned
+  `roles/dataproc.*`, `roles/dataprocrm.*`, including `dataproc.worker` and `dataproc.serverlessNode`), and it is absent
+  from the project's testable-permissions list, yet IAM accepted it in the custom role (added with `gcloud`, then codified;
+  plan "No changes"). A resubmit 3 minutes later failed identically (IAM propagation); after ~8 minutes it passed.
+- **Run:** batch `bigjoin-pilot-20k-202610121337`, SUCCEEDED, **wall 346.5 s**, **0.313 DCU-hours** (`milliDcuSeconds`
+  1,125,450), **22.8 shuffle GB-hours** (82,063 GB-s), runtime `3.0`, **`spark_version` 4.0.2** (Google's 3.0 page lists
+  3.0.14 = Spark 4.0.1 as latest; the CI mirror pins pyspark 4.0.1; L6 shows the fingerprint unaffected).
+- Gold layout: only `part-*.parquet` (one file, 1,969,183 B), `_SUCCESS`, `_gold_metadata.json` and the zero-byte
+  `v2/pilot_20k/` placeholder; no `_temporary/`. **L5: PASS.** Gold: 18,861 rows, 258 positives, 27,775 inpatient
+  stays, 7,010 planned, 1,352 continuation, 1,352 non-terminal; fingerprint `b952a3d17f386481c152cce85f4c21c40416bd26b4330c8eece273a47ce1c4d4`.
+
+### L5a A1-A6 and L6 (snippet: `v2-slice5b-pilot/acceptance.py`, output verbatim)
+
+```
+python 3.14.7
+pandas 2.3.3
+PASS L6 metadata_version: 2
+PASS L6 definition: spark-rowhash-v1
+PASS L6 fingerprint: python b952a3d17f386481c152cce85f4c21c40416bd26b4330c8eece273a47ce1c4d4 vs dataproc b952a3d17f386481c152cce85f4c21c40416bd26b4330c8eece273a47ce1c4d4 (spark 4.0.2)
+PASS A1 n_rows > 0: metadata 18861, frame 18861
+PASS A2 n_planned_stays > 0: 7010
+PASS A3 positive rate in [0.5%, 5%]: 258/18861 = 1.3679% (frame sum 258)
+PASS A4 no all-null column: all-null []; 24 columns
+PASS A4 payer_ownership null fraction <= 10%: 0.0000%
+  comparison: v1 data/gold/full_run_2b payer_ownership null fraction 0.0000%; v1 positive rate 1.6265% (151/9284)
+  per-column null fraction (pilot): {'admission_reason_code': 0.2692, 'admission_reason_description': 0.2692, 'marital_status': 0.0888}
+PASS A5 generation_summary equal: gold metadata vs raw generation_summary.json
+PASS A5 prereg_sha256: sha256(git show c9427b2e28ce:prereg.yaml) vs 042af605b89cec95e72f0b81069153e8007efbd5fea76fae63fc8c3f19fe5b95
+A6 pilot_test_window_positives = 62; projected main_200k test positives = 620 (trigger_below 500, min_test_positives 400)
+A6 population rule outcome: no change (projection >= 500)
+ALL PASS
+```
+
+- A6 split summary: train 12,627 rows (167 positive, 1.32%), test 3,245 (62 positive, 1.91%); dropped: censor buffer 1,
+  label-window purge 77, label-horizon purge 0, patient overlap 2,911. **Population rule: no change** (`main_200k` stays
+  200,000; no deviation entry).
+- Context, not criteria: null fractions match v1 (`admission_reason_code` 26.92% vs 26.81%, `marital_status` 8.88% vs
+  9.22%); index stays before 2016: 51.6% (v1 52.3%).
+
+### A7 (failed as specified; criterion corrected by owner decision)
+
+- As written, A7 failed: latest encounter START 2026-10-14T02:01:56Z and latest STOP 2026-10-26T04:06:53Z, both after
+  `reference_date + 1 day`. Cause: `-e` stops new activity at the end date but (a) Synthea writes a posthumous "Death
+  Certification" encounter (1 row; the patient died 2026-10-07; no DEATHDATE on or after 2026-10-13) and (b) 68 encounters
+  begin before the end and finish after it (snf 27, inpatient 18, hospice 16, outpatient 4, wellness 2, ambulatory 1;
+  longest an inpatient stay 2026-09-25 to 2026-10-26). The revision-5 measurement (300 patients) was too small to contain
+  either. v1, without `-e`: 218 encounters began after its reference day.
+- Impact (measured): gold `index_stop` past the end 0; gold `label_horizon` past the end 1 (a positive whose own window
+  runs to 2026-10-24, the known slice-2 positive asymmetry, removed by the split's censor buffer); after the
+  pre-registered split, rows with `label_horizon` past the end: train 0, test 0 (test max 2026-10-12T15:33Z).
+- **Owner decision (2026-10-12):** A7 is replaced by what `-e` guarantees: (i) latest START ≥ `reference_date` 00:00Z
+  (178 encounters start on the reference day: pass); (ii) every START ≥ `reference_date + 1 day` is a posthumous "Death
+  Certification" (1: pass); (iii) after the pre-registered split, 0 modeling rows have `label_horizon` ≥ `reference_date +
+  1 day` (pass). A7 is a verification criterion of this note, not a `prereg.yaml` value; no deviation entry.
+- **Latent risk, carried to slice 6:** a test row whose readmitting stay starts inside the window but ends after the
+  reference day passes the censor buffer with `label_horizon` past the end, and its continuation/terminal logic then uses a
+  STOP no real system could observe yet. 0 such rows at 20k; slice 6 measures (iii) on `main_200k` before any training,
+  and a non-zero count goes to `/eg-prd` and a `pilot-sanity:` deviation before analysis.
+
+### L7: local equality, A7 data, cross-machine regeneration
+
+- Raw download (owner-confirmed): 4.56 GB, 13:48:47Z-13:54:54Z (11.9 MiB/s), to the gitignored `data/raw/v2_pilot_20k/`.
+- **L7a PASS:** the local Big Join (`local[*]`, PySpark 4.1.3, OpenJDK 17.0.18, 28.7 s) on that raw data gives fingerprint
+  `b952a3d1…c4d4`, 18,861 rows, 258 positives: identical to Dataproc's. Metadata differs only in `spark_version` (4.1.3 vs
+  4.0.2) and `build_provenance` (`{}` locally by design).
+- **L7c (recorded):** laptop regeneration (macOS arm64, 18 cores, 64 GiB; Temurin 21.0.12.1+1 aarch64-mac, sha256
+  `3623232f…9998` matching Adoptium's published checksum; same script `d0a251bb…`, jar `ed43c20a…` and argv except
+  `-Xmx48g`): 232.9 s, **peak RSS 18.4 GiB**. Comparison (`v2-slice5b-pilot/compare_raw.py`, order-independent): 9 of 10
+  tables equal (payers without its 4 aggregate columns); `observations.csv` differs by 45 rows (12 VM-only, 33
+  laptop-only), all encounter-less DALY/QALY/QOLS summary observations of 15 patients (VM-only dated 2016-01-01,
+  laptop-only 2026-10-12); cause not determined. **The gold built from the laptop's raw data has the identical
+  fingerprint** (the Big Join does not read those rows). Reproducibility claim narrowed accordingly: raw content is
+  reproducible across machines except Synthea's QALY summary rows; the gold is reproducible exactly.
+
+### L8, L9
+
+- **L8 PASS** (15:19:36Z): no labelled instance or disk, no instance or disk at all in the project, no RUNNING/PENDING
+  batch. Batch history: two FAILED in permission validation (no compute), one SUCCEEDED.
+- **L9: PENDING** (owner, Cloud console > Billing > Reports, project `synthea-readmission-risk`, from 2026-10-12).
+  Projection to compare against (list-price assumptions, not quotes): VM 367 s spot n2-standard-32 at ≈ $0.30/h ≈ $0.03;
+  Dataproc 0.313 DCU-h at ≈ $0.06/DCU-h ≈ $0.02 plus shuffle storage ≈ cents; raw egress 4.56 GB at ≈ $0.12/GB ≈ $0.55;
+  GCS storage cents. **Total ≈ $0.6-1**, inside D6's $1-3 (+$0.5) projection.
+
+### Derived for slice 6 (projections; assumptions stated)
+
+- **Generation at 200k:** assuming Synthea time scales linearly with population (20k: 205 s on 32 vCPU), ≈ 2,050 s
+  (34 min); raw ≈ 45.6 GB, upload ≈ 9 min at the pilot's rate (52 s for 4.56 GB); VM total ≈ 45-50 min.
+  **Proposed `max_run_duration`: keep 7200 s** (≈ 2.5× the projection), via a `main` entry in `var.generation_templates`.
+- **Heap:** at 20k the working set fits in ≤ 18.4 GiB (laptop, `-Xmx48g`); the VM's 90.4 GiB is heap growth up to
+  `-Xmx96g`, not need. Assumption: Synthea's memory is per-thread simulation state plus buffers and does not grow with
+  population (not measured beyond 20k). **Proposal: keep n2-standard-32 and `-Xmx96g`**; no highmem machine.
+- **Big Join at 200k:** linear scaling gives ≈ 3.1 DCU-hours and ≈ 230 shuffle GB-hours; wall ≈ 30-60 min (the 346 s
+  included Serverless start-up; dynamic allocation may not have reached 7 executors at 20k). Inside the 2 h ttl and the
+  32-vCPU quota.
+- **M7:** projected `main_200k` test positives 620 ≥ 400 (and ≥ the 500 trigger). **Budget:** one-off ≈ $1-3 for the
+  200k generation and Big Join (no raw egress needed), well inside ≤ $50.
