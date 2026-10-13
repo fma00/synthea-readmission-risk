@@ -261,7 +261,7 @@ miss is costlier (the VM boots and fails), and there is no failure hint to fall 
 
 ## Out-of-scope follow-ups
 
-- A launcher-side hint when the VM fails in a way that looks like missing permissions.
+- A launcher-side hint when the VM fails in a way that looks like missing permissions. **Done 2026-10-13** (`notes/eg-new-feature/ops-launcher-permission-hint-2026-10-13.md`)
 
 ## Revision log
 

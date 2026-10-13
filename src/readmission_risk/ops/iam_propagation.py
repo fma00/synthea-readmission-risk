@@ -100,7 +100,7 @@ def iam_changes_argv(since: datetime) -> list[str]:
 def wait_for_iam_propagation(ctx: IamWaitContext) -> float:
     """Before a CLI starts paid work (a Dataproc batch, a generation VM): if a non-Google principal changed IAM within IAM_PROPAGATION_SECONDS, wait until that much time has
     passed since the latest change, then look again for newer changes. Refused after MAX_IAM_WAITS waits that each found newer
-    changes. An unreadable audit log is a warning, not a refusal (the Big Join submitter's failure-path hint still applies; the launcher has none). Returns the total seconds
+    changes. An unreadable audit log is a warning, not a refusal (the Big Join submitter prints a hint when Dataproc's permission pre-check failed; the generation launcher when the VM's failure output names a denied permission). Returns the total seconds
     slept (0.0 when it did not wait)."""
     cutoff = ctx.now() - timedelta(seconds=IAM_PROPAGATION_SECONDS)
     waits = 0

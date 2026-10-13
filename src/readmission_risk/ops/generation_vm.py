@@ -17,7 +17,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .gcloud import (
@@ -63,6 +63,16 @@ STARTUP_SCRIPT = Path("infra/generation/startup.sh")
 GEN_SCRIPT = Path("scripts/generate_synthea_data.py")
 LABEL_VALUE_RE = re.compile(r"[a-z0-9_-]{0,63}")
 INSTANCE_NAME_RE = re.compile(r"[a-z]([-a-z0-9]{0,61}[a-z0-9])?")
+SCRIPT_RUNNER_LOG = f"projects/{PROJECT}/logs/google_metadata_script_runner"
+STARTUP_LINE_PREFIX = 'Metadata key("startup-script"), command("/bin/bash"): '
+# Both forms name the denied permission (measured 2026-10-13 for gcloud storage ls as a service account without access;
+# assumed for gcloud storage cp on the VM: notes/eg-new-feature/ops-launcher-permission-hint-2026-10-13.md)
+_DENIED_PERMISSION = re.compile(r"Permission '([A-Za-z0-9_.]+)' denied")
+_LACKS_PERMISSION = re.compile(r"does not have ([a-z][A-Za-z0-9_]*\.[A-Za-z0-9_.]+) access")
+DIAGNOSIS_TAIL_LINES = 15
+# The log query starts this long before the laptop's creation time: laptop and Cloud Logging clocks can differ, and the
+# instance name (unique per launch minute; P3 refuses leftover VMs) already confines the query to this VM.
+VM_LOG_MARGIN = timedelta(minutes=10)
 
 EXIT_OK, EXIT_REFUSED, EXIT_FAILED, EXIT_PROOF_FAILED, EXIT_INTERRUPTED = 0, 1, 2, 3, 130
 
@@ -370,6 +380,88 @@ def _teardown_and_prove(ctx: LaunchContext, name: str, zone: str) -> bool:
     return proven
 
 
+def missing_permissions(text: str) -> list[str]:
+    """Sorted, de-duplicated IAM permission names that `text` reports as denied (both message forms)."""
+    return sorted(set(_DENIED_PERMISSION.findall(text)) | set(_LACKS_PERMISSION.findall(text)))
+
+
+def permission_hint(permissions: list[str], run: str) -> str:
+    return (
+        f"HINT: the VM ({GENERATOR_SA}) was denied {', '.join(permissions)}. If an IAM role or binding changed in the last "
+        "minutes, it may not have propagated yet (the launcher only waits for changes the audit log already shows): wait, "
+        f"delete the partial raw prefix (gcloud storage rm -r {raw_prefix(run)}/) and rerun. Otherwise grant the permission "
+        "to the synthea-generator service account in infra/iam.tf. See docs/setup.md, 'Lessons from the first live run'."
+    )
+
+
+def vm_log_argv(name: str, since: datetime) -> list[str]:
+    """The VM's startup-script lines that mention a denial or a startup.sh failure, oldest first."""
+    query = (
+        f'logName="{SCRIPT_RUNNER_LOG}" AND labels.instance_name="{name}" '
+        f'AND timestamp>="{since.astimezone(UTC):%Y-%m-%dT%H:%M:%SZ}" '
+        'AND (jsonPayload.message:"denied" OR jsonPayload.message:"does not have" OR jsonPayload.message:"startup.sh FAILED")'
+    )
+    return ["gcloud", "logging", "read", query, "--limit=200", "--order=asc"]
+
+
+def vm_log_lines(entries: object) -> list[str]:
+    """The startup-script lines in `gcloud logging read --format=json` output, in the given order: each entry's
+    jsonPayload.message, with STARTUP_LINE_PREFIX removed when present (kept as is otherwise: the VM image, hence the guest
+    agent's prefix format, is not pinned, and the query already narrowed the entries to this VM and to matching terms);
+    entries that are not dicts, have no dict jsonPayload or no str message are skipped. Non-list input -> []."""
+    if not isinstance(entries, list):
+        return []
+    lines = []
+    for entry in entries:
+        payload = entry.get("jsonPayload") if isinstance(entry, dict) else None
+        message = payload.get("message") if isinstance(payload, dict) else None
+        if isinstance(message, str):
+            lines.append(message.removeprefix(STARTUP_LINE_PREFIX))
+    return lines
+
+
+def diagnose_failure(ctx: LaunchContext, run: str, name: str, state: str, since: datetime) -> None:
+    """After a failed run: show the evidence and, when it names denied permissions, the hint. Never raises for its own reads:
+    GcloudError/ValueError become one 'could not read ...' line, and a KeyboardInterrupt during the diagnosis is caught and
+    reported, so the run's exit code stays 2 (failed) and teardown proceeds."""
+    if state == "failed":
+        source = "_FAILED"
+    elif state in ("vanished", "timeout"):
+        source = "the VM's startup-script log in Cloud Logging (lines mentioning a denial or a startup.sh failure)"
+    else:
+        return
+    try:
+        if state == "failed":
+            text = run_ok(ctx.run, ["gcloud", "storage", "cat", f"{raw_prefix(run)}/_FAILED"])
+        else:
+            text = "\n".join(vm_log_lines(run_json(ctx.run, vm_log_argv(name, since - VM_LOG_MARGIN))))
+        lines = [line for line in text.splitlines() if line.strip()]
+        if not lines:
+            if state == "failed":
+                ctx.echo("(no lines in _FAILED)")
+            else:
+                ctx.echo(
+                    "(no denial or startup.sh failure lines in the VM's startup-script log; the VM may have been preempted, "
+                    "or still been working at the timeout)"
+                )
+            return
+        if state == "failed":
+            ctx.echo("Last lines of _FAILED:")
+            shown = lines[-DIAGNOSIS_TAIL_LINES:]
+        else:
+            ctx.echo(f"First lines of {source}:")
+            shown = lines[:DIAGNOSIS_TAIL_LINES]
+        for line in shown:
+            ctx.echo("  " + line)
+        permissions = missing_permissions(text)
+        if permissions:
+            ctx.echo(permission_hint(permissions, run))
+    except (GcloudError, ValueError) as exc:
+        ctx.echo(f"(could not read {source} for a diagnosis: {str(exc).splitlines()[-1]})")
+    except KeyboardInterrupt:
+        ctx.echo("(diagnosis interrupted)")
+
+
 def expected_raw_layout(run: str, prereg: Prereg) -> set[str]:
     prefix = raw_prefix(run)
     return {
@@ -436,6 +528,7 @@ def launch(options: LaunchOptions, ctx: LaunchContext) -> int:
     started = ctx.monotonic()
     outcome = EXIT_OK
     try:
+        created_at = ctx.now()
         run_ok(ctx.run, create_argv(name, options, template, labels, metadata, ctx.repo_root))
         problems = positive_control(ctx, name, options.zone, max_run_seconds)
         if problems:
@@ -452,6 +545,7 @@ def launch(options: LaunchOptions, ctx: LaunchContext) -> int:
                 }
                 ctx.echo(f"FAILED: {messages[state]}")
                 outcome = EXIT_FAILED
+                diagnose_failure(ctx, options.run, name, state, created_at)
             else:
                 layout = check_raw_layout(ctx.run, options.run, prereg)
                 if layout:

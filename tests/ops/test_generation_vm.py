@@ -476,3 +476,166 @@ def test_missing_template_is_refused_before_any_iam_wait(env):
     assert _indexes(env, "gcloud", "logging", "read") == []
     assert "need exactly one instance template" in text(env)
 
+
+
+# --- diagnosis of a failed VM (notes/eg-new-feature/ops-launcher-permission-hint-2026-10-13.md) ---
+
+# ADAPTED from the message measured on 2026-10-13 (gcloud storage ls as scorer@, no access), not itself measured
+DENIED_TEXT = (
+    "ERROR: (gcloud.storage.cp) [synthea-generator@synthea-readmission-risk.iam.gserviceaccount.com] does not have permission "
+    "to access b instance [synthea-readmission-risk-raw] (or it may not exist): "
+    "synthea-generator@synthea-readmission-risk.iam.gserviceaccount.com does not have storage.objects.create access to the "
+    "Google Cloud Storage bucket. Permission 'storage.objects.create' denied on resource "
+    "'//storage.googleapis.com/projects/_/buckets/synthea-readmission-risk-raw' (or it may not exist)."
+)
+CP_DENIED_TEXT = (  # a plausible (assumed) gcloud storage cp form
+    "ERROR: (gcloud.storage.cp) HTTPError 403: synthea-generator@synthea-readmission-risk.iam.gserviceaccount.com does not "
+    "have storage.objects.get access to the Google Cloud Storage object. Permission 'storage.objects.get' denied on resource "
+    "(or it may not exist)."
+)
+LOG_SOURCE = "the VM's startup-script log in Cloud Logging"
+
+
+def vm_log_entry(line: str) -> dict:
+    return {
+        "timestamp": "2026-10-13T09:10:00.123456789Z",
+        "labels": {"instance_name": "x"},
+        "jsonPayload": {"message": gv.STARTUP_LINE_PREFIX + line},
+    }
+
+
+def _write_failed(content: str):
+    return lambda fake, name: fake.objects.__setitem__(f"{PREFIX}/_FAILED", content.encode())
+
+
+def test_missing_permissions():
+    assert gv.missing_permissions(DENIED_TEXT) == ["storage.objects.create"]
+    assert gv.missing_permissions(CP_DENIED_TEXT) == ["storage.objects.get"]
+    both = "Permission 'storage.objects.get' denied; x does not have storage.buckets.get access"
+    assert gv.missing_permissions(both) == ["storage.buckets.get", "storage.objects.get"]
+    assert gv.missing_permissions("generation failed: OOM") == []
+    assert gv.missing_permissions("does not have permission to access b instance") == []
+
+
+def test_vm_log_argv():
+    assert gv.vm_log_argv("synthea-gen-pilot-20k-202610130905", datetime(2026, 10, 13, 9, 5, tzinfo=UTC)) == [
+        "gcloud", "logging", "read",
+        'logName="projects/synthea-readmission-risk/logs/google_metadata_script_runner" AND '
+        'labels.instance_name="synthea-gen-pilot-20k-202610130905" AND timestamp>="2026-10-13T09:05:00Z" AND '
+        '(jsonPayload.message:"denied" OR jsonPayload.message:"does not have" OR jsonPayload.message:"startup.sh FAILED")',
+        "--limit=200", "--order=asc",
+    ]  # fmt: skip
+
+
+def test_vm_log_lines():
+    entries = [
+        vm_log_entry("a"),
+        {"jsonPayload": {"message": "No shutdown scripts to run"}},
+        "x",
+        {"jsonPayload": "y"},
+        {"jsonPayload": {"message": 7}},
+        vm_log_entry("b"),
+    ]
+    assert gv.vm_log_lines(entries) == ["a", "No shutdown scripts to run", "b"]
+    assert gv.vm_log_lines(None) == []
+
+
+def test_failed_marker_shows_tail_and_permission_hint(env):
+    env["fake"].on_create = _write_failed("line 1\n" + DENIED_TEXT + "\n")
+    assert launch(env) == gv.EXIT_FAILED
+    out = text(env)
+    assert "Last lines of _FAILED:" in out and "  " + DENIED_TEXT in out
+    assert gv.permission_hint(["storage.objects.create"], RUN) in out
+    assert f"gcloud storage rm -r {PREFIX}/" in out  # the rerun would otherwise be refused (raw prefix not empty)
+    assert env["fake"].instances == {}
+
+
+def test_failed_marker_without_permission_error_has_no_hint(env):
+    env["fake"].on_create = _write_failed("java.lang.OutOfMemoryError\n")
+    assert launch(env) == gv.EXIT_FAILED
+    out = text(env)
+    assert "Last lines of _FAILED:" in out and "  java.lang.OutOfMemoryError" in out
+    assert "HINT: the VM" not in out
+
+
+def test_failed_marker_shows_only_the_last_lines(env):
+    env["fake"].on_create = _write_failed("\n".join(f"l{i:02d}" for i in range(30)) + "\n")
+    assert launch(env) == gv.EXIT_FAILED
+    out = text(env)
+    assert "  l29" in out and "  l15" in out and "  l14" not in out
+
+
+def test_timeout_reads_vm_log_and_hints(env):
+    fake = env["fake"]
+    fake.on_create = None
+    fake.logging_responses = [[], [vm_log_entry("startup.sh FAILED at …: line 97: gcloud storage cp …"), vm_log_entry(DENIED_TEXT)]]
+    ctx = env["ctx"]
+    ctx.now = lambda: datetime(2026, 10, 13, 9, 5, tzinfo=UTC) + timedelta(seconds=ctx.monotonic())  # moving clock
+    assert launch(env) == gv.EXIT_FAILED
+    out = text(env)
+    assert "timed out" in out and f"First lines of {LOG_SOURCE}" in out
+    assert gv.permission_hint(["storage.objects.create"], RUN) in out
+    reads = [c for c in fake.calls if c[1:3] == ["logging", "read"]]
+    assert 'labels.instance_name="synthea-gen-pilot-20k-202610130905"' in reads[1][3]
+    assert 'timestamp>="2026-10-13T08:55:00Z"' in reads[1][3]  # creation time minus VM_LOG_MARGIN, not diagnosis time
+
+
+def test_log_diagnosis_prints_first_matches(env):
+    env["fake"].on_create = None
+    env["fake"].logging_responses = [[], [vm_log_entry(f"m{i:02d}") for i in range(20)]]
+    assert launch(env) == gv.EXIT_FAILED
+    out = text(env)
+    assert "  m00" in out and "  m14" in out and "  m15" not in out
+
+
+def test_vanished_reads_vm_log(env):
+    fake = env["fake"]
+    fake.on_create = None
+    fake.logging_responses = [[], [vm_log_entry(DENIED_TEXT)]]
+
+    def preempt(seconds):
+        fake.instances.clear()
+        fake.disks.clear()
+
+    env["ctx"].sleep = preempt
+    assert launch(env) == gv.EXIT_FAILED
+    out = text(env)
+    assert "preempted or max-run-duration" in out and gv.permission_hint(["storage.objects.create"], RUN) in out
+
+
+def test_unprefixed_log_line_still_hints(env):
+    env["fake"].on_create = None
+    env["fake"].logging_responses = [[], [{"jsonPayload": {"message": "startup-script: " + DENIED_TEXT}}]]
+    assert launch(env) == gv.EXIT_FAILED
+    out = text(env)
+    assert gv.permission_hint(["storage.objects.create"], RUN) in out and "(no denial" not in out
+
+
+def test_unreadable_diagnosis_is_reported_not_raised(env):
+    env["fake"].on_create = _write_failed("x")
+    env["fake"].fail_on = ("gcloud storage cat",)
+    assert launch(env) == gv.EXIT_FAILED
+    assert "(could not read _FAILED for a diagnosis: ERROR: simulated failure)" in text(env)
+    assert env["fake"].instances == {}
+
+
+def test_empty_vm_log_says_so(env):
+    env["fake"].on_create = None
+    env["fake"].logging_responses = [[], []]
+    assert launch(env) == gv.EXIT_FAILED
+    assert "(no denial or startup.sh failure lines in the VM's startup-script log" in text(env)
+
+
+def test_ctrl_c_during_diagnosis_keeps_exit_2(env):
+    fake = env["fake"]
+    fake.on_create = _write_failed("x")
+
+    def runner(argv):
+        if argv[:3] == ["gcloud", "storage", "cat"]:
+            raise KeyboardInterrupt
+        return fake(argv)
+
+    env["ctx"].run = runner
+    assert launch(env) == gv.EXIT_FAILED
+    assert "(diagnosis interrupted)" in text(env)
+    assert fake.instances == {}
