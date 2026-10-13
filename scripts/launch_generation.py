@@ -1,9 +1,10 @@
 #!/usr/bin/env python
 """Generates one pre-registered Synthea population on a spot VM (readmission_risk.ops.generation_vm.launch): refuses unless
-prereg.yaml is committed and pushed and matches the code, uploads the pinned artifacts, creates the VM from the Terraform template,
+prereg.yaml is committed and pushed and matches the code, uploads the pinned artifacts, waits for IAM
+propagation if a role or binding changed in the last 8 minutes (audit log), creates the VM from the Terraform template,
 waits for _DONE, deletes the VM and proves nothing labelled remains. COSTS MONEY: confirm with the owner first.
 `make generate-vm RUN=pilot_20k JDK_TARBALL=<path>`. Exit codes: 0 done, 1 refused, 2 failed, 3 teardown proof failed,
-130 interrupted. See notes/eg-new-feature/v2-slice5-gs-big-join-fingerprint-pilot-2026-10-12.md."""
+130 interrupted (during the IAM wait: no VM created; see ops/generation_vm.py). See notes/eg-new-feature/v2-slice5-gs-big-join-fingerprint-pilot-2026-10-12.md."""
 
 from __future__ import annotations
 

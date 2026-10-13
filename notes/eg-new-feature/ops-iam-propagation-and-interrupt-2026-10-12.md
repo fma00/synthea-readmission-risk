@@ -417,7 +417,7 @@ verbatim in Results and stop for the owner's decision before merging. Recorded i
 
 ## Out-of-scope follow-ups
 
-- The same pre-submit check for the generation launcher (`synthea-generator` SA), if ever needed.
+- The same pre-submit check for the generation launcher (`synthea-generator` SA), if ever needed. **Done 2026-10-13** (`notes/eg-new-feature/ops-launcher-iam-wait-2026-10-13.md`)
 - Automatic resubmission after a permission failure (owner declined, 2026-10-12).
 
 ## Revision log

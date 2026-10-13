@@ -4,10 +4,11 @@ every way a run can end, and the teardown proof. Design: notes/eg-new-feature/v2
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 import shutil
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -15,7 +16,7 @@ import pytest
 from readmission_risk.ops import generation_vm as gv
 from readmission_risk.ops.prereg import PreregError, PreregRecord, load_prereg
 from tests.ops.conftest import REPO
-from tests.ops.fake_gcloud import FakeGcloud
+from tests.ops.fake_gcloud import FakeGcloud, audit_entry
 
 PREREG = load_prereg(REPO / "prereg.yaml")
 RECORD = PreregRecord(head_commit="a" * 40, prereg_commit="b" * 40, prereg_committed_at="2026-10-12T10:00:00+02:00", sha256="c" * 64)
@@ -158,6 +159,7 @@ def test_dry_run_makes_no_runner_call(env):
     env["options"].dry_run = True
     assert launch(env) == gv.EXIT_OK
     assert env["fake"].calls == []
+    assert "would check the Admin Activity audit log" in text(env)
     assert "would run: gcloud compute instances create" in text(env)
 
 
@@ -330,3 +332,147 @@ def test_gcloud_failure_during_teardown_is_proof_failure_exit_3(env):
     env["fake"].fail_on = ("gcloud compute instances delete",)
     assert launch(env) == gv.EXIT_PROOF_FAILED
     assert "TEARDOWN COULD NOT BE PROVEN" in text(env) and "gcloud compute instances delete" in text(env)
+
+
+# --- IAM propagation wait before the VM is created (notes/eg-new-feature/ops-launcher-iam-wait-2026-10-13.md) ---
+
+NOW_G = datetime(2026, 10, 13, 9, 5, tzinfo=UTC)  # the env fixture's clock
+RECENT = audit_entry("google.iam.admin.v1.UpdateRole", NOW_G - timedelta(seconds=60))
+
+
+def _indexes(env, *prefix: str) -> list[int]:
+    return [i for i, call in enumerate(env["fake"].calls) if call[: len(prefix)] == list(prefix)]
+
+
+def _recording_sleep(env) -> list[float]:
+    slept: list[float] = []
+    original = env["ctx"].sleep
+
+    def sleep(seconds):
+        slept.append(seconds)
+        original(seconds)
+
+    env["ctx"].sleep = sleep
+    return slept
+
+
+def _interrupt(*args, **kwargs):
+    raise KeyboardInterrupt
+
+
+def test_launch_waits_for_recent_iam_change_before_create(env):
+    env["fake"].logging_responses = [[RECENT], [RECENT]]
+    slept = _recording_sleep(env)
+    assert launch(env) == gv.EXIT_OK, text(env)
+    assert slept[0] == 420.0
+    assert _indexes(env, "gcloud", "logging", "read")[-1] < _indexes(env, "gcloud", "compute", "instances", "create")[0]
+    assert "Waiting 420 s for IAM propagation" in text(env)
+
+
+def test_ctrl_c_during_iam_wait_creates_no_vm(env):
+    env["fake"].logging_responses = [[RECENT]]
+    env["ctx"].sleep = _interrupt
+    assert launch(env) == gv.EXIT_INTERRUPTED
+    assert _indexes(env, "gcloud", "compute", "instances", "create") == []
+    assert _indexes(env, "gcloud", "compute", "instances", "delete") == []
+    assert "INTERRUPTED during the IAM propagation wait or its re-check: no VM was created" in text(env)
+
+
+def test_iam_keeps_changing_refuses_launch(env):
+    env["fake"].logging_responses = [
+        [audit_entry("google.iam.admin.v1.UpdateRole", NOW_G - timedelta(seconds=60 - i))] for i in range(4)
+    ]
+    assert launch(env) == gv.EXIT_REFUSED
+    assert _indexes(env, "gcloud", "compute", "instances", "create") == []
+    assert "IAM kept changing across 3 propagation waits" in text(env)
+
+
+def test_commit_change_during_iam_wait_refuses_launch(env, monkeypatch):
+    env["fake"].logging_responses = [[RECENT], [RECENT]]
+    records = [RECORD, dataclasses.replace(RECORD, head_commit="e" * 40)]
+    monkeypatch.setattr(gv, "check_prereg_committed", lambda repo_root, **kw: records.pop(0) if len(records) > 1 else records[0])
+    assert launch(env) == gv.EXIT_REFUSED
+    assert _indexes(env, "gcloud", "compute", "instances", "create") == []
+    assert "HEAD or the prereg commit changed during the IAM wait" in text(env)
+
+
+def _count_preflight_remote(monkeypatch) -> dict:
+    calls = {"n": 0}
+    real = gv.preflight_remote
+
+    def counting(options, ctx):
+        calls["n"] += 1
+        real(options, ctx)
+
+    monkeypatch.setattr(gv, "preflight_remote", counting)
+    return calls
+
+
+def test_preflight_runs_once_without_a_wait(env, monkeypatch):
+    calls = _count_preflight_remote(monkeypatch)
+    assert launch(env) == gv.EXIT_OK
+    assert calls["n"] == 1
+
+
+def test_preflights_rerun_after_a_wait(env, monkeypatch):
+    calls = _count_preflight_remote(monkeypatch)
+    env["fake"].logging_responses = [[RECENT], [RECENT]]
+    assert launch(env) == gv.EXIT_OK
+    assert calls["n"] == 2
+
+
+def test_recheck_refuses_when_a_batch_started_during_the_wait(env):
+    fake = env["fake"]
+    fake.logging_responses = [[RECENT], [RECENT]]
+    original = env["ctx"].sleep
+
+    def batch_starts(seconds):
+        fake.batches["other"] = {"state": "RUNNING", "states": []}
+        original(seconds)
+
+    env["ctx"].sleep = batch_starts
+    assert launch(env) == gv.EXIT_REFUSED
+    assert "a Dataproc batch is active" in text(env)
+    assert _indexes(env, "gcloud", "compute", "instances", "create") == []
+
+
+def test_ctrl_c_during_recheck_creates_no_vm(env, monkeypatch):
+    env["fake"].logging_responses = [[RECENT], [RECENT]]
+    monkeypatch.setattr(gv, "recheck_after_wait", _interrupt)
+    assert launch(env) == gv.EXIT_INTERRUPTED
+    assert _indexes(env, "gcloud", "compute", "instances", "create") == []
+    assert "INTERRUPTED during the IAM propagation wait or its re-check: no VM was created" in text(env)
+
+
+def test_audit_log_unreadable_warns_and_launches(env):
+    env["fake"].fail_on = ("gcloud logging read",)
+    assert launch(env) == gv.EXIT_OK
+    assert len(_indexes(env, "gcloud", "compute", "instances", "create")) == 1
+    assert "WARNING: could not read the Admin Activity audit log" in text(env)
+
+
+def test_template_is_resolved_after_the_wait(env):
+    fake = env["fake"]
+    fake.logging_responses = [[RECENT], [RECENT]]
+    original = env["ctx"].sleep
+
+    def terraform_replaced_the_template(seconds):
+        fake.templates = {"synthea-generator-pilot-3600s": 3600}
+        original(seconds)
+
+    env["ctx"].sleep = terraform_replaced_the_template
+    assert launch(env) == gv.EXIT_OK, text(env)
+    (create,) = [c for c in fake.calls if c[:4] == ["gcloud", "compute", "instances", "create"]]
+    assert any(arg.endswith("/instanceTemplates/synthea-generator-pilot-3600s") for arg in create)
+    assert gv.positive_control_ok_message(gv.instance_name("pilot_20k", env["ctx"].now()), 3600) in text(env)
+
+
+def test_missing_template_is_refused_before_any_iam_wait(env):
+    env["fake"].templates = {}
+    env["fake"].logging_responses = [[RECENT], [RECENT]]
+    slept = _recording_sleep(env)
+    assert launch(env) == gv.EXIT_REFUSED
+    assert slept == []
+    assert _indexes(env, "gcloud", "logging", "read") == []
+    assert "need exactly one instance template" in text(env)
+

@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import subprocess
 from dataclasses import dataclass, field
+from datetime import datetime
 
 GENERATOR_SA = "synthea-generator@synthea-readmission-risk.iam.gserviceaccount.com"
 
@@ -162,3 +163,14 @@ def _flag(args: list[str], name: str) -> str:
         if a.startswith(name + "="):
             return a.split("=", 1)[1]
     raise AssertionError(f"{name} not in {args}")
+
+
+AUDIT_ROLE = "projects/synthea-readmission-risk/roles/dataprocRuntimeWorker"
+
+
+def audit_entry(method: str, at: datetime, principal: str = "operator@example.com", resource: str = AUDIT_ROLE) -> dict:
+    """An Admin Activity entry shaped like gcloud's JSON, with a nanosecond-style timestamp on purpose."""
+    return {
+        "timestamp": at.strftime("%Y-%m-%dT%H:%M:%S.%f") + "123Z",
+        "protoPayload": {"methodName": method, "authenticationInfo": {"principalEmail": principal}, "resourceName": resource},
+    }

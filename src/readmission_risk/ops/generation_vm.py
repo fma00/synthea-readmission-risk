@@ -2,8 +2,10 @@
 template's max_run_duration and termination action DELETE, deleted by this launcher when the run ends, and then PROVEN gone.
 Every GCP call is a gcloud argv run through ops.gcloud (a fake Runner in tests). See
 notes/eg-new-feature/v2-slice5-gs-big-join-fingerprint-pilot-2026-10-12.md, Interfaces section 11 ("Generation launcher").
-Exit codes: 0 done; 1 refused (preflight); 2 generation failed; 3 teardown proof failed; 130 interrupted. Precedence when several
-apply: 3 > 2 > 130 > 0.
+Before creating the VM it waits for IAM propagation when the Admin Activity audit log shows a recent IAM change
+(ops/iam_propagation.py). Exit codes: 0 done; 1 refused (preflight, or IAM still changing after 3 propagation waits); 2
+generation failed; 3 teardown proof failed; 130 interrupted (during the IAM propagation wait or its re-check: no VM was created;
+after creation: the VM is torn down and proven gone). Precedence when several apply: 3 > 2 > 130 > 0.
 """
 
 from __future__ import annotations
@@ -27,6 +29,11 @@ from .gcloud import (
     object_exists,
     run_json,
     run_ok,
+)
+from .iam_propagation import (
+    IAM_PROPAGATION_SECONDS,
+    IamStillChanging,
+    wait_for_iam_propagation,
 )
 from .prereg import (
     Prereg,
@@ -212,6 +219,19 @@ def preflight_remote(options: LaunchOptions, ctx: LaunchContext) -> None:
     check_quota(ctx.run, regional=("CPUS", "N2_CPUS"), vcpus=MACHINE_VCPUS)
 
 
+def recheck_after_wait(options: LaunchOptions, ctx: LaunchContext, record: PreregRecord) -> None:
+    """The IAM wait can last ~24 min: re-run both preflights (P1/P1b/P2/P5 locally; P3/P4/P6 remotely) and refuse if HEAD or
+    the prereg commit moved, because the uploaded artifacts and the VM metadata were built before the wait."""
+    _, rechecked = preflight_local(options, ctx)
+    preflight_remote(options, ctx)
+    if (rechecked.head_commit, rechecked.prereg_commit) != (record.head_commit, record.prereg_commit):
+        raise Refused(
+            f"HEAD or the prereg commit changed during the IAM wait (was {record.head_commit[:12]}/"
+            f"{record.prereg_commit[:12]}, now {rechecked.head_commit[:12]}/{rechecked.prereg_commit[:12]}); "
+            "the artifacts and VM metadata were built from the old commit: rerun to build from the new one"
+        )
+
+
 def instance_name(run: str, now: datetime) -> str:
     name = f"synthea-gen-{run_dashed(run)}-{now.strftime('%Y%m%d%H%M')}"
     if not INSTANCE_NAME_RE.fullmatch(name):
@@ -389,12 +409,27 @@ def launch(options: LaunchOptions, ctx: LaunchContext) -> int:
             for a in artifacts.values():
                 ctx.echo(f"would upload: gcloud storage cp {a.path} {a.uri} --if-generation-match=0")
             ctx.echo("would run: " + " ".join(create_argv(name, options, "<from template>", labels, metadata, ctx.repo_root)))
+            ctx.echo(
+                f"would check the Admin Activity audit log for IAM changes in the last {IAM_PROPAGATION_SECONDS // 60} "
+                "minutes, then create the VM"
+            )
             return EXIT_OK
         preflight_remote(options, ctx)
         for a in artifacts.values():
             upload_artifact(ctx.run, a)
+        resolve_template(ctx.run, options.run)  # fail fast: refuse a missing/ambiguous template before any IAM wait
+        try:
+            if wait_for_iam_propagation(ctx) > 0:
+                recheck_after_wait(options, ctx, record)
+        except KeyboardInterrupt:
+            ctx.echo(
+                "INTERRUPTED during the IAM propagation wait or its re-check: no VM was created (the uploaded artifacts "
+                "are reused on the next run)"
+            )
+            return EXIT_INTERRUPTED
+        # after the wait: a terraform apply (the usual cause of an IAM change) can also replace the instance template
         template, max_run_seconds = resolve_template(ctx.run, options.run)
-    except (Refused, GcloudError) as exc:
+    except (Refused, GcloudError, IamStillChanging) as exc:
         ctx.echo(f"REFUSED: {exc}")
         return EXIT_REFUSED
 
