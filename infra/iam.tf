@@ -1,6 +1,8 @@
 # Service accounts: gha-smoke and bundle-writer (v2 slice 3), scorer (v2 slice 4). Later slices add one per job (monitor,
 # Big Join submitter, Dataproc runtime, trainer), each bound to its own workflow file like gha-smoke below. Only additive *_iam_member resources:
-# *_iam_policy or *_iam_binding would replace bindings this config does not own.
+# *_iam_policy or *_iam_binding would replace bindings this config does not own. One deliberate exception:
+# google_project_iam_member_remove.default_compute_no_editor removes Google's project roles/editor grant from the default
+# compute service account (applied 2026-10-14).
 
 resource "google_service_account" "gha_smoke" {
   account_id   = "gha-smoke"
@@ -144,9 +146,28 @@ resource "google_service_account_iam_member" "operator_impersonates_scorer" {
 }
 
 # ---------------------------------------------------------------- v2 slice 5: generation VM and Dataproc runtime
-# Neither workload uses the default compute service account (which holds project roles/editor; removing that grant is an
-# owner decision, not made here). legacyBucketReader gives storage.buckets.get + objects.list, which object-level roles and
-# object-name conditions cannot grant and which gcloud and the Hadoop GCS connector may call.
+# Neither workload uses the default compute service account. Its project roles/editor (granted by Google when the Compute
+# Engine API is enabled) is removed below (owner decision 2026-10-13, notes/eg-new-feature/infra-cleanup-editor-and-staging-2026-10-13.md).
+# legacyBucketReader gives storage.buckets.get + objects.list, which object-level roles and object-name conditions cannot
+# grant and which gcloud and the Hadoop GCS connector may call.
+
+# No depends_on on purpose: a data source with depends_on is read at apply time whenever the dependency has pending
+# changes (any future API added to apis.tf), which would make the email unknown and show this removal as a replace. The
+# Compute API is enabled on this project, and bootstrap.sh applies the APIs first (-target) on a fresh project.
+# Deleting or disabling the default compute SA requires removing this data source and the resource below first.
+data "google_compute_default_service_account" "default" {
+  project = var.project_id
+}
+
+# The one non-additive IAM resource in this config (see the header): removes the binding if present and on every later
+# apply if it reappears; destroying this resource does NOT re-add it.
+resource "google_project_iam_member_remove" "default_compute_no_editor" {
+  project = var.project_id
+  role    = "roles/editor"
+  member  = "serviceAccount:${data.google_compute_default_service_account.default.email}"
+
+  depends_on = [google_project_service.enabled]
+}
 
 resource "google_service_account" "synthea_generator" {
   account_id   = "synthea-generator"
@@ -299,22 +320,6 @@ resource "google_storage_bucket_iam_member" "dataproc_reads_artifacts" {
 
 resource "google_storage_bucket_iam_member" "dataproc_lists_artifacts" {
   bucket = google_storage_bucket.artifacts.name
-  role   = "roles/storage.legacyBucketReader"
-  member = "serviceAccount:${google_service_account.dataproc_runtime.email}"
-
-  depends_on = [google_project_service.enabled]
-}
-
-resource "google_storage_bucket_iam_member" "dataproc_uses_staging" {
-  bucket = google_storage_bucket.dataproc_staging.name
-  role   = "roles/storage.objectAdmin"
-  member = "serviceAccount:${google_service_account.dataproc_runtime.email}"
-
-  depends_on = [google_project_service.enabled]
-}
-
-resource "google_storage_bucket_iam_member" "dataproc_lists_staging" {
-  bucket = google_storage_bucket.dataproc_staging.name
   role   = "roles/storage.legacyBucketReader"
   member = "serviceAccount:${google_service_account.dataproc_runtime.email}"
 

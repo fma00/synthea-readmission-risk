@@ -318,7 +318,7 @@ def test_proof_failure_wins_over_interrupt(env):
 
 def test_constants_match_terraform():
     tf = "\n".join(p.read_text() for p in (REPO / "infra").glob("*.tf"))
-    for value in (gv.RAW_BUCKET, gv.GOLD_BUCKET, gv.ARTIFACTS_BUCKET, gv.STAGING_BUCKET, gv.TEMPLATE_PREFIX, gv.SUBNET_NAME,
+    for value in (gv.RAW_BUCKET, gv.GOLD_BUCKET, gv.ARTIFACTS_BUCKET, gv.TEMPLATE_PREFIX, gv.SUBNET_NAME,
                   "synthea-generator", "dataproc-runtime", "synthea-generation", gv.MACHINE_TYPE, gv.REGION):  # fmt: skip
         assert value in tf, value
 

@@ -50,7 +50,6 @@ DEFAULT_ZONE = "us-central1-a"
 RAW_BUCKET = "synthea-readmission-risk-raw"
 GOLD_BUCKET = "synthea-readmission-risk-gold"
 ARTIFACTS_BUCKET = "synthea-readmission-risk-artifacts"
-STAGING_BUCKET = "synthea-readmission-risk-dataproc-staging"
 TEMPLATE_PREFIX = "synthea-generator-"
 TEMPLATE_CLASS_FOR_RUN = {"pilot_20k": "pilot", "main_200k": "main"}
 GENERATOR_SA = f"synthea-generator@{PROJECT}.iam.gserviceaccount.com"

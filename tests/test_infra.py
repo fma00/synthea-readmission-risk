@@ -7,7 +7,8 @@ notes/eg-new-feature/v2-slice3-terraform-wif-2026-10-11.md, Verification):
   dispatch/schedule events, and every claim it uses is mapped;
 - gha-smoke is bound to smoke.yml's workflow_ref only, can only list the bundle bucket, and smoke.yml uses exactly the
   provider, account and bucket that infra/ defines;
-- bundle-writer can only create objects; IAM is additive only; no service-account key exists anywhere;
+- bundle-writer can only create objects; IAM is additive only, except one pinned removal of the default compute
+  SA's roles/editor; no service-account key exists anywhere;
 - bucket settings, lifecycle and prevent_destroy are as designed;
 - id-token: write appears only at job level in dispatch/schedule workflows, and CI never plans or applies;
 - the Terraform CLI, provider and lock-file versions agree;
@@ -189,7 +190,11 @@ def test_bundle_writer_is_create_only():
 def test_iam_is_additive_only():
     types = {t for t, _, _ in _resources(_all_tf())}
     assert [t for t in types if t.endswith(("_iam_policy", "_iam_binding"))] == []
-    assert len(_iam_members()) == 28  # 12 (slices 3-4) + 16 (slice 5: synthea-generator 6, dataproc-runtime 10)
+    # 12 (slices 3-4) + 14 (slice 5: synthea-generator 6, dataproc-runtime 8; the 2 staging grants removed 2026-10-14)
+    assert len(_iam_members()) == 26
+    assert [(t, n) for t, n, _ in _resources(_all_tf()) if t.endswith("_iam_member_remove")] == [
+        ("google_project_iam_member_remove", "default_compute_no_editor")
+    ]
 
 
 def test_no_service_account_keys_in_infra_or_workflows():
@@ -203,7 +208,7 @@ def test_no_service_account_keys_in_infra_or_workflows():
 
 def test_buckets_enforce_uniform_access_and_public_access_prevention():
     buckets = [(n, _collapse(body)) for t, n, body in _resources(_all_tf()) if t == "google_storage_bucket"]
-    assert sorted(n for n, _ in buckets) == ["artifacts", "bundles", "dataproc_staging", "gold", "raw", "tfstate"]
+    assert sorted(n for n, _ in buckets) == ["artifacts", "bundles", "gold", "raw", "tfstate"]
     for name, body in buckets:
         assert "uniform_bucket_level_access = true" in body, name
         assert 'public_access_prevention = "enforced"' in body, name
@@ -453,7 +458,7 @@ def test_gold_object_admin_is_conditioned_on_v2_prefix():
         and m["_name"] != "dataproc_writes_gold_v2"
     ]  # fmt: skip
     assert unconditioned_admin == []
-    assert len(_members_of("dataproc_runtime")) == 10
+    assert len(_members_of("dataproc_runtime")) == 8
 
 
 # roles/dataproc.worker minus its storage.* permissions (read with `gcloud iam roles describe roles/dataproc.worker`,
@@ -491,6 +496,18 @@ def test_dataproc_runtime_has_no_project_level_storage_access():
     assert granted == DATAPROC_RUNTIME_PERMISSIONS
     assert not [p for p in granted if p.startswith("storage.")]
     assert '"roles/dataproc.worker"' not in _all_tf()
+
+
+def test_default_compute_sa_editor_is_removed():
+    remove = _collapse(_resource("google_project_iam_member_remove", "default_compute_no_editor"))
+    assert 'role = "roles/editor"' in remove
+    assert 'member = "serviceAccount:${data.google_compute_default_service_account.default.email}"' in remove
+    assert 'data "google_compute_default_service_account" "default"' in _all_tf()
+
+
+def test_no_staging_bucket_left():
+    assert "dataproc_staging" not in _all_tf()
+    assert "dataproc-staging" not in _all_tf()
 
 
 def test_no_resource_uses_default_compute_sa():
