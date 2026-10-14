@@ -4,10 +4,11 @@ every way a run can end, and the teardown proof. Design: notes/eg-new-feature/v2
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 import shutil
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -15,7 +16,7 @@ import pytest
 from readmission_risk.ops import generation_vm as gv
 from readmission_risk.ops.prereg import PreregError, PreregRecord, load_prereg
 from tests.ops.conftest import REPO
-from tests.ops.fake_gcloud import FakeGcloud
+from tests.ops.fake_gcloud import FakeGcloud, audit_entry
 
 PREREG = load_prereg(REPO / "prereg.yaml")
 RECORD = PreregRecord(head_commit="a" * 40, prereg_commit="b" * 40, prereg_committed_at="2026-10-12T10:00:00+02:00", sha256="c" * 64)
@@ -92,6 +93,7 @@ def test_done_marker_then_delete_then_proof(env):
     saved = env["repo"] / "data/pilot/pilot_20k"
     assert json.loads((saved / "generation_summary.json").read_text())["seed"] == 17
     assert "generation_wall_seconds=300" in text(env)
+    assert gv.positive_control_ok_message(gv.instance_name("pilot_20k", env["ctx"].now()), 7200) in text(env)
 
 
 def test_create_argv_uses_template_prereg_values_and_explicit_purpose(env):
@@ -157,6 +159,7 @@ def test_dry_run_makes_no_runner_call(env):
     env["options"].dry_run = True
     assert launch(env) == gv.EXIT_OK
     assert env["fake"].calls == []
+    assert "would check the Admin Activity audit log" in text(env)
     assert "would run: gcloud compute instances create" in text(env)
 
 
@@ -237,6 +240,7 @@ def test_positive_control_mismatch_deletes_and_exits_2(env):
     env["fake"].instance_overrides = {"scheduling": {"provisioningModel": "STANDARD"}}
     assert launch(env) == gv.EXIT_FAILED
     assert "POSITIVE CONTROL FAILED" in text(env) and env["fake"].instances == {}
+    assert "POSITIVE CONTROL OK" not in text(env)
 
 
 def test_positive_control_missing_disk_label(env):
@@ -328,3 +332,310 @@ def test_gcloud_failure_during_teardown_is_proof_failure_exit_3(env):
     env["fake"].fail_on = ("gcloud compute instances delete",)
     assert launch(env) == gv.EXIT_PROOF_FAILED
     assert "TEARDOWN COULD NOT BE PROVEN" in text(env) and "gcloud compute instances delete" in text(env)
+
+
+# --- IAM propagation wait before the VM is created (notes/eg-new-feature/ops-launcher-iam-wait-2026-10-13.md) ---
+
+NOW_G = datetime(2026, 10, 13, 9, 5, tzinfo=UTC)  # the env fixture's clock
+RECENT = audit_entry("google.iam.admin.v1.UpdateRole", NOW_G - timedelta(seconds=60))
+
+
+def _indexes(env, *prefix: str) -> list[int]:
+    return [i for i, call in enumerate(env["fake"].calls) if call[: len(prefix)] == list(prefix)]
+
+
+def _recording_sleep(env) -> list[float]:
+    slept: list[float] = []
+    original = env["ctx"].sleep
+
+    def sleep(seconds):
+        slept.append(seconds)
+        original(seconds)
+
+    env["ctx"].sleep = sleep
+    return slept
+
+
+def _interrupt(*args, **kwargs):
+    raise KeyboardInterrupt
+
+
+def test_launch_waits_for_recent_iam_change_before_create(env):
+    env["fake"].logging_responses = [[RECENT], [RECENT]]
+    slept = _recording_sleep(env)
+    assert launch(env) == gv.EXIT_OK, text(env)
+    assert slept[0] == 420.0
+    assert _indexes(env, "gcloud", "logging", "read")[-1] < _indexes(env, "gcloud", "compute", "instances", "create")[0]
+    assert "Waiting 420 s for IAM propagation" in text(env)
+
+
+def test_ctrl_c_during_iam_wait_creates_no_vm(env):
+    env["fake"].logging_responses = [[RECENT]]
+    env["ctx"].sleep = _interrupt
+    assert launch(env) == gv.EXIT_INTERRUPTED
+    assert _indexes(env, "gcloud", "compute", "instances", "create") == []
+    assert _indexes(env, "gcloud", "compute", "instances", "delete") == []
+    assert "INTERRUPTED during the IAM propagation wait or its re-check: no VM was created" in text(env)
+
+
+def test_iam_keeps_changing_refuses_launch(env):
+    env["fake"].logging_responses = [
+        [audit_entry("google.iam.admin.v1.UpdateRole", NOW_G - timedelta(seconds=60 - i))] for i in range(4)
+    ]
+    assert launch(env) == gv.EXIT_REFUSED
+    assert _indexes(env, "gcloud", "compute", "instances", "create") == []
+    assert "IAM kept changing across 3 propagation waits" in text(env)
+
+
+def test_commit_change_during_iam_wait_refuses_launch(env, monkeypatch):
+    env["fake"].logging_responses = [[RECENT], [RECENT]]
+    records = [RECORD, dataclasses.replace(RECORD, head_commit="e" * 40)]
+    monkeypatch.setattr(gv, "check_prereg_committed", lambda repo_root, **kw: records.pop(0) if len(records) > 1 else records[0])
+    assert launch(env) == gv.EXIT_REFUSED
+    assert _indexes(env, "gcloud", "compute", "instances", "create") == []
+    assert "HEAD or the prereg commit changed during the IAM wait" in text(env)
+
+
+def _count_preflight_remote(monkeypatch) -> dict:
+    calls = {"n": 0}
+    real = gv.preflight_remote
+
+    def counting(options, ctx):
+        calls["n"] += 1
+        real(options, ctx)
+
+    monkeypatch.setattr(gv, "preflight_remote", counting)
+    return calls
+
+
+def test_preflight_runs_once_without_a_wait(env, monkeypatch):
+    calls = _count_preflight_remote(monkeypatch)
+    assert launch(env) == gv.EXIT_OK
+    assert calls["n"] == 1
+
+
+def test_preflights_rerun_after_a_wait(env, monkeypatch):
+    calls = _count_preflight_remote(monkeypatch)
+    env["fake"].logging_responses = [[RECENT], [RECENT]]
+    assert launch(env) == gv.EXIT_OK
+    assert calls["n"] == 2
+
+
+def test_recheck_refuses_when_a_batch_started_during_the_wait(env):
+    fake = env["fake"]
+    fake.logging_responses = [[RECENT], [RECENT]]
+    original = env["ctx"].sleep
+
+    def batch_starts(seconds):
+        fake.batches["other"] = {"state": "RUNNING", "states": []}
+        original(seconds)
+
+    env["ctx"].sleep = batch_starts
+    assert launch(env) == gv.EXIT_REFUSED
+    assert "a Dataproc batch is active" in text(env)
+    assert _indexes(env, "gcloud", "compute", "instances", "create") == []
+
+
+def test_ctrl_c_during_recheck_creates_no_vm(env, monkeypatch):
+    env["fake"].logging_responses = [[RECENT], [RECENT]]
+    monkeypatch.setattr(gv, "recheck_after_wait", _interrupt)
+    assert launch(env) == gv.EXIT_INTERRUPTED
+    assert _indexes(env, "gcloud", "compute", "instances", "create") == []
+    assert "INTERRUPTED during the IAM propagation wait or its re-check: no VM was created" in text(env)
+
+
+def test_audit_log_unreadable_warns_and_launches(env):
+    env["fake"].fail_on = ("gcloud logging read",)
+    assert launch(env) == gv.EXIT_OK
+    assert len(_indexes(env, "gcloud", "compute", "instances", "create")) == 1
+    assert "WARNING: could not read the Admin Activity audit log" in text(env)
+
+
+def test_template_is_resolved_after_the_wait(env):
+    fake = env["fake"]
+    fake.logging_responses = [[RECENT], [RECENT]]
+    original = env["ctx"].sleep
+
+    def terraform_replaced_the_template(seconds):
+        fake.templates = {"synthea-generator-pilot-3600s": 3600}
+        original(seconds)
+
+    env["ctx"].sleep = terraform_replaced_the_template
+    assert launch(env) == gv.EXIT_OK, text(env)
+    (create,) = [c for c in fake.calls if c[:4] == ["gcloud", "compute", "instances", "create"]]
+    assert any(arg.endswith("/instanceTemplates/synthea-generator-pilot-3600s") for arg in create)
+    assert gv.positive_control_ok_message(gv.instance_name("pilot_20k", env["ctx"].now()), 3600) in text(env)
+
+
+def test_missing_template_is_refused_before_any_iam_wait(env):
+    env["fake"].templates = {}
+    env["fake"].logging_responses = [[RECENT], [RECENT]]
+    slept = _recording_sleep(env)
+    assert launch(env) == gv.EXIT_REFUSED
+    assert slept == []
+    assert _indexes(env, "gcloud", "logging", "read") == []
+    assert "need exactly one instance template" in text(env)
+
+
+
+# --- diagnosis of a failed VM (notes/eg-new-feature/ops-launcher-permission-hint-2026-10-13.md) ---
+
+# ADAPTED from the message measured on 2026-10-13 (gcloud storage ls as scorer@, no access), not itself measured
+DENIED_TEXT = (
+    "ERROR: (gcloud.storage.cp) [synthea-generator@synthea-readmission-risk.iam.gserviceaccount.com] does not have permission "
+    "to access b instance [synthea-readmission-risk-raw] (or it may not exist): "
+    "synthea-generator@synthea-readmission-risk.iam.gserviceaccount.com does not have storage.objects.create access to the "
+    "Google Cloud Storage bucket. Permission 'storage.objects.create' denied on resource "
+    "'//storage.googleapis.com/projects/_/buckets/synthea-readmission-risk-raw' (or it may not exist)."
+)
+CP_DENIED_TEXT = (  # a plausible (assumed) gcloud storage cp form
+    "ERROR: (gcloud.storage.cp) HTTPError 403: synthea-generator@synthea-readmission-risk.iam.gserviceaccount.com does not "
+    "have storage.objects.get access to the Google Cloud Storage object. Permission 'storage.objects.get' denied on resource "
+    "(or it may not exist)."
+)
+LOG_SOURCE = "the VM's startup-script log in Cloud Logging"
+
+
+def vm_log_entry(line: str) -> dict:
+    return {
+        "timestamp": "2026-10-13T09:10:00.123456789Z",
+        "labels": {"instance_name": "x"},
+        "jsonPayload": {"message": gv.STARTUP_LINE_PREFIX + line},
+    }
+
+
+def _write_failed(content: str):
+    return lambda fake, name: fake.objects.__setitem__(f"{PREFIX}/_FAILED", content.encode())
+
+
+def test_missing_permissions():
+    assert gv.missing_permissions(DENIED_TEXT) == ["storage.objects.create"]
+    assert gv.missing_permissions(CP_DENIED_TEXT) == ["storage.objects.get"]
+    both = "Permission 'storage.objects.get' denied; x does not have storage.buckets.get access"
+    assert gv.missing_permissions(both) == ["storage.buckets.get", "storage.objects.get"]
+    assert gv.missing_permissions("generation failed: OOM") == []
+    assert gv.missing_permissions("does not have permission to access b instance") == []
+
+
+def test_vm_log_argv():
+    assert gv.vm_log_argv("synthea-gen-pilot-20k-202610130905", datetime(2026, 10, 13, 9, 5, tzinfo=UTC)) == [
+        "gcloud", "logging", "read",
+        'logName="projects/synthea-readmission-risk/logs/google_metadata_script_runner" AND '
+        'labels.instance_name="synthea-gen-pilot-20k-202610130905" AND timestamp>="2026-10-13T09:05:00Z" AND '
+        '(jsonPayload.message:"denied" OR jsonPayload.message:"does not have" OR jsonPayload.message:"startup.sh FAILED")',
+        "--limit=200", "--order=asc",
+    ]  # fmt: skip
+
+
+def test_vm_log_lines():
+    entries = [
+        vm_log_entry("a"),
+        {"jsonPayload": {"message": "No shutdown scripts to run"}},
+        "x",
+        {"jsonPayload": "y"},
+        {"jsonPayload": {"message": 7}},
+        vm_log_entry("b"),
+    ]
+    assert gv.vm_log_lines(entries) == ["a", "No shutdown scripts to run", "b"]
+    assert gv.vm_log_lines(None) == []
+
+
+def test_failed_marker_shows_tail_and_permission_hint(env):
+    env["fake"].on_create = _write_failed("line 1\n" + DENIED_TEXT + "\n")
+    assert launch(env) == gv.EXIT_FAILED
+    out = text(env)
+    assert "Last lines of _FAILED:" in out and "  " + DENIED_TEXT in out
+    assert gv.permission_hint(["storage.objects.create"], RUN) in out
+    assert f"gcloud storage rm -r {PREFIX}/" in out  # the rerun would otherwise be refused (raw prefix not empty)
+    assert env["fake"].instances == {}
+
+
+def test_failed_marker_without_permission_error_has_no_hint(env):
+    env["fake"].on_create = _write_failed("java.lang.OutOfMemoryError\n")
+    assert launch(env) == gv.EXIT_FAILED
+    out = text(env)
+    assert "Last lines of _FAILED:" in out and "  java.lang.OutOfMemoryError" in out
+    assert "HINT: the VM" not in out
+
+
+def test_failed_marker_shows_only_the_last_lines(env):
+    env["fake"].on_create = _write_failed("\n".join(f"l{i:02d}" for i in range(30)) + "\n")
+    assert launch(env) == gv.EXIT_FAILED
+    out = text(env)
+    assert "  l29" in out and "  l15" in out and "  l14" not in out
+
+
+def test_timeout_reads_vm_log_and_hints(env):
+    fake = env["fake"]
+    fake.on_create = None
+    fake.logging_responses = [[], [vm_log_entry("startup.sh FAILED at …: line 97: gcloud storage cp …"), vm_log_entry(DENIED_TEXT)]]
+    ctx = env["ctx"]
+    ctx.now = lambda: datetime(2026, 10, 13, 9, 5, tzinfo=UTC) + timedelta(seconds=ctx.monotonic())  # moving clock
+    assert launch(env) == gv.EXIT_FAILED
+    out = text(env)
+    assert "timed out" in out and f"First lines of {LOG_SOURCE}" in out
+    assert gv.permission_hint(["storage.objects.create"], RUN) in out
+    reads = [c for c in fake.calls if c[1:3] == ["logging", "read"]]
+    assert 'labels.instance_name="synthea-gen-pilot-20k-202610130905"' in reads[1][3]
+    assert 'timestamp>="2026-10-13T08:55:00Z"' in reads[1][3]  # creation time minus VM_LOG_MARGIN, not diagnosis time
+
+
+def test_log_diagnosis_prints_first_matches(env):
+    env["fake"].on_create = None
+    env["fake"].logging_responses = [[], [vm_log_entry(f"m{i:02d}") for i in range(20)]]
+    assert launch(env) == gv.EXIT_FAILED
+    out = text(env)
+    assert "  m00" in out and "  m14" in out and "  m15" not in out
+
+
+def test_vanished_reads_vm_log(env):
+    fake = env["fake"]
+    fake.on_create = None
+    fake.logging_responses = [[], [vm_log_entry(DENIED_TEXT)]]
+
+    def preempt(seconds):
+        fake.instances.clear()
+        fake.disks.clear()
+
+    env["ctx"].sleep = preempt
+    assert launch(env) == gv.EXIT_FAILED
+    out = text(env)
+    assert "preempted or max-run-duration" in out and gv.permission_hint(["storage.objects.create"], RUN) in out
+
+
+def test_unprefixed_log_line_still_hints(env):
+    env["fake"].on_create = None
+    env["fake"].logging_responses = [[], [{"jsonPayload": {"message": "startup-script: " + DENIED_TEXT}}]]
+    assert launch(env) == gv.EXIT_FAILED
+    out = text(env)
+    assert gv.permission_hint(["storage.objects.create"], RUN) in out and "(no denial" not in out
+
+
+def test_unreadable_diagnosis_is_reported_not_raised(env):
+    env["fake"].on_create = _write_failed("x")
+    env["fake"].fail_on = ("gcloud storage cat",)
+    assert launch(env) == gv.EXIT_FAILED
+    assert "(could not read _FAILED for a diagnosis: ERROR: simulated failure)" in text(env)
+    assert env["fake"].instances == {}
+
+
+def test_empty_vm_log_says_so(env):
+    env["fake"].on_create = None
+    env["fake"].logging_responses = [[], []]
+    assert launch(env) == gv.EXIT_FAILED
+    assert "(no denial or startup.sh failure lines in the VM's startup-script log" in text(env)
+
+
+def test_ctrl_c_during_diagnosis_keeps_exit_2(env):
+    fake = env["fake"]
+    fake.on_create = _write_failed("x")
+
+    def runner(argv):
+        if argv[:3] == ["gcloud", "storage", "cat"]:
+            raise KeyboardInterrupt
+        return fake(argv)
+
+    env["ctx"].run = runner
+    assert launch(env) == gv.EXIT_FAILED
+    assert "(diagnosis interrupted)" in text(env)
+    assert fake.instances == {}

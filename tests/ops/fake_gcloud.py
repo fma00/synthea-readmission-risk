@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import subprocess
 from dataclasses import dataclass, field
+from datetime import datetime
 
 GENERATOR_SA = "synthea-generator@synthea-readmission-risk.iam.gserviceaccount.com"
 
@@ -39,6 +40,10 @@ class FakeGcloud:
     keep_disk_after_delete: bool = False
     batch_states: list[str] = field(default_factory=lambda: ["RUNNING", "SUCCEEDED"])
     batch_usage: dict | None = field(default_factory=lambda: {"milliDcuSeconds": "7200000", "shuffleStorageGbSeconds": "36000"})
+    batch_state_message: str | None = None  # replaces "simulated" as a non-SUCCEEDED batch's stateMessage
+    logging_responses: list = field(default_factory=list)  # one per `gcloud logging read`; a str is returned verbatim; [] when empty
+    describe_failures_after: int | None = None  # each batch's describes after this many fail (or return describe_failure_output)
+    describe_failure_output: str | None = None  # when set, the failing describe exits 0 with this stdout (malformed output)
     fail_on: tuple[str, ...] = ()  # argv prefixes (joined with spaces) that exit 1 with a generic error
 
     def __call__(self, argv: list[str]) -> subprocess.CompletedProcess:
@@ -54,6 +59,8 @@ class FakeGcloud:
                 found = sorted(u for u in self.objects if u.startswith(prefix))
                 return _ok("\n".join(found)) if found else _no_match()
             return _ok(args[-1]) if args[-1] in self.objects else _no_match()
+        if args[1:3] == ["logging", "read"]:
+            return _ok(self.logging_responses.pop(0) if self.logging_responses else [])
         if args[1:3] == ["storage", "cat"]:
             return _ok(self.objects[args[3]].decode()) if args[3] in self.objects else _no_match()
         if args[1:3] == ["storage", "cp"]:
@@ -119,18 +126,28 @@ class FakeGcloud:
             return _ok([{"name": n} for n, b in self.batches.items() if b["state"] in ("RUNNING", "PENDING")])
         if head == ("dataproc", "batches", "submit"):
             batch_id = _flag(args, "--batch")
-            self.batches[batch_id] = {"state": "PENDING", "states": list(self.batch_states)}
+            self.batches[batch_id] = {"state": "PENDING", "states": list(self.batch_states), "history": ["PENDING"], "describes": 0}
             return _ok()
         if head == ("dataproc", "batches", "describe"):
             batch = self.batches[args[4]]
+            batch["describes"] = batch.get("describes", 0) + 1
+            if self.describe_failures_after is not None and batch["describes"] > self.describe_failures_after:
+                if self.describe_failure_output is not None:
+                    return subprocess.CompletedProcess(args=argv, returncode=0, stdout=self.describe_failure_output, stderr="")
+                return subprocess.CompletedProcess(args=argv, returncode=1, stdout="", stderr="ERROR: simulated failure")
+            previous = batch["state"]
             if batch["states"]:
                 batch["state"] = batch["states"].pop(0)
+            # Like Dataproc's stateHistory: past states only, the current one excluded
+            if batch["state"] != previous and previous not in ("SUCCEEDED", "FAILED", "CANCELLED") and previous != batch["history"][-1]:
+                batch["history"].append(previous)
             describe = {
                 "state": batch["state"],
                 "createTime": "2026-10-13T10:00:00.000Z",
                 "stateTime": "2026-10-13T10:12:30.000Z",
                 "runtimeConfig": {"version": "3.0.14"},
-                "stateMessage": "simulated" if batch["state"] != "SUCCEEDED" else "",
+                "stateMessage": ("simulated" if self.batch_state_message is None else self.batch_state_message) if batch["state"] != "SUCCEEDED" else "",
+                "stateHistory": [{"state": s, "stateStartTime": "2026-10-13T10:00:00.000Z"} for s in batch["history"]],
             }
             if batch["state"] in ("SUCCEEDED", "FAILED", "CANCELLED") and self.batch_usage is not None:
                 describe["runtimeInfo"] = {"approximateUsage": dict(self.batch_usage)}
@@ -146,3 +163,14 @@ def _flag(args: list[str], name: str) -> str:
         if a.startswith(name + "="):
             return a.split("=", 1)[1]
     raise AssertionError(f"{name} not in {args}")
+
+
+AUDIT_ROLE = "projects/synthea-readmission-risk/roles/dataprocRuntimeWorker"
+
+
+def audit_entry(method: str, at: datetime, principal: str = "operator@example.com", resource: str = AUDIT_ROLE) -> dict:
+    """An Admin Activity entry shaped like gcloud's JSON, with a nanosecond-style timestamp on purpose."""
+    return {
+        "timestamp": at.strftime("%Y-%m-%dT%H:%M:%S.%f") + "123Z",
+        "protoPayload": {"methodName": method, "authenticationInfo": {"principalEmail": principal}, "resourceName": resource},
+    }

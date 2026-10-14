@@ -3,10 +3,11 @@ arguments, provenance), every preflight refusal including P7 (raw run vs prereg)
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import shutil
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -14,7 +15,7 @@ from readmission_risk.ops import dataproc_batch as db
 from readmission_risk.ops import generation_vm as gv
 from readmission_risk.ops.prereg import PreregRecord, load_prereg
 from tests.ops.conftest import REPO
-from tests.ops.fake_gcloud import FakeGcloud
+from tests.ops.fake_gcloud import AUDIT_ROLE, FakeGcloud, audit_entry
 
 PREREG = load_prereg(REPO / "prereg.yaml")
 RECORD = PreregRecord(head_commit="a" * 40, prereg_commit="b" * 40, prereg_committed_at="2026-10-12T10:00:00+02:00", sha256="c" * 64)
@@ -110,6 +111,8 @@ def test_batch_record_and_usage_printed(env):
     record = json.loads((env["repo"] / "data/pilot/pilot_20k/batch_bigjoin-pilot-20k-202610131000.json").read_text())
     assert record["usage"]["dcu_hours"] == pytest.approx(2.0)
     assert record["provenance"]["head_commit"] == "a" * 40
+    assert record["never_ran"] is False
+    assert record["interrupted"] is False and record["usage_wait_error"] is None
     assert "DCU-hours=2.000" in text(env) and "runtime=3.0.14" in text(env)
 
 
@@ -139,6 +142,97 @@ def test_failed_batch_exit_2_prints_cleanup(env):
     assert "gcloud storage rm -r gs://synthea-readmission-risk-gold/v2/pilot_20k/" in text(env)
 
 
+# --- a batch that never ran (ops bundle, notes/eg-new-feature/ops-submitter-launcher-polish-2026-10-12.md) ---
+
+# Verbatim from the 5b pilot's refused batch bigjoin-pilot-20k-202610121318 (2026-10-12)
+PERMISSION_FAILURE_5B = (
+    "Permission validation failed for operation e5cc8693-6dc6-3f0c-b137-92d436f891e2: Service Account "
+    "'dataproc-runtime@synthea-readmission-risk.iam.gserviceaccount.com' is missing required permissions: "
+    "[dataprocrm.nodePools.update]."
+)
+
+
+def _history(*states: str) -> list[dict]:
+    return [{"state": s} for s in states]
+
+
+@pytest.mark.parametrize(
+    ("describe", "expected"),
+    [
+        ({"state": "FAILED", "stateHistory": _history("PENDING")}, True),
+        ({"state": "CANCELLED", "stateHistory": _history("PENDING")}, True),
+        ({"state": "FAILED", "stateHistory": _history("PENDING", "RUNNING")}, False),
+        ({"state": "SUCCEEDED", "stateHistory": _history("PENDING", "RUNNING")}, False),
+        ({"state": "SUCCEEDED", "stateHistory": _history("PENDING")}, False),  # a SUCCEEDED batch always ran
+        ({"state": "RUNNING", "stateHistory": _history("PENDING")}, False),  # not terminal
+        ({"state": "FAILED"}, False),  # no history: wait as before
+        ({"state": "FAILED", "stateHistory": []}, False),
+        ({"state": "FAILED", "stateHistory": "PENDING"}, False),
+        ({"state": "FAILED", "stateHistory": ["PENDING"]}, False),
+        ({"state": "FAILED", "stateHistory": [{}]}, False),
+        ({"state": "FAILED", "stateHistory": [{"state": None}]}, False),
+    ],
+)
+def test_never_ran(describe, expected):
+    assert db.never_ran(describe) is expected
+
+
+def test_permission_hint():
+    assert db.permission_hint(PERMISSION_FAILURE_5B) == db.PERMISSION_HINT
+    for message in ("simulated", "", None, 42, "permission validation failed"):
+        assert db.permission_hint(message) is None, message
+
+
+def test_fake_state_history_matches_real_shape():
+    fake = FakeGcloud(batch_states=["RUNNING", "SUCCEEDED"])
+    fake(["gcloud", "dataproc", "batches", "submit", "pyspark", "gs://x/main.py", "--batch=b1"])
+    describe = ["gcloud", "dataproc", "batches", "describe", "b1", "--region=us-central1"]
+    fake(describe)
+    second = json.loads(fake(describe).stdout)
+    assert second["state"] == "SUCCEEDED"
+    assert [h["state"] for h in second["stateHistory"]] == ["PENDING", "RUNNING"]
+
+
+def _record(env) -> dict:
+    return json.loads((env["repo"] / "data/pilot/pilot_20k/batch_bigjoin-pilot-20k-202610131000.json").read_text())
+
+
+def test_never_ran_batch_skips_usage_wait(env):
+    fake = env["fake"]
+    fake.batch_states, fake.batch_usage, fake.batch_state_message = ["FAILED"], None, PERMISSION_FAILURE_5B
+    slept: list[float] = []
+    env["ctx"].sleep = slept.append
+    assert submit(env) == db.EXIT_FAILED
+    assert len(fake.ran("gcloud", "dataproc", "batches", "describe")) == 1
+    assert slept == []
+    out = text(env)
+    assert "stateHistory never reached RUNNING: skipping the usage wait" in out
+    assert "DCU-hours=none (stateHistory never reached RUNNING" in out
+    assert "holds partial output" in out  # the cleanup line is always printed
+    assert db.PERMISSION_HINT in out
+    assert _record(env)["never_ran"] is True
+
+
+def test_usage_present_wins_over_never_ran(env):
+    env["fake"].batch_states = ["FAILED"]  # the fake's default usage is present
+    assert submit(env) == db.EXIT_FAILED
+    assert len(env["fake"].ran("gcloud", "dataproc", "batches", "describe")) == 1
+    out = text(env)
+    assert "stateHistory never reached RUNNING: skipping the usage wait" in out
+    assert "DCU-hours=2.000" in out and "DCU-hours=none" not in out
+    assert _record(env)["never_ran"] is True
+
+
+def test_failed_after_running_still_waits_for_usage(env):
+    env["fake"].batch_states, env["fake"].batch_usage = ["RUNNING", "FAILED"], None
+    assert submit(env) == db.EXIT_FAILED
+    assert len(env["fake"].ran("gcloud", "dataproc", "batches", "describe")) == 2 + db.USAGE_WAIT_SECONDS // 30
+    out = text(env)
+    assert "holds partial output" in out and db.PERMISSION_HINT not in out
+    assert "skipping the usage wait" not in out
+    assert _record(env)["never_ran"] is False
+
+
 def test_keyboard_interrupt_exit_130_prints_cancel(env):
     env["fake"].batch_states = ["RUNNING", "RUNNING", "SUCCEEDED"]
 
@@ -155,6 +249,7 @@ def test_dry_run_makes_no_runner_call(env):
     assert submit(env) == db.EXIT_OK
     assert env["fake"].calls == []
     assert "would run: gcloud dataproc batches submit pyspark" in text(env)
+    assert "would check the Admin Activity audit log" in text(env)
 
 
 # --- refusals ---
@@ -229,3 +324,195 @@ def test_runtime_sa_and_subnet_match_terraform():
     assert 'account_id   = "dataproc-runtime"' in tf
     assert 'name                     = "spark-us-central1"' in tf
     assert db.MAX_EXECUTORS == 7 and db.RUNTIME_VERSION == "3.0"
+
+
+# --- IAM propagation wait and finished-batch records (notes/eg-new-feature/ops-iam-propagation-and-interrupt-2026-10-12.md) ---
+
+NOW = datetime(2026, 10, 13, 10, 0, tzinfo=UTC)  # the env fixture's clock
+ROLE = AUDIT_ROLE
+
+
+def _seconds(n: int) -> timedelta:
+    return timedelta(seconds=n)
+
+
+def _calls(env, *prefix: str) -> list[int]:
+    return [i for i, call in enumerate(env["fake"].calls) if call[: len(prefix)] == list(prefix)]
+
+
+def test_submit_waits_for_recent_iam_change(env):
+    fake = env["fake"]
+    fake.batch_states = ["SUCCEEDED"]
+    entry = audit_entry("google.iam.admin.v1.UpdateRole", NOW - _seconds(60))
+    # the re-check returns the same change again (its filter is rounded down to the second); it must not count as newer
+    fake.logging_responses = [[entry], [entry]]
+    slept: list[float] = []
+    env["ctx"].sleep = slept.append
+    assert submit(env) == db.EXIT_OK, text(env)
+    assert slept == [420.0]
+    reads = _calls(env, "gcloud", "logging", "read")
+    assert len(reads) == 2
+    assert 'timestamp>="2026-10-13T09:59:00Z"' in fake.calls[reads[1]][3]
+    assert reads[-1] < _calls(env, "gcloud", "dataproc", "batches", "submit")[0]
+    out = text(env)
+    assert f"google.iam.admin.v1.UpdateRole on {ROLE} by operator@example.com at 09:59:00Z" in out
+    assert "Waiting 420 s for IAM propagation" in out
+
+
+def test_system_principal_change_does_not_wait(env):
+    fake = env["fake"]
+    fake.batch_states = ["SUCCEEDED"]
+    fake.logging_responses = [
+        [audit_entry("SetIamPolicy", NOW - _seconds(30), principal="service-agent-manager@system.gserviceaccount.com")]
+    ]
+    slept: list[float] = []
+    env["ctx"].sleep = slept.append
+    assert submit(env) == db.EXIT_OK
+    assert slept == []
+    assert "IAM changed" not in text(env)
+
+
+def test_iam_keeps_changing_refuses(env):
+    fake = env["fake"]
+    fake.batch_states = ["SUCCEEDED"]
+    fake.logging_responses = [[audit_entry("google.iam.admin.v1.UpdateRole", NOW - _seconds(60 - i))] for i in range(4)]
+    slept: list[float] = []
+    env["ctx"].sleep = slept.append
+    assert submit(env) == db.EXIT_REFUSED
+    assert len(slept) == 3
+    assert len(_calls(env, "gcloud", "logging", "read")) == 4
+    assert _calls(env, "gcloud", "dataproc", "batches", "submit") == []
+    assert "IAM kept changing across 3 propagation waits" in text(env)
+
+
+def test_audit_log_unreadable_warns_and_submits(env):
+    env["fake"].fail_on = ("gcloud logging read",)
+    assert submit(env) == db.EXIT_OK
+    assert len(_calls(env, "gcloud", "dataproc", "batches", "submit")) == 1
+    assert "WARNING: could not read the Admin Activity audit log" in text(env)
+    assert "ERROR: simulated failure" in text(env)
+
+
+def test_audit_log_non_json_warns_and_submits(env):
+    env["fake"].logging_responses = ["not json"]
+    assert submit(env) == db.EXIT_OK
+    assert len(_calls(env, "gcloud", "dataproc", "batches", "submit")) == 1
+    assert "WARNING: could not read the Admin Activity audit log" in text(env)
+
+
+def test_ctrl_c_during_iam_wait_submits_nothing(env):
+    env["fake"].logging_responses = [[audit_entry("google.iam.admin.v1.UpdateRole", NOW - _seconds(60))]]
+
+    def interrupt(seconds):
+        raise KeyboardInterrupt
+
+    env["ctx"].sleep = interrupt
+    assert submit(env) == db.EXIT_INTERRUPTED
+    assert _calls(env, "gcloud", "dataproc", "batches", "submit") == []
+    assert "INTERRUPTED during the IAM propagation wait or its re-check: no batch was submitted" in text(env)
+
+
+def test_ctrl_c_during_recheck_after_wait_submits_nothing(env, monkeypatch):
+    fake = env["fake"]
+    entry = audit_entry("google.iam.admin.v1.UpdateRole", NOW - _seconds(60))
+    fake.logging_responses = [[entry], [entry]]
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(db, "recheck_after_wait", interrupt)
+    assert submit(env) == db.EXIT_INTERRUPTED
+    assert _calls(env, "gcloud", "dataproc", "batches", "submit") == []
+    assert "INTERRUPTED during the IAM propagation wait or its re-check: no batch was submitted" in text(env)
+
+
+def test_describe_error_while_running_says_batch_may_still_run(env):
+    fake = env["fake"]
+    fake.batch_states, fake.describe_failures_after = ["RUNNING", "SUCCEEDED"], 1
+    assert submit(env) == db.EXIT_FAILED
+    out = text(env)
+    assert "FAILED to monitor batch bigjoin-pilot-20k-202610131000: ERROR: simulated failure" in out
+    assert "gcloud dataproc batches cancel bigjoin-pilot-20k-202610131000" in out
+    assert not (env["repo"] / "data/pilot/pilot_20k/batch_bigjoin-pilot-20k-202610131000.json").exists()
+
+
+def test_preflight_rechecked_after_iam_wait(env):
+    fake = env["fake"]
+    fake.batch_states = ["SUCCEEDED"]
+    entry = audit_entry("google.iam.admin.v1.UpdateRole", NOW - _seconds(60))
+    fake.logging_responses = [[entry], [entry]]
+
+    def another_batch_starts(seconds):
+        fake.batches["other"] = {"state": "RUNNING", "states": []}
+
+    env["ctx"].sleep = another_batch_starts
+    assert submit(env) == db.EXIT_REFUSED
+    assert "another Dataproc batch is active" in text(env)
+    assert _calls(env, "gcloud", "dataproc", "batches", "submit") == []
+
+
+def test_commit_change_during_iam_wait_refuses(env, monkeypatch):
+    fake = env["fake"]
+    fake.batch_states = ["SUCCEEDED"]
+    entry = audit_entry("google.iam.admin.v1.UpdateRole", NOW - _seconds(60))
+    fake.logging_responses = [[entry], [entry]]
+    records = [RECORD, dataclasses.replace(RECORD, head_commit="e" * 40)]
+    monkeypatch.setattr(db, "check_prereg_committed", lambda repo_root, **kw: records.pop(0) if len(records) > 1 else records[0])
+    assert submit(env) == db.EXIT_REFUSED
+    assert _calls(env, "gcloud", "dataproc", "batches", "submit") == []
+    assert "HEAD or the prereg commit changed during the IAM wait" in text(env)
+
+
+def test_no_wait_no_second_preflight(env):
+    assert submit(env) == db.EXIT_OK
+    assert len(_calls(env, "gcloud", "dataproc", "batches", "list")) == 1
+
+
+def test_ctrl_c_during_usage_wait_after_succeeded_writes_record(env):
+    env["fake"].batch_states, env["fake"].batch_usage = ["SUCCEEDED"], None
+
+    def interrupt(seconds):
+        raise KeyboardInterrupt
+
+    env["ctx"].sleep = interrupt
+    assert submit(env) == db.EXIT_INTERRUPTED
+    record = _record(env)
+    assert record["interrupted"] is True and record["never_ran"] is False
+    assert "had already ended SUCCEEDED" in text(env) and "keeps running" not in text(env)
+
+
+def test_ctrl_c_during_usage_wait_after_failed_returns_2(env):
+    env["fake"].batch_states, env["fake"].batch_usage = ["RUNNING", "FAILED"], None
+    calls = {"n": 0}
+
+    def second_sleep_interrupts(seconds):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise KeyboardInterrupt
+
+    env["ctx"].sleep = second_sleep_interrupts
+    assert submit(env) == db.EXIT_FAILED
+    assert _record(env)["interrupted"] is True
+    assert "holds partial output" in text(env) and "had already ended FAILED" in text(env)
+
+
+def test_describe_error_during_usage_wait_still_writes_record(env):
+    fake = env["fake"]
+    fake.batch_states, fake.batch_usage, fake.describe_failures_after = ["SUCCEEDED"], None, 1
+    assert submit(env) == db.EXIT_OK
+    assert _record(env)["interrupted"] is False
+    assert _record(env)["usage_wait_error"] == "ERROR: simulated failure"
+    assert "WARNING: describe failed during the usage wait" in text(env)
+    assert "ERROR: simulated failure" in text(env)
+
+
+@pytest.mark.parametrize("output", ["not json", ""])
+def test_malformed_describe_during_usage_wait_still_writes_record(env, output):
+    fake = env["fake"]
+    fake.batch_states, fake.batch_usage, fake.describe_failures_after = ["SUCCEEDED"], None, 1
+    fake.describe_failure_output = output
+    assert submit(env) == db.EXIT_OK
+    assert _record(env)["batch_id"] == "bigjoin-pilot-20k-202610131000"
+    assert "not a JSON object" in _record(env)["usage_wait_error"] or "Expecting value" in _record(env)["usage_wait_error"]
+    assert "WARNING: describe failed during the usage wait" in text(env)
+

@@ -2,8 +2,10 @@
 template's max_run_duration and termination action DELETE, deleted by this launcher when the run ends, and then PROVEN gone.
 Every GCP call is a gcloud argv run through ops.gcloud (a fake Runner in tests). See
 notes/eg-new-feature/v2-slice5-gs-big-join-fingerprint-pilot-2026-10-12.md, Interfaces section 11 ("Generation launcher").
-Exit codes: 0 done; 1 refused (preflight); 2 generation failed; 3 teardown proof failed; 130 interrupted. Precedence when several
-apply: 3 > 2 > 130 > 0.
+Before creating the VM it waits for IAM propagation when the Admin Activity audit log shows a recent IAM change
+(ops/iam_propagation.py). Exit codes: 0 done; 1 refused (preflight, or IAM still changing after 3 propagation waits); 2
+generation failed; 3 teardown proof failed; 130 interrupted (during the IAM propagation wait or its re-check: no VM was created;
+after creation: the VM is torn down and proven gone). Precedence when several apply: 3 > 2 > 130 > 0.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .gcloud import (
@@ -27,6 +29,11 @@ from .gcloud import (
     object_exists,
     run_json,
     run_ok,
+)
+from .iam_propagation import (
+    IAM_PROPAGATION_SECONDS,
+    IamStillChanging,
+    wait_for_iam_propagation,
 )
 from .prereg import (
     Prereg,
@@ -56,6 +63,16 @@ STARTUP_SCRIPT = Path("infra/generation/startup.sh")
 GEN_SCRIPT = Path("scripts/generate_synthea_data.py")
 LABEL_VALUE_RE = re.compile(r"[a-z0-9_-]{0,63}")
 INSTANCE_NAME_RE = re.compile(r"[a-z]([-a-z0-9]{0,61}[a-z0-9])?")
+SCRIPT_RUNNER_LOG = f"projects/{PROJECT}/logs/google_metadata_script_runner"
+STARTUP_LINE_PREFIX = 'Metadata key("startup-script"), command("/bin/bash"): '
+# Both forms name the denied permission (measured 2026-10-13 for gcloud storage ls as a service account without access;
+# assumed for gcloud storage cp on the VM: notes/eg-new-feature/ops-launcher-permission-hint-2026-10-13.md)
+_DENIED_PERMISSION = re.compile(r"Permission '([A-Za-z0-9_.]+)' denied")
+_LACKS_PERMISSION = re.compile(r"does not have ([a-z][A-Za-z0-9_]*\.[A-Za-z0-9_.]+) access")
+DIAGNOSIS_TAIL_LINES = 15
+# The log query starts this long before the laptop's creation time: laptop and Cloud Logging clocks can differ, and the
+# instance name (unique per launch minute; P3 refuses leftover VMs) already confines the query to this VM.
+VM_LOG_MARGIN = timedelta(minutes=10)
 
 EXIT_OK, EXIT_REFUSED, EXIT_FAILED, EXIT_PROOF_FAILED, EXIT_INTERRUPTED = 0, 1, 2, 3, 130
 
@@ -212,6 +229,19 @@ def preflight_remote(options: LaunchOptions, ctx: LaunchContext) -> None:
     check_quota(ctx.run, regional=("CPUS", "N2_CPUS"), vcpus=MACHINE_VCPUS)
 
 
+def recheck_after_wait(options: LaunchOptions, ctx: LaunchContext, record: PreregRecord) -> None:
+    """The IAM wait can last ~24 min: re-run both preflights (P1/P1b/P2/P5 locally; P3/P4/P6 remotely) and refuse if HEAD or
+    the prereg commit moved, because the uploaded artifacts and the VM metadata were built before the wait."""
+    _, rechecked = preflight_local(options, ctx)
+    preflight_remote(options, ctx)
+    if (rechecked.head_commit, rechecked.prereg_commit) != (record.head_commit, record.prereg_commit):
+        raise Refused(
+            f"HEAD or the prereg commit changed during the IAM wait (was {record.head_commit[:12]}/"
+            f"{record.prereg_commit[:12]}, now {rechecked.head_commit[:12]}/{rechecked.prereg_commit[:12]}); "
+            "the artifacts and VM metadata were built from the old commit: rerun to build from the new one"
+        )
+
+
 def instance_name(run: str, now: datetime) -> str:
     name = f"synthea-gen-{run_dashed(run)}-{now.strftime('%Y%m%d%H%M')}"
     if not INSTANCE_NAME_RE.fullmatch(name):
@@ -291,6 +321,15 @@ def positive_control(ctx: LaunchContext, name: str, zone: str, max_run_seconds: 
     return problems
 
 
+def positive_control_ok_message(name: str, max_run_seconds: int) -> str:
+    """The pass line, naming exactly the checks positive_control makes, in its order."""
+    return (
+        f"POSITIVE CONTROL OK: {name} is labelled purpose=synthea-generation, runs the pinned startup script, is SPOT with "
+        f"termination action DELETE and maxRunDuration {max_run_seconds}s, has no external IP and runs as {GENERATOR_SA}; "
+        "its boot disk is labelled; both label filters list exactly this instance and disk"
+    )
+
+
 def instance_exists(ctx: LaunchContext, name: str) -> bool:
     return name in [i.get("name") for i in list_labelled(ctx.run, "instances")]
 
@@ -341,6 +380,88 @@ def _teardown_and_prove(ctx: LaunchContext, name: str, zone: str) -> bool:
     return proven
 
 
+def missing_permissions(text: str) -> list[str]:
+    """Sorted, de-duplicated IAM permission names that `text` reports as denied (both message forms)."""
+    return sorted(set(_DENIED_PERMISSION.findall(text)) | set(_LACKS_PERMISSION.findall(text)))
+
+
+def permission_hint(permissions: list[str], run: str) -> str:
+    return (
+        f"HINT: the VM ({GENERATOR_SA}) was denied {', '.join(permissions)}. If an IAM role or binding changed in the last "
+        "minutes, it may not have propagated yet (the launcher only waits for changes the audit log already shows): wait, "
+        f"delete the partial raw prefix (gcloud storage rm -r {raw_prefix(run)}/) and rerun. Otherwise grant the permission "
+        "to the synthea-generator service account in infra/iam.tf. See docs/setup.md, 'Lessons from the first live run'."
+    )
+
+
+def vm_log_argv(name: str, since: datetime) -> list[str]:
+    """The VM's startup-script lines that mention a denial or a startup.sh failure, oldest first."""
+    query = (
+        f'logName="{SCRIPT_RUNNER_LOG}" AND labels.instance_name="{name}" '
+        f'AND timestamp>="{since.astimezone(UTC):%Y-%m-%dT%H:%M:%SZ}" '
+        'AND (jsonPayload.message:"denied" OR jsonPayload.message:"does not have" OR jsonPayload.message:"startup.sh FAILED")'
+    )
+    return ["gcloud", "logging", "read", query, "--limit=200", "--order=asc"]
+
+
+def vm_log_lines(entries: object) -> list[str]:
+    """The startup-script lines in `gcloud logging read --format=json` output, in the given order: each entry's
+    jsonPayload.message, with STARTUP_LINE_PREFIX removed when present (kept as is otherwise: the VM image, hence the guest
+    agent's prefix format, is not pinned, and the query already narrowed the entries to this VM and to matching terms);
+    entries that are not dicts, have no dict jsonPayload or no str message are skipped. Non-list input -> []."""
+    if not isinstance(entries, list):
+        return []
+    lines = []
+    for entry in entries:
+        payload = entry.get("jsonPayload") if isinstance(entry, dict) else None
+        message = payload.get("message") if isinstance(payload, dict) else None
+        if isinstance(message, str):
+            lines.append(message.removeprefix(STARTUP_LINE_PREFIX))
+    return lines
+
+
+def diagnose_failure(ctx: LaunchContext, run: str, name: str, state: str, since: datetime) -> None:
+    """After a failed run: show the evidence and, when it names denied permissions, the hint. Never raises for its own reads:
+    GcloudError/ValueError become one 'could not read ...' line, and a KeyboardInterrupt during the diagnosis is caught and
+    reported, so the run's exit code stays 2 (failed) and teardown proceeds."""
+    if state == "failed":
+        source = "_FAILED"
+    elif state in ("vanished", "timeout"):
+        source = "the VM's startup-script log in Cloud Logging (lines mentioning a denial or a startup.sh failure)"
+    else:
+        return
+    try:
+        if state == "failed":
+            text = run_ok(ctx.run, ["gcloud", "storage", "cat", f"{raw_prefix(run)}/_FAILED"])
+        else:
+            text = "\n".join(vm_log_lines(run_json(ctx.run, vm_log_argv(name, since - VM_LOG_MARGIN))))
+        lines = [line for line in text.splitlines() if line.strip()]
+        if not lines:
+            if state == "failed":
+                ctx.echo("(no lines in _FAILED)")
+            else:
+                ctx.echo(
+                    "(no denial or startup.sh failure lines in the VM's startup-script log; the VM may have been preempted, "
+                    "or still been working at the timeout)"
+                )
+            return
+        if state == "failed":
+            ctx.echo("Last lines of _FAILED:")
+            shown = lines[-DIAGNOSIS_TAIL_LINES:]
+        else:
+            ctx.echo(f"First lines of {source}:")
+            shown = lines[:DIAGNOSIS_TAIL_LINES]
+        for line in shown:
+            ctx.echo("  " + line)
+        permissions = missing_permissions(text)
+        if permissions:
+            ctx.echo(permission_hint(permissions, run))
+    except (GcloudError, ValueError) as exc:
+        ctx.echo(f"(could not read {source} for a diagnosis: {str(exc).splitlines()[-1]})")
+    except KeyboardInterrupt:
+        ctx.echo("(diagnosis interrupted)")
+
+
 def expected_raw_layout(run: str, prereg: Prereg) -> set[str]:
     prefix = raw_prefix(run)
     return {
@@ -380,24 +501,41 @@ def launch(options: LaunchOptions, ctx: LaunchContext) -> int:
             for a in artifacts.values():
                 ctx.echo(f"would upload: gcloud storage cp {a.path} {a.uri} --if-generation-match=0")
             ctx.echo("would run: " + " ".join(create_argv(name, options, "<from template>", labels, metadata, ctx.repo_root)))
+            ctx.echo(
+                f"would check the Admin Activity audit log for IAM changes in the last {IAM_PROPAGATION_SECONDS // 60} "
+                "minutes, then create the VM"
+            )
             return EXIT_OK
         preflight_remote(options, ctx)
         for a in artifacts.values():
             upload_artifact(ctx.run, a)
+        resolve_template(ctx.run, options.run)  # fail fast: refuse a missing/ambiguous template before any IAM wait
+        try:
+            if wait_for_iam_propagation(ctx) > 0:
+                recheck_after_wait(options, ctx, record)
+        except KeyboardInterrupt:
+            ctx.echo(
+                "INTERRUPTED during the IAM propagation wait or its re-check: no VM was created (the uploaded artifacts "
+                "are reused on the next run)"
+            )
+            return EXIT_INTERRUPTED
+        # after the wait: a terraform apply (the usual cause of an IAM change) can also replace the instance template
         template, max_run_seconds = resolve_template(ctx.run, options.run)
-    except (Refused, GcloudError) as exc:
+    except (Refused, GcloudError, IamStillChanging) as exc:
         ctx.echo(f"REFUSED: {exc}")
         return EXIT_REFUSED
 
     started = ctx.monotonic()
     outcome = EXIT_OK
     try:
+        created_at = ctx.now()
         run_ok(ctx.run, create_argv(name, options, template, labels, metadata, ctx.repo_root))
         problems = positive_control(ctx, name, options.zone, max_run_seconds)
         if problems:
             ctx.echo("POSITIVE CONTROL FAILED (deleting the VM): " + "; ".join(problems))
             outcome = EXIT_FAILED
         else:
+            ctx.echo(positive_control_ok_message(name, max_run_seconds))
             state = wait_for_marker(ctx, options.run, name, max_run_seconds + WAIT_MARGIN_SECONDS, options.poll_seconds)
             if state != "done":
                 messages = {
@@ -407,6 +545,7 @@ def launch(options: LaunchOptions, ctx: LaunchContext) -> int:
                 }
                 ctx.echo(f"FAILED: {messages[state]}")
                 outcome = EXIT_FAILED
+                diagnose_failure(ctx, options.run, name, state, created_at)
             else:
                 layout = check_raw_layout(ctx.run, options.run, prereg)
                 if layout:

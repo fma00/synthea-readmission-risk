@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Callable
+from datetime import datetime
 
 from readmission_risk.gcp import PROJECT_ID as PROJECT
 
@@ -49,6 +50,13 @@ def run_ok(run: Runner | None, argv: list[str]) -> str:
 def run_json(run: Runner | None, argv: list[str]) -> object:
     text = run_ok(run, [*argv, "--format=json"])
     return json.loads(text) if text.strip() else None
+
+
+def parse_gcloud_time(text: str | None) -> datetime | None:
+    """gcloud's RFC 3339 timestamps ("...Z", up to nanoseconds; Python 3.11+ fromisoformat truncates to microseconds)."""
+    if not text:
+        return None
+    return datetime.fromisoformat(text.replace("Z", "+00:00"))
 
 
 def list_objects(run: Runner | None, prefix_uri: str) -> list[str]:

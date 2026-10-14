@@ -1,9 +1,10 @@
 #!/usr/bin/env python
 """Runs the Big Join for one pre-registered population on Dataproc Serverless runtime 3.0
 (readmission_risk.ops.dataproc_batch.submit): refuses unless prereg.yaml is committed and pushed, the raw run is complete and
-matches the prereg, and no generation VM is up; submits with maxExecutors=7; waits; records wall-clock and DCU-hours under
+matches the prereg, and no generation VM is up; waits for IAM propagation if a role or binding changed in the last 8 minutes (audit log); submits with maxExecutors=7; waits; records wall-clock and DCU-hours under
 data/pilot/<run>/. COSTS MONEY: confirm with the owner first. `make bigjoin-batch RUN=pilot_20k`. Exit codes: 0 succeeded,
-1 refused, 2 failed, 130 interrupted. See notes/eg-new-feature/v2-slice5-gs-big-join-fingerprint-pilot-2026-10-12.md."""
+1 refused, 2 failed or monitoring failed (the batch may still be running: see the message), 130 interrupted (see
+ops/dataproc_batch.py). See notes/eg-new-feature/v2-slice5-gs-big-join-fingerprint-pilot-2026-10-12.md."""
 
 from __future__ import annotations
 

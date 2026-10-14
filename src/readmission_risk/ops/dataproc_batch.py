@@ -1,8 +1,12 @@
 """The Big Join on Dataproc Serverless runtime 3.0 (v2 PRD FR13 pilot, FR14 cap): preflight, submit (maxExecutors=7, standard
 tier, ttl 2 h, the dedicated runtime SA and subnet), wait, and record wall-clock and DCU-hours. Every GCP call is a gcloud argv
 run through ops.gcloud. See notes/eg-new-feature/v2-slice5-gs-big-join-fingerprint-pilot-2026-10-12.md, Interfaces section 11
-("Big Join batch submitter"). Exit codes: 0 succeeded; 1 refused; 2 batch failed or cancelled; 130 interrupted (the batch keeps
-running, bounded by its ttl).
+("Big Join batch submitter"). Before submitting it waits for IAM propagation when the Admin Activity audit log shows a recent
+IAM change (notes/eg-new-feature/ops-iam-propagation-and-interrupt-2026-10-12.md). Exit codes: 0 succeeded; 1 refused
+(including IAM still changing after 3 propagation waits); 2 batch failed or cancelled (also when the usage wait was
+interrupted after such a batch), or monitoring failed after submission (the batch may still be running, bounded by its ttl;
+the message gives the describe and cancel commands); 130 interrupted (during the IAM propagation wait or its re-check: nothing submitted; while polling: the batch
+keeps running, bounded by its ttl; during the usage wait after a SUCCEEDED batch: record written).
 """
 
 from __future__ import annotations
@@ -11,7 +15,6 @@ import json
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 
 from .gcloud import (
@@ -20,6 +23,7 @@ from .gcloud import (
     Runner,
     list_labelled,
     list_objects,
+    parse_gcloud_time,
     run_json,
     run_ok,
 )
@@ -42,6 +46,11 @@ from .generation_vm import (
     run_dashed,
     sha256_file,
     upload_artifact,
+)
+from .iam_propagation import (
+    IAM_PROPAGATION_SECONDS,
+    IamStillChanging,
+    wait_for_iam_propagation,
 )
 from .prereg import (
     Prereg,
@@ -72,6 +81,14 @@ SPARK_PROPERTIES = {
 MAIN_SCRIPT = Path("scripts/run_big_join.py")
 TERMINAL_STATES = ("SUCCEEDED", "FAILED", "CANCELLED")
 USAGE_WAIT_SECONDS = 600
+NEVER_RAN_STATES = ("FAILED", "CANCELLED")  # a SUCCEEDED batch certainly ran
+PERMISSION_FAILURE_MARKER = "Permission validation failed"  # Dataproc's pre-check message prefix (5b, 2026-10-12)
+PERMISSION_HINT = (
+    "HINT: Dataproc's permission pre-check refused the batch before it ran (no cost). If an IAM role or binding for "
+    f"{RUNTIME_SA} changed in the last ~8 minutes (e.g. the dataprocRuntimeWorker custom role), it may not have propagated "
+    "yet: wait and resubmit. Otherwise grant the listed permissions in infra/iam.tf. See docs/setup.md, 'Lessons from the "
+    "first live run'."
+)
 
 
 @dataclass(frozen=True)
@@ -91,17 +108,12 @@ class BatchUsage:
     shuffle_gb_hours: float | None
 
 
-def _parse_time(text: str | None) -> datetime | None:
-    if not text:
-        return None
-    return datetime.fromisoformat(text.replace("Z", "+00:00"))
-
 
 def parse_batch_usage(describe: dict) -> BatchUsage:
     """`gcloud dataproc batches describe --format=json` -> BatchUsage. int64 fields may come as JSON strings; usage is None until
     Dataproc has computed it (runtimeInfo.approximateUsage appears after completion)."""
     usage = (describe.get("runtimeInfo") or {}).get("approximateUsage")
-    created, ended = _parse_time(describe.get("createTime")), _parse_time(describe.get("stateTime"))
+    created, ended = parse_gcloud_time(describe.get("createTime")), parse_gcloud_time(describe.get("stateTime"))
     milli_dcu = usage.get("milliDcuSeconds") if usage else None
     shuffle = usage.get("shuffleStorageGbSeconds") if usage else None
     return BatchUsage(
@@ -111,6 +123,27 @@ def parse_batch_usage(describe: dict) -> BatchUsage:
         dcu_hours=int(milli_dcu) / 3.6e6 if milli_dcu is not None else None,
         shuffle_gb_hours=int(shuffle) / 3600 if shuffle is not None else None,
     )
+
+
+def never_ran(describe: dict) -> bool:
+    """True when the batch ended FAILED or CANCELLED and Dataproc never moved it to RUNNING: it failed or was cancelled in
+    validation/PENDING, so no usage will ever be computed (5b: batch ...1318, stateHistory PENDING only, FAILED after 5 s).
+    False when the history is missing or malformed: then the usage wait runs as before (the conservative default)."""
+    if describe.get("state") not in NEVER_RAN_STATES:
+        return False
+    history = describe.get("stateHistory")
+    if not isinstance(history, list) or not history:
+        return False
+    if not all(isinstance(entry, dict) and isinstance(entry.get("state"), str) for entry in history):
+        return False
+    return not any(entry["state"] == "RUNNING" for entry in history)
+
+
+def permission_hint(state_message: object) -> str | None:
+    """PERMISSION_HINT when Dataproc's stateMessage reports a failed permission pre-check, else None."""
+    return PERMISSION_HINT if isinstance(state_message, str) and PERMISSION_FAILURE_MARKER in state_message else None
+
+
 
 
 def submit_argv(
@@ -209,6 +242,70 @@ def preflight(options: SubmitOptions, ctx: LaunchContext, *, remote: bool) -> tu
     return prereg, record
 
 
+def _describe(ctx: LaunchContext, argv: list[str]) -> dict:
+    found = run_json(ctx.run, argv)  # GcloudError on a non-zero exit, ValueError (JSONDecodeError) on non-JSON stdout
+    if not isinstance(found, dict):
+        # ValueError, not TypeError: malformed API output is handled together with json.JSONDecodeError (a ValueError)
+        raise ValueError(f"gcloud dataproc batches describe returned {type(found).__name__}, not a JSON object")  # noqa: TRY004
+    return found
+
+
+def _finish(
+    ctx: LaunchContext, options: SubmitOptions, batch_id: str, argv: list[str], record: PreregRecord, main: Artifact,
+    zip_: Artifact, describe: dict, skipped_wait: bool, *, interrupted: bool, usage_wait_error: str | None = None,
+) -> int:
+    """Write the batch record, print the summary and, for a non-SUCCEEDED batch, the failure, cleanup and hint lines.
+    Returns EXIT_OK for SUCCEEDED, else EXIT_FAILED."""
+    usage = parse_batch_usage(describe)
+    out = ctx.repo_root / "data" / "pilot" / options.run
+    out.mkdir(parents=True, exist_ok=True)
+    record_json = {
+        "batch_id": batch_id,
+        "argv": argv,
+        "usage": usage.__dict__,
+        "never_ran": skipped_wait,
+        "interrupted": interrupted,
+        "usage_wait_error": usage_wait_error,  # set when a describe failed during the usage wait of the finished batch
+        "describe": describe,
+        "provenance": {"head_commit": record.head_commit, "zip_sha256": zip_.sha256, "main_sha256": main.sha256,
+                       "prereg_commit": record.prereg_commit},
+    }  # fmt: skip
+    (out / f"batch_{batch_id}.json").write_text(json.dumps(record_json, indent=2, default=str) + "\n")
+    if usage.dcu_hours is not None:
+        dcu = f"{usage.dcu_hours:.3f}"
+    elif skipped_wait:
+        dcu = "none (stateHistory never reached RUNNING; if it did run, re-run gcloud dataproc batches describe later)"
+    else:
+        dcu = "not yet populated (re-run gcloud dataproc batches describe later)"
+    ctx.echo(
+        f"Batch {batch_id}: {usage.state} runtime={usage.runtime_version} wall={usage.wall_seconds}s DCU-hours={dcu} "
+        f"shuffle GB-hours={usage.shuffle_gb_hours}\n  recorded in {out / f'batch_{batch_id}.json'}"
+    )
+    if usage.state != "SUCCEEDED":
+        ctx.echo(f"FAILED: {describe.get('stateMessage')}")
+        # always, also for a batch whose stateHistory never reached RUNNING: harmless on an empty prefix
+        ctx.echo(
+            f"  if {gold_prefix(options.run)}/ holds partial output, the owner deletes it: gcloud storage rm -r {gold_prefix(options.run)}/"
+        )
+        hint = permission_hint(describe.get("stateMessage"))
+        if hint is not None:
+            ctx.echo(hint)
+        return EXIT_FAILED
+    return EXIT_OK
+
+
+def recheck_after_wait(options: SubmitOptions, ctx: LaunchContext, record: PreregRecord) -> None:
+    """The IAM wait can last ~24 min: re-run the remote preflight (active batches, VM, quota, gold prefix, prereg/P1) and refuse
+    if HEAD or the prereg commit moved, because the zip, the argv provenance and the batch record were built before the wait."""
+    _, rechecked = preflight(options, ctx, remote=True)
+    if (rechecked.head_commit, rechecked.prereg_commit) != (record.head_commit, record.prereg_commit):
+        raise Refused(
+            f"HEAD or the prereg commit changed during the IAM wait (was {record.head_commit[:12]}/"
+            f"{record.prereg_commit[:12]}, now {rechecked.head_commit[:12]}/{rechecked.prereg_commit[:12]}); "
+            "the zip and provenance were built from the old commit: rerun to build from the new one"
+        )
+
+
 def submit(options: SubmitOptions, ctx: LaunchContext) -> int:
     try:
         prereg, record = preflight(options, ctx, remote=not options.dry_run)
@@ -219,54 +316,73 @@ def submit(options: SubmitOptions, ctx: LaunchContext) -> int:
         argv = submit_argv(batch_id, options.run, prereg, record, main, zip_)
         if options.dry_run:
             ctx.echo("would run: " + " ".join(argv))
+            ctx.echo(
+                f"would check the Admin Activity audit log for IAM changes in the last {IAM_PROPAGATION_SECONDS // 60} "
+                "minutes, then submit"
+            )
             return EXIT_OK
         upload_artifact(ctx.run, zip_)
         upload_artifact(ctx.run, main)
-    except (Refused, GcloudError) as exc:
+        try:
+            if wait_for_iam_propagation(ctx) > 0:
+                recheck_after_wait(options, ctx, record)
+        except KeyboardInterrupt:
+            ctx.echo(
+                "INTERRUPTED during the IAM propagation wait or its re-check: no batch was submitted (the uploaded artifacts "
+                "are reused on the next run)"
+            )
+            return EXIT_INTERRUPTED
+    except (Refused, GcloudError, IamStillChanging) as exc:
         ctx.echo(f"REFUSED: {exc}")
         return EXIT_REFUSED
 
     describe_argv = ["gcloud", "dataproc", "batches", "describe", batch_id, f"--region={REGION}"]
+    describe: dict | None = None
+    skipped_wait = False
+    submitted = False
     try:
         run_ok(ctx.run, argv)
+        submitted = True
         while True:
-            describe = run_json(ctx.run, describe_argv)
+            describe = _describe(ctx, describe_argv)
             if describe.get("state") in TERMINAL_STATES:
                 break
             ctx.sleep(options.poll_seconds)
+        skipped_wait = never_ran(describe)
+        if skipped_wait:
+            ctx.echo(f"Batch {batch_id} ended {describe.get('state')}; stateHistory never reached RUNNING: skipping the usage wait")
         waited = 0.0
-        while not (describe.get("runtimeInfo") or {}).get("approximateUsage") and waited < USAGE_WAIT_SECONDS:
+        while not skipped_wait and not (describe.get("runtimeInfo") or {}).get("approximateUsage") and waited < USAGE_WAIT_SECONDS:
             ctx.sleep(30)
             waited += 30
-            describe = run_json(ctx.run, describe_argv)
+            describe = _describe(ctx, describe_argv)
     except KeyboardInterrupt:
+        if describe is not None and describe.get("state") in TERMINAL_STATES:
+            code = _finish(ctx, options, batch_id, argv, record, main, zip_, describe, skipped_wait, interrupted=True)
+            ctx.echo(
+                f"INTERRUPTED during the usage wait: batch {batch_id} had already ended {describe['state']}; its record was "
+                "written with the usage known so far (re-run gcloud dataproc batches describe later for DCU-hours)"
+            )
+            return code if code == EXIT_FAILED else EXIT_INTERRUPTED
         ctx.echo(f"INTERRUPTED: the batch keeps running (ttl {BATCH_TTL}); cancel it: gcloud dataproc batches cancel {batch_id} --region={REGION}")
         return EXIT_INTERRUPTED
-    except GcloudError as exc:
-        ctx.echo(f"FAILED: {exc}")
+    except (GcloudError, ValueError) as exc:  # ValueError: a describe that is not a JSON object
+        if describe is not None and describe.get("state") in TERMINAL_STATES:
+            ctx.echo(
+                f"WARNING: describe failed during the usage wait of finished batch {batch_id}; recording what is known: "
+                f"{str(exc).splitlines()[-1]}"
+            )
+            return _finish(
+                ctx, options, batch_id, argv, record, main, zip_, describe, skipped_wait, interrupted=False,
+                usage_wait_error=str(exc).splitlines()[-1],
+            )
+        if submitted:  # polling failed: the batch may well still be running
+            ctx.echo(
+                f"FAILED to monitor batch {batch_id}: {str(exc).splitlines()[-1]}\n  it may still be running (ttl {BATCH_TTL}); "
+                f"check it: gcloud dataproc batches describe {batch_id} --region={REGION}; cancel it: "
+                f"gcloud dataproc batches cancel {batch_id} --region={REGION}"
+            )
+            return EXIT_FAILED
+        ctx.echo(f"FAILED: {exc}")  # unchanged: the submit itself failed
         return EXIT_FAILED
-
-    usage = parse_batch_usage(describe)
-    out = ctx.repo_root / "data" / "pilot" / options.run
-    out.mkdir(parents=True, exist_ok=True)
-    record_json = {
-        "batch_id": batch_id,
-        "argv": argv,
-        "usage": usage.__dict__,
-        "describe": describe,
-        "provenance": {"head_commit": record.head_commit, "zip_sha256": zip_.sha256, "main_sha256": main.sha256,
-                       "prereg_commit": record.prereg_commit},
-    }  # fmt: skip
-    (out / f"batch_{batch_id}.json").write_text(json.dumps(record_json, indent=2, default=str) + "\n")
-    dcu = "not yet populated (re-run gcloud dataproc batches describe later)" if usage.dcu_hours is None else f"{usage.dcu_hours:.3f}"
-    ctx.echo(
-        f"Batch {batch_id}: {usage.state} runtime={usage.runtime_version} wall={usage.wall_seconds}s DCU-hours={dcu} "
-        f"shuffle GB-hours={usage.shuffle_gb_hours}\n  recorded in {out / f'batch_{batch_id}.json'}"
-    )
-    if usage.state != "SUCCEEDED":
-        ctx.echo(
-            f"FAILED: {describe.get('stateMessage')}\n  if {gold_prefix(options.run)}/ holds partial output, the owner deletes it: "
-            f"gcloud storage rm -r {gold_prefix(options.run)}/"
-        )
-        return EXIT_FAILED
-    return EXIT_OK
+    return _finish(ctx, options, batch_id, argv, record, main, zip_, describe, skipped_wait, interrupted=False)
