@@ -18,8 +18,7 @@ output "bucket_names" {
     gold    = google_storage_bucket.gold.name
     bundles = google_storage_bucket.bundles.name
     # v2 slice 5
-    artifacts        = google_storage_bucket.artifacts.name
-    dataproc_staging = google_storage_bucket.dataproc_staging.name
+    artifacts = google_storage_bucket.artifacts.name
   }
 }
 

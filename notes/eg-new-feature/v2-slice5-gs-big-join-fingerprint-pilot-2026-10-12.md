@@ -1284,7 +1284,7 @@ below); 130 interrupted (the batch keeps running and is bounded by its 2 h `ttl`
   pinned jar, JDK, `-s` and `-cs` (content-deterministic, measured) plus the generation summary embedded in the gold
   metadata; slice 6 decides whether to exempt `v2/main_200k/` (a lifecycle `matches_prefix` exclusion) for the
   validation period.
-- Removing `roles/editor` from the default compute SA (owner decision; non-additive).
+- Removing `roles/editor` from the default compute SA (owner decision; non-additive). **Done 2026-10-14** (`notes/eg-new-feature/infra-cleanup-editor-and-staging-2026-10-13.md`)
 - GCS connector for local Spark against `gs://` (PRD degraded mode).
 - CLAUDE.md / PRD corrections: "deterministic per seed" needs "and clinician seed"; v1's raw data is not regenerable
   byte-for-byte; `generation.py`'s comment names Synthea v4.0.0 while the jar reports `v3.4.0-18-ga07a65555`.
@@ -1294,7 +1294,7 @@ below); 130 interrupted (the batch keeps running and is bounded by its 2 h `ttl`
 - **Added by 5b (2026-10-12):** (1) slice 6 measures corrected-A7 (iii) on `main_200k` before training (latent
   post-reference STOP risk; see Results > A7); (2) the CI mirror pins pyspark 4.0.1 while Dataproc runtime 3.0 already
   runs Spark 4.0.2 (fingerprints agree; decide whether to bump the mirror; **Done 2026-10-12** (`notes/eg-new-feature/ci-hygiene-lockfiles-2026-10-12.md`): mirror bumped to 4.0.2); (3) remove the unused `dataproc-staging`
-  bucket and `dataproc-runtime`'s two grants on it (a destroy; owner decision); (4) `pipeline-dataproc-runtime` hit a
+  bucket and `dataproc-runtime`'s two grants on it (a destroy; owner decision); **Done 2026-10-14** (`notes/eg-new-feature/infra-cleanup-editor-and-staging-2026-10-13.md`); (4) `pipeline-dataproc-runtime` hit a
   `java.lang.OutOfMemoryError: Java heap space` once (PR #9, passed on rerun): raise the test SparkSession's driver memory
   or split the session; **Done 2026-10-12** (`notes/eg-new-feature/ci-hygiene-lockfiles-2026-10-12.md`): driver heap 2 GiB, measured transient peak, not a leak; (5) `ops/dataproc_batch.py` waits the full 10-minute usage window on a batch that failed before
   running (skip the wait when `stateHistory` never reached RUNNING); **Done 2026-10-12** (`notes/eg-new-feature/ops-submitter-launcher-polish-2026-10-12.md`); (6) the launcher could print an explicit "positive

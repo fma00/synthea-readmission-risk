@@ -120,31 +120,7 @@ resource "google_storage_bucket" "artifacts" {
   depends_on = [google_project_service.enabled]
 }
 
-# Dataproc Serverless staging/temp. Named explicitly: otherwise Dataproc creates its own unmanaged per-location buckets.
-resource "google_storage_bucket" "dataproc_staging" {
-  name                        = "synthea-readmission-risk-dataproc-staging"
-  location                    = upper(var.region)
-  storage_class               = "STANDARD"
-  uniform_bucket_level_access = true
-  public_access_prevention    = "enforced"
-  force_destroy               = true
-  labels = {
-    purpose = "dataproc-staging"
-  }
-
-  lifecycle_rule {
-    condition {
-      age = 30
-    }
-    action {
-      type = "Delete"
-    }
-  }
-
-  soft_delete_policy {
-    retention_duration_seconds = 0
-  }
-
-  depends_on = [google_project_service.enabled]
-}
+# No Dataproc staging bucket: runtime 3.0 rejects the staging_bucket field, and Google's runtime 3.0 page says "3.0+
+# runtimes don't use Cloud Storage staging buckets." The named bucket created in slice 5 was removed on 2026-10-14
+# (notes/eg-new-feature/infra-cleanup-editor-and-staging-2026-10-13.md); no auto-created staging bucket existed then.
 
