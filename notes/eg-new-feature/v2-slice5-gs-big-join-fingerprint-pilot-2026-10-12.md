@@ -1397,7 +1397,7 @@ prereg sections are validated by the strict schema and kept as the parsed mappin
 5b ran on 2026-10-12, laptop-driven, every live step confirmed by the owner. Interim notes were kept in the gitignored
 `data/pilot/pilot_20k/live-checks.md` and are transcribed here. **Verdict: all live checks pass** (A7 after an
 owner-approved criterion correction, below); three defects found on first live contact were fixed through PRs into `v2`
-(#8, #9, #10). **L9 (billing report) is pending** (due about 2026-10-13).
+(#8, #9, #10). **L9 (billing report) passed** on 2026-10-14: CHF 0.0855 in total (Results > L8, L9).
 
 ### L0, L3: preconditions and pre-registration (M6)
 
@@ -1532,8 +1532,11 @@ ALL PASS
 
 - **L8 PASS** (15:19:36Z): no labelled instance or disk, no instance or disk at all in the project, no RUNNING/PENDING
   batch. Batch history: two FAILED in permission validation (no compute), one SUCCEEDED.
-- **L9: PENDING** (owner, Cloud console > Billing > Reports, project `synthea-readmission-risk`, from 2026-10-12).
-  Projection to compare against (list-price assumptions, not quotes): VM 367 s spot n2-standard-32 at ≈ $0.30/h ≈ $0.03;
+- **L9 PASS** (owner, Cloud console > Billing > Reports, project `synthea-readmission-risk`, 2026-10-12; read
+  2026-10-14): Compute Engine CHF 0.0667, Cloud Dataproc CHF 0.0166, Persistent Disk CHF 0.0022; **total CHF 0.0855**,
+  about a tenth of the projection below. Against the line items: the VM is about 2x its estimate (still cents), Dataproc
+  matches, and no Cloud Storage/egress line was reported, so the projected ≈ $0.55 egress of the 4.56 GB raw download
+  did not appear (owner's report as given: three services). Projection it was compared against (list-price assumptions, not quotes): VM 367 s spot n2-standard-32 at ≈ $0.30/h ≈ $0.03;
   Dataproc 0.313 DCU-h at ≈ $0.06/DCU-h ≈ $0.02 plus shuffle storage ≈ cents; raw egress 4.56 GB at ≈ $0.12/GB ≈ $0.55;
   GCS storage cents. **Total ≈ $0.6-1**, inside D6's $1-3 (+$0.5) projection.
 
