@@ -38,6 +38,12 @@ def test_repo_prereg_is_valid():
     assert prereg.populations["pilot_20k"].seed == 17 and prereg.populations["main_200k"].seed == 29
 
 
+def test_split_and_power_sections():
+    prereg = load_prereg(REPO / "prereg.yaml")
+    assert prereg.split is prereg.raw["split"] and prereg.split["test_start_date_resolved"] == "20230101"
+    assert prereg.power is prereg.raw["power"] and prereg.power["min_test_positives"] == 400
+
+
 def test_prereg_matches_code_constants():
     check_prereg_against_code(load_prereg(REPO / "prereg.yaml"))
 

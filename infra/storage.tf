@@ -40,16 +40,29 @@ resource "google_storage_bucket" "raw" {
   storage_class               = "STANDARD"
   uniform_bucket_level_access = true
   public_access_prevention    = "enforced"
-  # Synthea output is regenerable and deterministic per seed.
+  # Synthea output is regenerable: content-deterministic given seed, clinician seed, end date and JVM time zone (slice 5).
   force_destroy = true
   labels = {
     purpose = "raw-synthea"
   }
 
-  # OQ5: raw data is deleted after 90 days (regenerating costs about $1).
+  # OQ5: pilot raw data is deleted after 90 days (regenerating costs about $1). Slice 6a (owner decision 2026-10-14): the
+  # validation population v2/main_200k/ is kept 365 days. Only the run names pilot_20k and main_200k exist
+  # (ops/generation_vm.py TEMPLATE_CLASS_FOR_RUN); an object outside both prefixes would not expire.
   lifecycle_rule {
     condition {
-      age = 90
+      age            = 90
+      matches_prefix = ["v2/pilot_"]
+    }
+    action {
+      type = "Delete"
+    }
+  }
+
+  lifecycle_rule {
+    condition {
+      age            = 365
+      matches_prefix = ["v2/main_"]
     }
     action {
       type = "Delete"

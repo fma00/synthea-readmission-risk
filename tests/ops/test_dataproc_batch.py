@@ -95,6 +95,7 @@ def test_submit_argv(env):
     assert "--spark-master" in job and job[job.index("--spark-master") + 1] == "external"
     provenance = [job[i + 1] for i, a in enumerate(job) if a == "--provenance"]
     assert {p.split("=")[0] for p in provenance} == {"head_commit", "zip_sha256", "main_sha256", "prereg_commit", "batch_id"}
+    assert job[-1] == "--record-runtime"  # slice 6a (FR14), after the provenance pairs
 
 
 def test_job_arguments_come_from_the_prereg():
@@ -312,11 +313,25 @@ def test_p7_refuses_raw_from_other_prereg(env):
     _refused(env, "is not an ancestor of HEAD")
 
 
+def test_p7_refuses_a_malformed_prereg_commit_without_calling_git(env):
+    summary = raw_summary(provenance={"synthea_jar_sha256": PREREG.generation["synthea_jar_sha256"], "prereg_commit": "--output=/tmp/x"})
+    env["fake"].objects[f"{RAW}/generation_summary.json"] = json.dumps(summary).encode()
+    env["ancestors"].add("--output=/tmp/x")
+    _refused(env, "is not an ancestor of HEAD")
+
+
 def test_p7_accepts_raw_from_an_ancestor_prereg(env):
     summary = raw_summary(provenance={"synthea_jar_sha256": PREREG.generation["synthea_jar_sha256"], "prereg_commit": "f" * 40})
     env["fake"].objects[f"{RAW}/generation_summary.json"] = json.dumps(summary).encode()
     env["ancestors"].add("f" * 40)
     assert submit(env) == db.EXIT_OK, text(env)
+
+
+def test_generation_summary_problems_lists_every_mismatch():
+    assert db.generation_summary_problems(raw_summary(), PREREG, RUN) == []
+    summary = raw_summary(seed=18, n_alive_patients=19999, provenance={"synthea_jar_sha256": "0" * 64})
+    problems = db.generation_summary_problems(summary, PREREG, RUN)
+    assert [p.split(":")[0] for p in problems] == ["seed", "provenance.synthea_jar_sha256", "n_alive_patients"]
 
 
 def test_runtime_sa_and_subnet_match_terraform():
