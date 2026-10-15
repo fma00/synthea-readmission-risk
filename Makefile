@@ -42,7 +42,7 @@ define fresh_venv
 case "$(1)" in */*|*..*) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; .venv-*) ;; *) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; esac; rm -rf "$(1)" && $(2) -m venv "$(1)"
 endef
 
-.PHONY: help setup hooks lint test pre-commit train export score score-bq m5-check setup-runtime test-runtime lock-main lock-dev lock-runtime tf-validate spark-zip generate-vm bigjoin-batch
+.PHONY: help setup hooks lint test pre-commit train export score score-bq m5-check setup-runtime test-runtime lock-main lock-dev lock-runtime tf-validate spark-zip generate-vm bigjoin-batch check-population
 .DEFAULT_GOAL := help
 
 help: ## List the targets
@@ -152,3 +152,8 @@ bigjoin-batch: ## LIVE, COSTS MONEY: run the Big Join for RUN on Dataproc Server
 	@test -n "$(RUN)" || { echo "ERROR: set RUN=<a population in prereg.yaml, e.g. pilot_20k>" >&2; exit 1; }
 	@echo "COST: submits a Dataproc Serverless batch (maxExecutors=7, ttl 2h) in synthea-readmission-risk"
 	$(BIN)/python scripts/submit_big_join_batch.py --run $(RUN) $(BATCH_ARGS)
+
+check-population: ## LIVE, read-only: download raw subsets and gold for RUN and run checks C1-C9 (extra flags via CHECK_ARGS)
+	@test -n "$(RUN)" || { echo "ERROR: set RUN=<a population in prereg.yaml, e.g. pilot_20k>" >&2; exit 1; }
+	@echo "READ-ONLY: downloads RUN's raw patients/encounters (main_200k: ~4.5 GB) and gold into data/checks/"
+	$(BIN)/python scripts/check_population.py --run $(RUN) $(CHECK_ARGS)

@@ -68,6 +68,14 @@ class Prereg:
     def label(self) -> dict:
         return self.raw["label"]
 
+    @property
+    def split(self) -> dict:
+        return self.raw["split"]
+
+    @property
+    def power(self) -> dict:
+        return self.raw["power"]
+
 
 # --- schema -------------------------------------------------------------------------------------------------------------
 # A spec is a dict (exact key set, recursed) or a leaf checker (path, value) -> None that raises PreregError.

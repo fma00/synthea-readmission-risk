@@ -5,18 +5,28 @@ All real logic lives in big_join.py, which is fully unit tested; tests/pipeline/
 gs:// code path on file:// URIs. --input-dir and --output-dir accept a local path or a gs:// URI (v2 slice 5, FR11); on Dataproc
 Serverless the batch passes --spark-master external (the runtime supplies the master) and --provenance KEY=VALUE pairs recorded
 as the gold metadata's build_provenance. See notes/eg-new-feature/v2-slice5-gs-big-join-fingerprint-pilot-2026-10-12.md.
+--record-runtime (passed only by the Dataproc submitter, v2 slice 6a, FR14) adds best-effort `runtime.*` facts about the runtime
+to build_provenance: notes/eg-new-feature/v2-slice6a-main-200k-and-checks-2026-10-14.md.
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import os
 import sys
+from collections.abc import Callable
 
 from readmission_risk.pipeline.big_join import BigJoinConfig, build_big_join
 from readmission_risk.pipeline.generation import parse_provenance_args
 from readmission_risk.pipeline.gold_metadata import (
     GOLD_METADATA_FILENAME,
     parse_gold_metadata,
+)
+from readmission_risk.pipeline.runtime_env import (
+    JAR_DIRS_DEFAULT,
+    RUNTIME_KEY_PREFIX,
+    collect_runtime_facts,
 )
 from readmission_risk.pipeline.spark_session import make_spark_session
 from readmission_risk.pipeline.storage import storage_for
@@ -37,12 +47,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"Spark master URL; '{EXTERNAL_MASTER}' sets none (Dataproc Serverless supplies it)",
     )
     parser.add_argument("--provenance", action="append", metavar="KEY=VALUE", help="recorded as build_provenance (repeatable)")
+    parser.add_argument(
+        "--record-runtime",
+        action="store_true",
+        help=f"also record best-effort facts about the runtime as {RUNTIME_KEY_PREFIX}* build_provenance keys (Dataproc)",
+    )
     args = parser.parse_args(argv)
     try:
         args.provenance = parse_provenance_args(args.provenance)
     except ValueError as exc:
         parser.error(str(exc))
+    reserved = sorted(key for key in args.provenance if key.startswith(RUNTIME_KEY_PREFIX))
+    if reserved:
+        parser.error(f"--provenance keys starting with {RUNTIME_KEY_PREFIX!r} are reserved for --record-runtime: {reserved}")
     return args
+
+
+def with_runtime_facts(config: BigJoinConfig, spark, enabled: bool, collect: Callable | None = None) -> BigJoinConfig:
+    """`config` unchanged when not enabled; otherwise a copy whose provenance also holds the runtime facts. `collect` defaults
+    to the module's collect_runtime_facts, looked up at call time (tests replace it)."""
+    if not enabled:
+        return config
+    facts = (collect or collect_runtime_facts)(spark, os.environ, JAR_DIRS_DEFAULT)
+    return dataclasses.replace(config, provenance={**(config.provenance or {}), **facts})
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -64,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
     spark = make_spark_session(master=master)
     try:
         try:
+            config = with_runtime_facts(config, spark, args.record_runtime)
             build_big_join(spark, config)
             storage, output_dir = storage_for(config.output_dir, spark)
             metadata_path = storage.join(output_dir, GOLD_METADATA_FILENAME)

@@ -74,9 +74,9 @@ variable "operator_member" {
 }
 
 variable "generation_templates" {
-  description = "Generation VM template classes -> max run duration in seconds (v2 slice 5: pilot; slice 6 adds main from the pilot's measurement)."
+  description = "Generation VM template classes -> max run duration in seconds (v2 slice 5: pilot; slice 6a: main, 7200 s from the pilot's measurement)."
   type        = map(number)
-  default     = { pilot = 7200 }
+  default     = { pilot = 7200, main = 7200 }
 
   validation {
     condition     = alltrue([for k, v in var.generation_templates : contains(["pilot", "main"], k) && v >= 600 && v <= 86400])

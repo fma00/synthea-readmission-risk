@@ -215,10 +215,20 @@ def test_buckets_enforce_uniform_access_and_public_access_prevention():
         assert "location = upper(var.region)" in body, name
 
 
-def test_raw_bucket_deletes_after_90_days():
+def test_raw_bucket_lifecycle_pilot_90_main_365():
     raw = _collapse(_resource("google_storage_bucket", "raw"))
-    assert 'lifecycle_rule { condition { age = 90 } action { type = "Delete" } }' in raw
+    rules = re.findall(r"lifecycle_rule \{ condition \{ (.*?) \} action \{ (.*?) \} \}", raw)
+    assert rules == [
+        ('age = 90 matches_prefix = ["v2/pilot_"]', 'type = "Delete"'),
+        ('age = 365 matches_prefix = ["v2/main_"]', 'type = "Delete"'),
+    ]
     assert "soft_delete_policy { retention_duration_seconds = 0 }" in raw
+
+
+def test_generation_templates_default_has_pilot_and_main():
+    variables = _collapse(_tf("variables.tf"))
+    assert 'variable "generation_templates" {' in variables
+    assert "default = { pilot = 7200, main = 7200 }" in variables
 
 
 def test_state_and_bundle_buckets_and_monthly_budget_prevent_destroy():

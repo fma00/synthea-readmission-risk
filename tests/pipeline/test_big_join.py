@@ -1454,5 +1454,68 @@ def test_run_big_join_cli_reports_bad_provenance(capsys):
     assert "provenance" in capsys.readouterr().err
 
 
+def test_run_big_join_cli_refuses_runtime_provenance_keys(capsys):
+    cli = _load_script("run_big_join")
+    with pytest.raises(SystemExit) as excinfo:
+        cli.parse_args(["--input-dir", "x", "--output-dir", "y", "--reference-date", "20260916", "--provenance", "runtime.x=y"])
+    assert excinfo.value.code == 2
+    assert "reserved for --record-runtime" in capsys.readouterr().err
+
+
+def test_run_big_join_cli_record_runtime_defaults_off():
+    cli = _load_script("run_big_join")
+    assert cli.parse_args(["--input-dir", "x", "--output-dir", "y", "--reference-date", "20260916"]).record_runtime is False
+
+
+def _cli_config(cli, provenance):
+    return cli.BigJoinConfig(input_dir="in", output_dir="out", reference_date="20261012", provenance=provenance)
+
+
+def test_with_runtime_facts_disabled_returns_the_same_config():
+    cli = _load_script("run_big_join")
+    config = _cli_config(cli, {"head_commit": "abc"})
+    assert cli.with_runtime_facts(config, object(), False, collect=lambda *a: pytest.fail("collector called")) is config
+
+
+def test_with_runtime_facts_enabled_merges_facts():
+    cli = _load_script("run_big_join")
+    config = _cli_config(cli, {"head_commit": "abc"})
+    merged = cli.with_runtime_facts(config, object(), True, collect=lambda *a: {"runtime.python_version": "x"})
+    assert merged.provenance == {"head_commit": "abc", "runtime.python_version": "x"}
+    assert config.provenance == {"head_commit": "abc"}  # the original is untouched
+
+
+@pytest.mark.parametrize("record_runtime", [True, False])
+def test_run_big_join_cli_main_wires_record_runtime(monkeypatch, capsys, record_runtime):
+    """Spark-free: main() hands the merged provenance to build_big_join exactly when --record-runtime is given."""
+    cli = _load_script("run_big_join")
+    calls, captured = [], {}
+
+    class _Session:
+        def stop(self):
+            pass
+
+    def fake_collect(spark, environ, jar_dirs):
+        calls.append(jar_dirs)
+        return {"runtime.python_version": "x"}
+
+    def fake_build(spark, config):
+        captured["provenance"] = dict(config.provenance)
+        raise ValueError("stop")
+
+    monkeypatch.setattr(cli, "make_spark_session", lambda **kwargs: _Session())
+    monkeypatch.setattr(cli, "collect_runtime_facts", fake_collect)
+    monkeypatch.setattr(cli, "build_big_join", fake_build)
+    argv = ["--input-dir", "in", "--output-dir", "out", "--reference-date", "20261012", "--provenance", "head_commit=abc"]
+    code = cli.main(argv + (["--record-runtime"] if record_runtime else []))
+    assert code == 1 and "ERROR: stop" in capsys.readouterr().err
+    if record_runtime:
+        assert captured["provenance"] == {"head_commit": "abc", "runtime.python_version": "x"}
+        assert calls == [cli.JAR_DIRS_DEFAULT]
+    else:
+        assert captured["provenance"] == {"head_commit": "abc"}
+        assert calls == []
+
+
 def test_gold_columns_constant_unchanged():
     assert len(GOLD_TABLE_COLUMNS) == 24

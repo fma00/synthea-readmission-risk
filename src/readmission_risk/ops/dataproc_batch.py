@@ -12,6 +12,7 @@ keeps running, bounded by its ttl; during the usage wait after a SUCCEEDED batch
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -177,12 +178,13 @@ def submit_argv(
         "--readmission-window-days", str(label["readmission_window_days"]),
         "--spark-master", "external",
         *[arg for key, value in provenance.items() for arg in ("--provenance", f"{key}={value}")],
+        "--record-runtime",  # slice 6a (FR14): runtime.* facts in build_provenance
     ]  # fmt: skip
 
 
-def check_raw_matches_prereg(run_: Runner | None, run: str, prereg: Prereg, repo_root: Path, run_git: Callable) -> None:
-    """P7: the raw run was generated with exactly the values in force for this run, from an ancestor of HEAD's prereg."""
-    summary = json.loads(run_ok(run_, ["gcloud", "storage", "cat", f"{raw_prefix(run)}/generation_summary.json"]))
+def generation_summary_problems(summary: dict, prereg: Prereg, run: str) -> list[str]:
+    """The raw run's generation_summary.json against the values prereg.yaml fixes for `run` (P7 here, C3 in
+    ops/population_checks.py): one message per mismatch, [] when it matches."""
     population, generation = prereg.populations[run], prereg.generation
     expected = {
         "seed": population.seed,
@@ -202,8 +204,18 @@ def check_raw_matches_prereg(run_: Runner | None, run: str, prereg: Prereg, repo
     alive = summary.get("n_alive_patients")
     if not isinstance(alive, int) or alive < population.population:
         problems.append(f"n_alive_patients: {alive!r} < {population.population}")
+    return problems
+
+
+def check_raw_matches_prereg(run_: Runner | None, run: str, prereg: Prereg, repo_root: Path, run_git: Callable) -> None:
+    """P7: the raw run was generated with exactly the values in force for this run, from an ancestor of HEAD's prereg."""
+    summary = json.loads(run_ok(run_, ["gcloud", "storage", "cat", f"{raw_prefix(run)}/generation_summary.json"]))
+    problems = generation_summary_problems(summary, prereg, run)
+    provenance = summary.get("provenance") or {}
     prereg_commit = provenance.get("prereg_commit")
-    ancestor = prereg_commit and run_git(
+    # read from GCS: passed to git only as a full lowercase hex sha, never as something git could parse as an option
+    well_formed = isinstance(prereg_commit, str) and re.fullmatch(r"[0-9a-f]{40}", prereg_commit) is not None
+    ancestor = well_formed and run_git(
         ["git", "-C", str(repo_root), "merge-base", "--is-ancestor", prereg_commit, "HEAD"], capture_output=True, check=False
     ).returncode == 0
     if not ancestor:

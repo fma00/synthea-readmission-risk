@@ -45,6 +45,7 @@ class FakeGcloud:
     describe_failures_after: int | None = None  # each batch's describes after this many fail (or return describe_failure_output)
     describe_failure_output: str | None = None  # when set, the failing describe exits 0 with this stdout (malformed output)
     fail_on: tuple[str, ...] = ()  # argv prefixes (joined with spaces) that exit 1 with a generic error
+    size_overrides: dict[str, int] = field(default_factory=dict)  # gs:// uri -> the size `objects describe` reports (slice 6a)
 
     def __call__(self, argv: list[str]) -> subprocess.CompletedProcess:
         self.calls.append(list(argv))
@@ -65,6 +66,12 @@ class FakeGcloud:
             return _ok(self.objects[args[3]].decode()) if args[3] in self.objects else _no_match()
         if args[1:3] == ["storage", "cp"]:
             src, dst = args[3], args[4]
+            if src.startswith("gs://"):  # a download (slice 6a's population checks)
+                if src not in self.objects:
+                    return _no_match()
+                with open(dst, "wb") as f:
+                    f.write(self.objects[src])
+                return _ok()
             if dst in self.objects:
                 return subprocess.CompletedProcess(args=argv, returncode=1, stdout="", stderr="412 Precondition Failed")
             with open(src, "rb") as f:
@@ -74,8 +81,15 @@ class FakeGcloud:
             import base64
             import hashlib
 
+            if args[4] not in self.objects:
+                return _no_match()
             data = self.objects[args[4]]
-            return _ok({"name": args[4], "size": len(data), "md5_hash": base64.b64encode(hashlib.md5(data).digest()).decode()})  # noqa: S324
+            return _ok({
+                "name": args[4],
+                "size": self.size_overrides.get(args[4], len(data)),
+                "md5_hash": base64.b64encode(hashlib.md5(data).digest()).decode(),  # noqa: S324
+                "crc32c_hash": f"fake-crc32c-{len(data)}",
+            })  # fmt: skip
         if head in (("compute", "instances", "list"), ("compute", "disks", "list")):
             store = self.instances if head[1] == "instances" else self.disks
             return _ok([{"name": n, **v} for n, v in store.items() if v.get("labels", {}).get("purpose") == "synthea-generation"])
