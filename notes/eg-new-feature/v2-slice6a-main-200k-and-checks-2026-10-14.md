@@ -456,3 +456,80 @@ text above, all small:
 - Sanity run on real local data (pilot raw, locally built pilot gold, v1): C1-C7b PASS, C8/C9 INFO, exit 0, every figure equal
   to 5b's (18,861 rows / 258 positives, 0 overlap with v1 raw and `full_run_2b`, 1 Death Certification, 1 gold and 0 modeling
   rows with `label_horizon` past the end, 62 test positives).
+
+## Results (live run 2026-10-15; billing read 2026-10-16)
+
+**All live checks pass; 6a is accepted (L5 exit 0).** `main_200k` exists, passes C1-C9 (C8 WARN) and may be used by 6b. Each
+step was confirmed by the owner immediately before it; interim log `data/pilot/main_200k/live-checks.md` (gitignored).
+
+### L0-L2
+
+- **L0 PASS** (v2 at `e0864a5`): no instance, disk or active batch; the raw bucket held only `v2/pilot_20k/` (so D2 left no
+  object without an expiry); no `v2/main_200k/` gold; `prereg.yaml` unchanged (`c9427b2`, `deviations: []`).
+- **L1 PASS:** plan (`-out`) = 1 add (`synthea_generator["main"]`) + 1 in-place (`google_storage_bucket.raw`) + the
+  `~ generation_templates` output, 0 destroy; applied from the saved plan ("1 added, 1 changed, 0 destroyed"); GCP reports
+  exactly two Delete rules, {age 90, `v2/pilot_`} and {age 365, `v2/main_`}; both templates n2-standard-32, SPOT, 7200 s;
+  re-plan "No changes". No IAM change.
+- **L2 PASS** (`make check-population RUN=pilot_20k`, exit 0, 39 s): C1-C7b PASS, C8/C9 INFO; every figure equal to 5b's
+  (fingerprint `b952a3d1…c4d4`, spark 4.0.2, 18,861 rows / 258 positives, 0 overlap with v1 raw (11,490) and `full_run_2b`
+  (5,473), 1 Death Certification after the end, modeling 0 of 15,872 past the end, 62 test positives).
+
+### L3: generation (one spot preemption, then PASS)
+
+- **Attempt 1 FAILED, not a defect:** VM created 10:17:57Z in us-central1-a, positive control OK, then two
+  `compute.instances.preempted` system events (10:19:36Z, 10:20:09Z); the launcher reported "vanished without a marker" (exit 2)
+  and proved nothing remained; no `v2/main_200k/` object had been written. Owner chose a retry in the same zone.
+- **Attempt 2 PASS** (11:04:11Z-11:53:38Z, exit 0): seed 29, clinician seed 29, population 200,000, **alive 200,000**,
+  reference 20261012, end 20261013, UTC, provenance prereg `c9427b2` / `042af605…`, head `e0864a5`, zip `0b297870…`, jar
+  `ed43c20a…`, warnings []. Synthea 2,107 s (projection ≈ 2,050), VM total 2,939 s (projection 45-50 min), peak RSS 93.7 GiB
+  (`-Xmx96g`), raw **45,637,107,482 B** (projection ≈ 45.6 GB) with exactly the 10 tables. Rows: patients 230,430, encounters
+  13,806,716 (10.0× the pilot), observations 174,982,995, procedures 29,697,809, medications 10,987,855, conditions 8,145,177,
+  careplans 765,944. Linear scaling from the pilot held.
+
+### L4: Big Join on Dataproc Serverless 3.0 (PASS)
+
+- Batch `bigjoin-main-200k-202610151236` SUCCEEDED: wall 1,833.7 s, **2.387 DCU-hours**, 174.0 shuffle GB-hours (projection
+  30-60 min, ≈ 3.1, ≈ 230). Gold: 3 Parquet parts (19.33 MiB), `_gold_metadata.json`, zero-byte `_SUCCESS` and folder
+  placeholder, no `_temporary/`.
+- **FR14 runtime facts (first measurement):** `runtime.python_version` 3.12.12, `runtime.java_version` 21.0.12.1,
+  `runtime.jar.spark-4.0-bigquery-0.44.0.jar` (`/usr/lib/spark/jars`), `runtime.jar.gcs-connector-3.1.19.jar` and
+  `gcs-connector.jar` (`/usr/local/share/google/dataproc/lib`), `runtime.env.DATAPROC_WORKLOAD_TYPE` = batch and
+  `DATAPROC_PYPI_REPOSITORY`; top-level `spark_version` 4.0.2. **No `3.0.<n>` sub-version is exposed** (no
+  `DATAPROC_IMAGE_VERSION`, no versioned `spark.dataproc.*` conf). Per Verification > FR14 closure: **FR14 partially met**
+  (connector version recorded; sub-version not). Closing it is an open owner/PRD decision (driver output, a probe batch, or
+  accept "3.0 + Spark 4.0.2").
+
+### L5: checks on main_200k (PASS, exit 0)
+
+`make check-population RUN=main_200k`, 13:26:57Z-13:31:19Z; report `data/checks/main_200k/population_checks.json` (HEAD `e0864a5`,
+tree clean, prereg sha256 `042af605…`). Downloads: encounters 4,581,940,463 B, patients 69,022,042 B, pilot patients 6,893,791 B.
+
+| Check | Status | Values |
+|---|---|---|
+| C1 | PASS | fingerprint `80edd13dcc967d69b6fa4cfa17b4d7fa40188f8e7e17b2031b833332a59c63f3`, v2, spark 4.0.2, label settings = prereg |
+| C2 | PASS | 185,294 rows, 2,825 positives (1.52%), 77,623 planned stays, 24 columns, `payer_ownership` null 0.0 |
+| C3 | PASS | 200,000 alive / 200,000; prereg `c9427b2`; raw summary = gold copy; build prereg = generation prereg |
+| C4 | PASS | 230,430 raw patients, 0 duplicates; 109,210 gold patients, 0 missing from raw |
+| C5 | PASS | overlap 0 with `pilot_20k` raw (23,003), v1 raw (11,490), `full_run_2b` (5,473; all inside v1 raw) |
+| C6 | PASS | 13,806,716 encounters, 0 unparsable START, latest START 2026-10-19T10:57:07Z |
+| C7 | PASS | 17 encounters start on or after 2026-10-13, all posthumous Death Certifications (pilot: 1) |
+| C7b | PASS | modeling rows with `label_horizon` past the end: 0 of 157,827; gold 8, all removed by the censor buffer (`n_dropped_censor_buffer` 8) |
+| C8 | WARN | no `3.0.<n>` sub-version (FR14 partially met, see L4) |
+| C9 | PASS | **`n_test_positive` 616 ≥ 400** (projection 620); test 31,659 rows / 26,266 patients; train 126,168 / 1,926 positives / 82,706 patients; dropped: patient overlap 26,708, label-window purge 751, censor buffer 8, label-horizon purge 0 |
+
+The 5b latent risk (a readmitting stay ending after the reference day) is measured at 200k: 8 gold rows, 0 modeling rows; no
+deviation needed.
+
+### L6-L7
+
+- **L6 PASS:** no instance, disk or RUNNING/PENDING batch afterwards.
+- **L7 PASS** (owner, Cloud console > Billing > Reports, project `synthea-readmission-risk`, 2026-10-15; read 2026-10-16):
+  Compute Engine CHF 0.659, Cloud Dataproc CHF 0.127, Networking CHF 0.0; **total CHF 0.786**, below the ≈ $1-3 projection.
+  Dataproc ≈ CHF 0.053/DCU-hour; the ~4.7 GB of check downloads billed nothing.
+
+### Findings for later slices
+
+- Spot preemption happens (attempt 1, ~90 s after creation); the launcher handles it cleanly, and `--zone` exists for a
+  retry elsewhere.
+- FR14's sub-version is not observable from inside a Serverless 3.0 batch with this collector (see L4).
+- 6b may use only this L5 report from `main_200k` before the gate runs.
