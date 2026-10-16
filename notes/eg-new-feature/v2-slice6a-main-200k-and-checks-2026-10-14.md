@@ -495,9 +495,12 @@ step was confirmed by the owner immediately before it; interim log `data/pilot/m
   `runtime.jar.spark-4.0-bigquery-0.44.0.jar` (`/usr/lib/spark/jars`), `runtime.jar.gcs-connector-3.1.19.jar` and
   `gcs-connector.jar` (`/usr/local/share/google/dataproc/lib`), `runtime.env.DATAPROC_WORKLOAD_TYPE` = batch and
   `DATAPROC_PYPI_REPOSITORY`; top-level `spark_version` 4.0.2. **No `3.0.<n>` sub-version is exposed** (no
-  `DATAPROC_IMAGE_VERSION`, no versioned `spark.dataproc.*` conf). Per Verification > FR14 closure: **FR14 partially met**
-  (connector version recorded; sub-version not). Closing it is an open owner/PRD decision (driver output, a probe batch, or
-  accept "3.0 + Spark 4.0.2").
+  `DATAPROC_IMAGE_VERSION`, no versioned `spark.dataproc.*` conf). Per Verification > FR14 closure this was **partially met**
+  (connector version recorded; sub-version not). **Owner decision 2026-10-16: FR14 is met** by the recorded component
+  versions (Spark 4.0.2, Python 3.12.12, Java 21.0.12.1, BigQuery connector 0.44.0, GCS connector 3.1.19) plus the requested
+  runtime `3.0`: the patch label only names that bundle, the components are what can change the output, and the gold
+  fingerprint guards the data. Not pursued: a log search, a release-notes inference, a probe batch. C8 still WARNs on the
+  missing label (informational; code unchanged).
 
 ### L5: checks on main_200k (PASS, exit 0)
 
@@ -514,7 +517,7 @@ tree clean, prereg sha256 `042af605…`). Downloads: encounters 4,581,940,463 B,
 | C6 | PASS | 13,806,716 encounters, 0 unparsable START, latest START 2026-10-19T10:57:07Z |
 | C7 | PASS | 17 encounters start on or after 2026-10-13, all posthumous Death Certifications (pilot: 1) |
 | C7b | PASS | modeling rows with `label_horizon` past the end: 0 of 157,827; gold 8, all removed by the censor buffer (`n_dropped_censor_buffer` 8) |
-| C8 | WARN | no `3.0.<n>` sub-version (FR14 partially met, see L4) |
+| C8 | WARN | no `3.0.<n>` sub-version label (FR14 met by owner decision 2026-10-16 on the component versions, see L4) |
 | C9 | PASS | **`n_test_positive` 616 ≥ 400** (projection 620); test 31,659 rows / 26,266 patients; train 126,168 / 1,926 positives / 82,706 patients; dropped: patient overlap 26,708, label-window purge 751, censor buffer 8, label-horizon purge 0 |
 
 The 5b latent risk (a readmitting stay ending after the reference day) is measured at 200k: 8 gold rows, 0 modeling rows; no
@@ -531,5 +534,5 @@ deviation needed.
 
 - Spot preemption happens (attempt 1, ~90 s after creation); the launcher handles it cleanly, and `--zone` exists for a
   retry elsewhere.
-- FR14's sub-version is not observable from inside a Serverless 3.0 batch with this collector (see L4).
+- FR14's sub-version label is not observable from inside a Serverless 3.0 batch; the component versions are the record (owner decision 2026-10-16, see L4).
 - 6b may use only this L5 report from `main_200k` before the gate runs.
