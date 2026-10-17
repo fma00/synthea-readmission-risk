@@ -340,6 +340,22 @@ It needs the local v1 raw data (`data/raw/full_run`) and v1 gold (`data/gold/ful
 
 **Lessons from the live run (slice 6a, 2026-10-15; details in the 6a note's Results).** A spot VM can be preempted within minutes of creation (attempt 1: about 90 s): the launcher reports "vanished without a marker", proves nothing remains, and leaves no raw objects, so simply re-run it (same zone worked on the second attempt; `GEN_ARGS="--allow-main-run --zone=us-central1-c"` tries another). The launcher's own lines appear in a redirected log only when it exits (Python block-buffers stdout; `PYTHONUNBUFFERED=1` avoids that); follow progress in Cloud Logging's `google_metadata_script_runner` log instead. Inside a Serverless 3.0 batch the runtime sub-version label is not exposed, so C8 WARNs on it; FR14's record is the component versions instead (owner decision 2026-10-16).
 
+## Promotion gate and frozen-v1 validation (v2 slice 6b)
+
+Design, owner decisions and the live runbook (L0-L7): `notes/eg-new-feature/v2-slice6b-promotion-gate-frozen-v1-2026-10-16.md`. The challenger is the logistic regression trained on `main_200k`'s training partition; it must beat the champion (the frozen v1 logistic regression) **and** the reason-code lookup on ROC-AUC (one-sided: the lower bound of the 95% patient-clustered paired bootstrap CI of the difference is > 0) and be Brier-non-inferior (upper bound <= 0.05 x the champion's Brier). Every number comes from `prereg.yaml`.
+
+```sh
+make prereg-lock LOCK_ARGS="--experiment-name readmission-risk-v2-main200k"   # BEFORE any training on main_200k; commit + PR
+make gate RUN=main_200k GATE_ARGS="--challenger-experiment readmission-risk-v2-main200k --challenger-bundle bundles/<id>"
+make gate RUN=main_200k GATE_ARGS="--challenger-experiment readmission-risk-v2-main200k --challenger-bundle bundles/<id> --negative-control"
+make prereg-phase-b                                                              # AFTER both gate runs; commit + PR
+```
+
+- **Lock:** `scripts/prereg_append.py lock` appends `analysis_lock` (challenger model, experiment name, FR16 rows, negative control, code commit) and refuses a dirty tree, an existing lock, a P1b mismatch, an existing experiment, and any MLflow run (deleted ones included) already trained on `main_200k`'s gold.
+- **Gate:** `scripts/run_promotion_gate.py` verifies the lock (the code at HEAD and the challenger's training code equal the locked commit, which is on a remote branch; the runs started after it), the gold and Phase A (unchanged since generation), the run parameters, the Python and library versions (guard 14's and guard 8's rules), both bundles (scored from their verified bytes), that no other experiment used this gold, and that the frozen v1 models still reproduce their logged v1 metrics on `data/gold/full_run_2b`. It writes `data/gate/<run>/gate_report.json` + `gate_table.md` (`negative_control_*` with `--negative-control`). Exit **0** PROMOTE, **3** REFUSE, **2** could not run; through `make`, any non-zero exit prints `make: *** [gate] Error <n>`, so judge the outcome from the report's `mode`, `decision` and `error`. A successful main or negative-control report is never overwritten. `--rehearsal` goes with `RUN=pilot_20k` and only with it (pipeline sanity only). The gate also refuses when the `analysis_lock` block was edited after its commit, when **anything in `prereg.yaml` changed after the lock commit** (so commit Phase B only after both gate runs), and when a challenger run's commit does not contain the lock commit.
+- **Needs locally:** the `mlflow/` store with `readmission-risk-v1`, the champion copy `bundles/<leaf of deploy/champion.json>` and `data/gold/full_run_2b` (recovery: `gcloud storage cp -r` from the bundle bucket / `gs://synthea-readmission-risk-gold/full_run_2b`), your own ADC, `CLOUDSDK_CORE_PROJECT=synthea-readmission-risk`, and no untracked files.
+- **Phase B:** `scripts/prereg_append.py phase-b` checks both reports, copies them to `notes/eg-new-feature/v2-slice6b-reports/` and appends `phase_b`.
+
 ## Teardown checklist
 
 Order matters: `prevent_destroy` makes `terraform destroy` refuse while the CHF 20 budget, the state bucket or the bundle bucket is still in state, and the bundle bucket's IAM members must go before the bucket. Start with `export CLOUDSDK_CORE_PROJECT=synthea-readmission-risk`.

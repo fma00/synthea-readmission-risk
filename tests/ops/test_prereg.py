@@ -246,3 +246,110 @@ def test_refuses_head_not_on_remote(git_repo):
     git(git_repo, "commit", "-q", "-m", "local only")
     with pytest.raises(PreregError, match="not on any origin"):
         check_prereg_committed(git_repo)
+
+
+# --- v2 slice 6b: the appended analysis_lock and phase_b blocks ----------------------------------------------------------
+
+LOCK = {
+    "locked_on": "2026-10-17",
+    "challenger_model": "logistic_regression",
+    "experiment_name": "readmission-risk-v2-main200k",
+    "frozen_v1_rows": "modeling_rows",
+    "negative_control": "constant_train_prevalence",
+    "code_commit": "a" * 40,
+}
+
+
+def phase_b_block() -> dict:
+    triple = [0.87, 0.85, 0.89]
+    return {
+        "recorded_on": "2026-10-18",
+        "reports": {
+            "gate": {"path": "notes/eg-new-feature/v2-slice6b-reports/gate_report.json", "sha256": "b" * 64},
+            "negative_control": {"path": "notes/eg-new-feature/v2-slice6b-reports/negative_control_report.json", "sha256": "c" * 64},
+        },
+        "decision": "REFUSE",
+        "challenger": {"run_id": "d" * 32, "bundle_id": "e" * 64, "git_commit": "f" * 40},
+        "champion": {"run_id": "1" * 32, "bundle_id": "2" * 64},
+        "rules": [
+            {"name": "roc_auc_vs_champion", "value": 0.01, "threshold": 0.0, "passed": True},
+            {"name": "roc_auc_vs_reason_code_lookup", "value": -0.02, "threshold": 0.0, "passed": False},
+            {"name": "brier_noninferior_vs_champion", "value": None, "threshold": 0.0007, "passed": False},
+        ],
+        "lookup_still_wins": True,
+        "negative_control_decision": "REFUSE",
+        "frozen_v1": {
+            m: {"roc_auc": triple, "brier_score": [0.01, 0.009, 0.011], "observed_expected_ratio": [1.0, None, 1.1], "accepted": True}
+            for m in ("logistic_regression", "xgboost_calibrated")
+        },
+        "power": {"n_test": 31659, "n_test_positive": 616, "min_test_positives": 400},
+    }
+
+
+def with_blocks(lock: dict | None = LOCK, phase_b: dict | None = None) -> dict:
+    d = doc()
+    if lock is not None:
+        d["analysis_lock"] = copy.deepcopy(lock)
+    if phase_b is not None:
+        d["phase_b"] = phase_b
+    return d
+
+
+def test_phase_a_alone_has_no_appended_blocks():
+    prereg = parse(doc())
+    assert prereg.analysis_lock is None and prereg.phase_b is None
+    assert prereg.training["seed"] == 42 and prereg.bootstrap["n_resamples"] == 2000
+    assert prereg.promotion["comparators"] == ["champion", "reason_code_lookup"]
+    assert prereg.frozen_v1["models"] == ["logistic_regression", "xgboost_calibrated"]
+
+
+def test_lock_and_phase_b_parse():
+    prereg = parse(with_blocks(phase_b=phase_b_block()))
+    assert prereg.analysis_lock == LOCK and prereg.phase_b["decision"] == "REFUSE"
+    check_prereg_against_code(prereg)  # P1b reads Phase A keys only
+
+
+def test_appended_text_parses_after_the_committed_bytes():
+    text = TEXT + "\n# lock\n" + yaml.safe_dump({"analysis_lock": LOCK}, sort_keys=False, default_flow_style=False)
+    assert parse_prereg(text).analysis_lock == LOCK
+
+
+@pytest.mark.parametrize(
+    ("build", "message"),
+    [
+        (lambda: with_blocks(lock=None, phase_b=phase_b_block()), "analysis_lock, then optionally phase_b"),
+        (lambda: {"analysis_lock": LOCK, **doc()}, "must come after every Phase A key"),
+        (lambda: with_blocks(lock={**LOCK, "extra": 1}), "unknown key"),
+        (lambda: with_blocks(lock={**LOCK, "code_commit": "A" * 40}), "40 lowercase hex"),
+        (lambda: with_blocks(lock={**LOCK, "challenger_model": "random_forest"}), "challenger_model"),
+        (lambda: with_blocks(lock={**LOCK, "frozen_v1_rows": "test_window"}), "frozen_v1_rows"),
+        (lambda: with_blocks(lock={**LOCK, "negative_control": "shuffled"}), "negative_control"),
+        (lambda: with_blocks(phase_b={**phase_b_block(), "negative_control_decision": "PROMOTE"}), "negative_control_decision"),
+        (lambda: with_blocks(phase_b={**phase_b_block(), "rules": phase_b_block()["rules"][::-1]}), "phase_b.rules"),
+        (lambda: with_blocks(phase_b={**phase_b_block(), "frozen_v1": {"logistic_regression": phase_b_block()["frozen_v1"]["logistic_regression"]}}), "phase_b.frozen_v1"),
+        (lambda: with_blocks(phase_b={**phase_b_block(), "challenger": {"run_id": "x", "bundle_id": "e" * 64, "git_commit": "f" * 40}}), "32 lowercase hex"),
+        (lambda: with_blocks(phase_b={**phase_b_block(), "reports": {**phase_b_block()["reports"], "gate": {"path": "elsewhere.json", "sha256": "b" * 64}}}), "reports.gate.path"),
+    ],
+)
+def test_appended_blocks_are_strict(build, message):
+    with pytest.raises(PreregError, match=re.escape(message)):
+        parse(build())
+
+
+def test_prereg_constant_tuples_match_the_code():
+    from readmission_risk.models.constants import MODEL_NAMES
+    from readmission_risk.models.gate import RULE_NAMES
+    from readmission_risk.ops.prereg import PREREG_MODEL_NAMES, PREREG_RULE_NAMES
+
+    assert PREREG_MODEL_NAMES == MODEL_NAMES and PREREG_RULE_NAMES == RULE_NAMES
+
+
+def test_committed_phase_b_reports_exist_and_match():
+    """Once prereg.yaml carries phase_b, the two committed reports must exist and hash to the recorded values."""
+    import hashlib
+
+    phase_b = load_prereg(REPO / "prereg.yaml").phase_b
+    if phase_b is None:
+        pytest.skip("prereg.yaml has no phase_b yet")
+    for entry in phase_b["reports"].values():
+        assert hashlib.sha256((REPO / entry["path"]).read_bytes()).hexdigest() == entry["sha256"], entry["path"]
