@@ -10,6 +10,23 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
+
+
+def phase_a_text(text: str) -> str:
+    """The Phase A part of a prereg.yaml text: everything before the first appended block (analysis_lock / phase_b, slice 6b)
+    and the comment and blank lines that introduce it. Tests that build their own appended blocks start from this, so they do
+    not depend on whether the repository's prereg.yaml already carries a lock or Phase B."""
+    lines = text.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.startswith(("analysis_lock:", "phase_b:")):
+            j = i
+            while j > 0 and (lines[j - 1].startswith("#") or not lines[j - 1].strip()):
+                j -= 1
+            return "".join(lines[:j])
+    return text
+
+
+PHASE_A_TEXT = phase_a_text((REPO / "prereg.yaml").read_text(encoding="utf-8"))
 _GIT_C = ["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main", "-c", "core.hooksPath=/dev/null"]
 
 

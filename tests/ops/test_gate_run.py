@@ -27,13 +27,12 @@ from readmission_risk.ops import gate_run as gr
 from readmission_risk.ops.prereg import parse_prereg
 from tests.gold_helpers import write_gold_metadata_for_frame
 from tests.models.helpers import make_gold_frame
-from tests.ops.conftest import REPO
+from tests.ops.conftest import PHASE_A_TEXT
 
 PHASE_A_COMMIT = "1" * 40
 CODE_COMMIT = "2" * 40
 LOCK_COMMIT = "3" * 40
 REFERENCE = "20261012"
-PHASE_A_TEXT = (REPO / "prereg.yaml").read_text(encoding="utf-8")
 TEST_RESAMPLES = 50
 LOCK = {
     "locked_on": "2026-10-17",

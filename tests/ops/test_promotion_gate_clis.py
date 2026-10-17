@@ -14,9 +14,9 @@ import pytest
 import yaml
 
 from readmission_risk.ops.prereg import PHASE_B_REPORT_PATHS, parse_prereg
-from tests.ops.conftest import REPO
+from tests.ops.conftest import PHASE_A_TEXT, REPO
 
-PREREG_BYTES = (REPO / "prereg.yaml").read_bytes()
+PREREG_BYTES = PHASE_A_TEXT.encode("utf-8")  # Phase A only: these tests append their own lock and Phase B
 ENV = {"CLOUDSDK_CORE_PROJECT": "synthea-readmission-risk"}
 
 
