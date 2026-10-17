@@ -78,10 +78,12 @@ def store(tmp_path_factory):
     _train(gold_b, tracking, "challenger-test")
     _train(gold_c, tracking, "small-test")
     client = MlflowClient(tracking_uri=mlflow_tracking_uri(tracking))
-    for experiment in ("challenger-test", "small-test"):
-        for name in ("logistic_regression", "xgboost_calibrated"):
-            run_id = resolve_run_id(tracking, experiment, name)
-            client.set_tag(run_id, "git_dirty", "clean")
+    run_ids = {(e, n): resolve_run_id(tracking, e, n) for e in ("frozen-test", "challenger-test", "small-test")
+               for n in ("logistic_regression", "xgboost_calibrated")}  # fmt: skip
+    for (experiment, _), run_id in run_ids.items():
+        # set explicitly so the store does not depend on whether the test checkout is clean (CI) or not (a dev tree)
+        client.set_tag(run_id, "git_dirty", "clean")
+        if experiment != "frozen-test":
             client.set_tag(run_id, "mlflow.source.git.commit", CODE_COMMIT)
     bundles = root / "bundles"
     frozen = export_bundle(tracking, resolve_run_id(tracking, "frozen-test", "logistic_regression"), bundles)
@@ -91,7 +93,7 @@ def store(tmp_path_factory):
     (root / "deploy" / "champion.json").write_text(champion_json(f"gs://fake-bundles/{frozen.bundle_id}", frozen.manifest_sha256))
     first_start = min(gr._read_run(tracking, resolve_run_id(tracking, e, "logistic_regression")).start_time
                       for e in ("challenger-test", "small-test"))  # fmt: skip
-    return {"root": root, "tracking": tracking, "gold_a": gold_a, "gold_b": gold_b, "gold_c": gold_c, "bundles": bundles,
+    return {"run_ids": run_ids, "root": root, "tracking": tracking, "gold_a": gold_a, "gold_b": gold_b, "gold_c": gold_c, "bundles": bundles,
             "challenger": challenger, "small": small, "lock_time": first_start // 1000 - 100}  # fmt: skip
 
 
@@ -280,12 +282,14 @@ def test_metadata_must_match_prereg(store, tmp_path):
     _refused(store, "lookback_years", gold=gold)
 
 
-def _patched_read(monkeypatch, *, params=None, tags=None, metrics=None):
+def _patched_read(monkeypatch, store, *, params=None, tags=None, metrics=None):
+    """Alters what the gate reads for the challenger LR run only (selected by run id, not by tags)."""
     original = gr._read_run
+    target = store["run_ids"][("challenger-test", "logistic_regression")]
 
     def read(tracking_dir, run_id):
         record = original(tracking_dir, run_id)
-        if record.tags.get("model_name") == "logistic_regression" and record.tags.get("git_dirty") == "clean":
+        if run_id == target:
             return dataclasses.replace(
                 record,
                 params={**record.params, **(params or {})},
@@ -298,35 +302,34 @@ def _patched_read(monkeypatch, *, params=None, tags=None, metrics=None):
 
 
 def test_seed_param_must_match_prereg(store, monkeypatch):
-    _patched_read(monkeypatch, params={"seed": "7"})
+    _patched_read(monkeypatch, store, params={"seed": "7"})
     _refused(store, "param seed")
 
 
 def test_dirty_tag_is_refused(store, monkeypatch):
-    _patched_read(monkeypatch, tags={"git_dirty": "dirty"})
-    with pytest.raises(gr.GateRunError):
-        run(store)
+    _patched_read(monkeypatch, store, tags={"git_dirty": "dirty"})
+    _refused(store, "git_dirty is 'dirty'")
 
 
 def test_python_tag_mismatch(store, monkeypatch):
-    _patched_read(monkeypatch, tags={"python_version": "3.12.11"})
+    _patched_read(monkeypatch, store, tags={"python_version": "3.12.11"})
     _refused(store, "guard 14")
 
 
 def test_library_tag_mismatch(store, monkeypatch):
-    _patched_read(monkeypatch, tags={"sklearn_version": "0.0.1"})
+    _patched_read(monkeypatch, store, tags={"sklearn_version": "0.0.1"})
     _refused(store, "sklearn_version")
 
 
 def test_reproduction_mismatch(store, monkeypatch):
-    _patched_read(monkeypatch, metrics={"test_roc_auc": 0.123})
+    _patched_read(monkeypatch, store, metrics={"test_roc_auc": 0.123})
     _refused(store, "does not reproduce")
 
 
 def test_other_gold_fingerprint(store, monkeypatch):
     from readmission_risk.models.constants import ROWHASH_TAG
 
-    _patched_read(monkeypatch, tags={ROWHASH_TAG: "f" * 64})
+    _patched_read(monkeypatch, store, tags={ROWHASH_TAG: "f" * 64})
     _refused(store, "trained on gold")
 
 
@@ -407,10 +410,11 @@ def test_tampered_split_assignment(store, tmp_path):
 
 def test_frozen_reproduction_on_v1_gold(store, monkeypatch):
     original = gr._read_run
+    target = store["run_ids"][("frozen-test", "xgboost_calibrated")]
 
     def read(tracking_dir, run_id):
         record = original(tracking_dir, run_id)
-        if record.tags.get("model_name") == "xgboost_calibrated" and record.tags.get("git_dirty") != "clean":
+        if run_id == target:
             return dataclasses.replace(record, metrics={**record.metrics, "test_brier_score": 0.5})
         return record
 
