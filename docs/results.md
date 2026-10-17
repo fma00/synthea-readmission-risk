@@ -1,6 +1,43 @@
-# Results and caveats (Slice 3, on the slice-2b gold table)
+# Results and caveats
 
 > Terminology: "slice N" names the build stages in the [README Status table](../README.md#status) (1 Synthea generation, 2 PySpark feature join, 2b unplanned label, 3 models, 4 Top-N CLI); "v2 population" is the planned scale-up cohort (see the README Roadmap).
+
+## v2: the pre-registered promotion gate on a fresh 200,000-patient population (slice 6b)
+
+**The reason-code lookup is at least as good as the models.** On `main_200k`, a 200,000-patient population generated with a new seed specifically for validation, a logistic regression retrained at that scale beats the v1 champion but **does not beat the no-model reason-code lookup**, so under the pre-registered rule the champion is not replaced. This is a reported finding, not a failure (`prereg.yaml`, `outcomes.lookup_still_wins`).
+
+Every analysis choice was fixed before any model saw this population: the rules and their thresholds in `prereg.yaml` Phase A (committed before the population was generated), and the challenger (logistic regression), the rows for the external validation and the code in the `analysis_lock` block (committed before training). The gate refuses to run if any of them changed. Training set: 126,168 rows / 1,926 positives (1.53%); test window (2023-01-01 onward, patient-disjoint): 31,659 rows / **616 positives** (1.95%), above the pre-registered floor of 400. Intervals are 95% patient-clustered paired percentile bootstrap intervals (2,000 resamples, seed 20261012). The results are recorded line by line in `prereg.yaml` Phase B and in the committed gate reports ([notes/eg-new-feature/v2-slice6b-reports/](../notes/eg-new-feature/v2-slice6b-reports/)); design and runbook: [notes/eg-new-feature/v2-slice6b-promotion-gate-frozen-v1-2026-10-16.md](../notes/eg-new-feature/v2-slice6b-promotion-gate-frozen-v1-2026-10-16.md).
+
+| Test window (31,659 rows, 616 positives) | ROC-AUC | Brier score | Observed / expected |
+|---|---|---|---|
+| Challenger: logistic regression trained on `main_200k` | 0.872 | 0.0182 | 1.01 |
+| Champion: v1 logistic regression (trained on the 10,000-patient v1 population) | 0.863 | 0.0181 | 1.11 |
+| Reason-code lookup (no model, fitted on the same training rows) | 0.871 | 0.0184 | 0.96 |
+
+| Pre-registered rule | Paired 95% interval of the difference | Threshold | Result |
+|---|---|---|---|
+| ROC-AUC: challenger − champion | [+0.0012, +0.0172] | lower bound > 0 | pass |
+| ROC-AUC: challenger − lookup | [−0.0033, +0.0060] | lower bound > 0 | **fail** |
+| Brier: challenger − champion | upper bound +0.0003 | ≤ 0.05 × champion Brier = 0.0009 | pass |
+
+- **The AUC rule is one-sided.** "Beats" means the lower bound of the interval of the difference is above 0. Against the champion it is (+0.0012); against the lookup the interval includes 0, so the challenger is not shown to rank better than the lookup. This is what the v1 results below anticipated: more data narrowed the interval of the logistic regression's ROC-AUC difference to the lookup from 0.067 wide (v1, [−0.036, +0.031]) to 0.009 (v2) and let the model catch up to the lookup, but not pass it.
+- **Calibration differs more than ranking.** On this window the champion under-predicts by about 11% (O/E 1.11, interval of challenger − champion O/E [−0.121, −0.089]), the retrained challenger is close to 1 (1.01) and slightly better calibrated in Brier than the lookup (challenger − lookup Brier [−0.0003, −0.0001]). Calibration is not one of the promotion rules, so this does not change the decision.
+- **The calibrated XGBoost was trained and reported but, by pre-registration, never gated** (point estimates on the same window: ROC-AUC 0.881, Brier 0.0185, O/E 1.36). Its higher ROC-AUC is not evidence for promotion: choosing between the two models after seeing these numbers is exactly the selection the lock prevents. It is at most a hypothesis for a separately pre-registered study.
+- **A deliberately bad challenger is refused.** Replacing the challenger with a constant (the training prevalence) fails all three rules (AUC lower bounds around −0.38), so the gate does refuse an uninformative model.
+
+**Frozen-v1 external validation** (the v1 models, unchanged, on all 157,827 modeling rows of `main_200k`, 2,542 positives; the v1 models never saw any of these patients). Pre-registered acceptance: ROC-AUC interval lower bound ≥ 0.80, and an O/E interval overlapping [0.80, 1.25].
+
+| v1 model | ROC-AUC | Brier score | Observed / expected | Accepted |
+|---|---|---|---|---|
+| Logistic regression | 0.905 [0.899, 0.911] | 0.0135 [0.0129, 0.0140] | 1.03 [0.99, 1.07] | yes |
+| Calibrated XGBoost | 0.855 [0.849, 0.862] | 0.0155 [0.0150, 0.0161] | 1.09 [1.05, 1.14] | yes |
+
+These rows span all years, not only the test window, so these figures are not comparable with the test-window table above.
+
+- **Process note.** After the lock and before the gate ran, the training log's test-window metrics were printed into the working session by mistake. Nothing that could have been influenced by them was still open: the challenger, rules, rows and code were locked and merged before training, and the gate refuses any later change.
+- Like v1, this is synthetic data: a demonstration of the pipeline and the evaluation method, not a clinically validated result (see the README's "About the data").
+
+## v1: slice 3 on the slice-2b gold table (a development set)
 
 Measured on `data/gold/full_run_2b` (10,000-patient Synthea population; **unplanned**-readmission label from slice 2b — see [notes/eg-new-feature/readmission-label-planned-exclusion-2026-09-20.md](../notes/eg-new-feature/readmission-label-planned-exclusion-2026-09-20.md); `--test-start-date 20230101`): 6,391 training rows / 96 positives (1.50%), 1,539 test rows / **41 positives (2.66%)**; 95% patient-clustered bootstrap intervals in brackets. Every figure here (and the recipe to re-derive it) is in [notes/eg-new-feature/readmission-label-planned-exclusion-2026-09-20-measurements.md](../notes/eg-new-feature/readmission-label-planned-exclusion-2026-09-20-measurements.md).
 

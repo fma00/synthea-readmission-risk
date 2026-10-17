@@ -2,15 +2,15 @@
 
 [![CI](https://github.com/fma00/synthea-readmission-risk/actions/workflows/ci.yml/badge.svg)](https://github.com/fma00/synthea-readmission-risk/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) [![Python 3.14](https://img.shields.io/badge/python-3.14-blue.svg)](.python-version)
 
-An end-to-end, tested pipeline for predicting **unplanned** 30-day hospital readmission from [Synthea](https://synthea.mitre.org/)-generated synthetic patient data. A PySpark job joins ten Synthea tables into a per-encounter feature table and an explicit planned-versus-unplanned readmission label; a leakage-controlled training pipeline — chronological, patient-disjoint split with a censoring buffer and a label-window purge — fits a logistic regression baseline and a calibrated XGBoost challenger, both tracked in MLflow; and a Top-N triage CLI ranks held-out discharges behind a set of provenance guards that refuse any model/data mismatch.
+An end-to-end, tested pipeline for predicting **unplanned** 30-day hospital readmission from [Synthea](https://synthea.mitre.org/)-generated synthetic patient data. A PySpark job joins ten Synthea tables into a per-encounter feature table and an explicit planned-versus-unplanned readmission label; a leakage-controlled training pipeline — chronological, patient-disjoint split with a censoring buffer and a label-window purge — fits a logistic regression baseline and a calibrated XGBoost challenger, both tracked in MLflow; and a Top-N triage CLI ranks held-out discharges behind a set of provenance guards that refuse any model/data mismatch. On the `v2` branch the same feature job runs on Dataproc Serverless over a 200,000-patient population, and a pre-registered promotion gate decides whether a retrained model replaces the champion.
 
 > [!NOTE]
 > **Work in progress.**
 >
-> - **Built:** local pipeline, models and demo scorer, unit-tested.
-> - **Not built yet:** cloud (GCP / BigQuery), scale-up and dashboard — see the [Roadmap](#roadmap).
-> - **Limits:** synthetic data, small sample, development-set numbers — see [Limitations](#limitations).
-> - **Release:** the [latest release](https://github.com/fma00/synthea-readmission-risk/releases/latest) is the local-only v1 milestone (everything marked Done below); the Planned items are v2 work, developed on the `v2` branch.
+> - **Built:** the local pipeline, models and demo scorer (v1); on the `v2` branch also the cloud setup on GCP (Terraform, keyless CI identity, Dataproc Serverless, scoring into BigQuery), the 200,000-patient scale-up and a pre-registered promotion gate.
+> - **Not built yet:** the dashboard, scheduled monitoring and the BigQuery gold table — see the [Roadmap](#roadmap).
+> - **Limits:** synthetic data; the v1 numbers are a development set; on the v2 validation the models do not beat a no-model lookup — see [Limitations](#limitations).
+> - **Release:** the [latest release](https://github.com/fma00/synthea-readmission-risk/releases/latest) is the local-only v1 milestone; the work marked v2 below is on the `v2` branch and not yet released.
 > - **Read next:** [Status](#status) · [Results so far](#results-so-far) · [Limitations](#limitations) · [Roadmap](#roadmap)
 
 ## Status
@@ -22,13 +22,14 @@ An end-to-end, tested pipeline for predicting **unplanned** 30-day hospital read
 | 2b | [Unplanned-readmission label and gold-table provenance](notes/eg-new-feature/readmission-label-planned-exclusion-2026-09-20.md) | Done |
 | 3 | [Logistic regression and calibrated XGBoost, tracked in MLflow](notes/eg-new-feature/model-training-2026-09-19.md) ([results](docs/results.md)) | Done |
 | 4 | [Top-N triage CLI (a demo over held-out rows)](notes/eg-new-feature/batch-scoring-cli-2026-09-20.md) ([usage](docs/scoring.md)) | Done |
-| next | **Cloud**: GCS, Dataproc Serverless, BigQuery gold table | Planned (not started) |
-| next | **Scale-up**: 100k-200k patients with a fresh seed | Planned (not started) |
+| v2 | **Cloud**: Terraform-managed GCS and IAM, keyless GitHub Actions identity, Big Join on Dataproc Serverless, scoring into BigQuery with data tests ([setup](docs/setup.md)) | Done on `v2` (unreleased); BigQuery gold table and scheduled runs planned |
+| v2 | **Scale-up**: 200,000 patients with a fresh seed, pre-registered, and a promotion gate ([results](docs/results.md)) | Done on `v2` (unreleased) |
+| next | **Monitoring**: weekly delayed-label calibration check and run ledger | Planned (not started) |
 | next | **Dashboard**: Streamlit on BigQuery | Planned (not started) |
 
 ## 60-second tour
 
-For ML and MLOps reviewers: seven stops, each a file to open and what to look for in it.
+An MLOps overview in eight stops: each a file to open and what to look for in it.
 
 1. **The label:** [`flag_inpatient_stays` and `build_index_encounters`](src/readmission_risk/pipeline/big_join.py) define an *unplanned* 30-day readmission: planned chemotherapy/radiation stays and overlapping surgical episodes do not count, and a stay whose outcome window cannot be observed is dropped rather than labelled 0.
 2. **Provenance:** [gold_metadata.py](src/readmission_risk/pipeline/gold_metadata.py) writes `_gold_metadata.json` next to every gold table; training refuses a table without it or with mismatched settings.
@@ -36,28 +37,43 @@ For ML and MLOps reviewers: seven stops, each a file to open and what to look fo
 4. **Honest evaluation:** [evaluate.py](src/readmission_risk/models/evaluate.py) and [baselines.py](src/readmission_risk/models/baselines.py) report calibration (Brier score, ECE, reliability curve) next to AUC, with patient-clustered bootstrap intervals and a no-model lookup that the models do not beat ([results](docs/results.md)).
 5. **Guarded scoring:** the scorer reads an immutable, content-addressed model bundle, never MLflow; [`validate_bundle`](src/readmission_risk/scoring/bundle_guard.py) verifies its hashes and runs 14 checks that refuse a mismatched model/data pair before anything is unpickled; [a real refusal](#what-a-refusal-looks-like) is shown below.
 6. **Supply chain:** [requirements.txt](requirements.txt) is hash-locked, with a drift test against its `.in` file, and [ci.yml](.github/workflows/ci.yml) uses SHA-pinned actions, a zizmor audit, Python 3.14 tests plus a Dataproc-runtime job (Python 3.12, PySpark 4.0.2, Java 21) for the pipeline tests; local pre-commit hooks (ruff, zizmor, terraform fmt) mirror the lint.
-7. **How it was designed:** [notes/](notes/) holds one design document per slice, each stress-tested by independent fresh-context reviewers; where a review did not close, the note says so (see [How this was built](#how-this-was-built)).
+7. **Pre-registered promotion (v2):** [prereg.yaml](prereg.yaml) fixed the rules before the validation population existed, an appended analysis lock fixed the challenger and the code before training, and [gate_run.py](src/readmission_risk/ops/gate_run.py) refuses to decide unless every one of them still holds; [gate.py](src/readmission_risk/models/gate.py) holds the rules.
+8. **How it was designed:** [notes/](notes/) holds one design document per slice, each stress-tested by independent fresh-context reviewers; where a review did not close, the note says so (see [How this was built](#how-this-was-built)).
 
 ## Architecture
 
-Full architecture rationale lives in [notes/prds/big-join-architecture-lock-in-2026-09-15.md](notes/prds/big-join-architecture-lock-in-2026-09-15.md); the standing architecture summary is in [CLAUDE.md](CLAUDE.md#architecture).
+Full architecture rationale lives in [notes/prds/big-join-architecture-lock-in-2026-09-15.md](notes/prds/big-join-architecture-lock-in-2026-09-15.md) (v1) and [notes/prds/v2-mlops-keyless-scheduled-scale-up-2026-10-09.md](notes/prds/v2-mlops-keyless-scheduled-scale-up-2026-10-09.md) (v2); the standing architecture summary is in [CLAUDE.md](CLAUDE.md#architecture).
 
 ```mermaid
 flowchart LR
-  A["Synthea generator"] --> B["PySpark feature join (local)"]
+  A["Synthea generator (local, or a spot VM)"] --> B["PySpark feature join (local, or Dataproc Serverless on GCS)"]
   B --> C["Gold table (Parquet + metadata)"]
   C --> D["LR + XGBoost training, MLflow (local)"]
-  D --> E["Top-N triage CLI (demo)"]
-  B -.-> F["Dataproc Serverless + GCS (planned)"]
-  F -.-> G["BigQuery gold table (planned)"]
-  G -.-> H["Streamlit dashboard (planned)"]
+  D --> P["Pre-registered promotion gate"]
+  P --> E["Model bundle + champion pointer"]
+  E --> S["Top-N scorer (demo) -> BigQuery predictions"]
+  C -.-> G["BigQuery gold table (planned)"]
+  S -.-> M["Scheduled monitoring (planned)"]
+  S -.-> H["Streamlit dashboard (planned)"]
   classDef planned stroke-dasharray:5 5
-  class F,G,H planned
+  class G,M,H planned
 ```
 
-Solid boxes are built; dashed boxes are planned.
+Solid boxes are built (the cloud parts on the `v2` branch, run from the operator's laptop); dashed boxes are planned.
 
 ## Results so far
+
+**v2, on a fresh 200,000-patient population: the reason-code lookup is at least as good as the models.** A logistic regression retrained at this scale beats the v1 champion on ROC-AUC but does not beat the no-model reason-code lookup, so the pre-registered promotion gate refuses and the champion stays. The rules, thresholds, challenger and code were committed before any model saw this population.
+
+| Test window (31,659 rows, 616 positives) | ROC-AUC | Brier score | Observed / expected |
+|---|---|---|---|
+| Challenger: logistic regression trained on `main_200k` | 0.872 | 0.0182 | 1.01 |
+| Champion: v1 logistic regression (trained on the 10,000-patient v1 population) | 0.863 | 0.0181 | 1.11 |
+| Reason-code lookup (no model, fitted on the same training rows) | 0.871 | 0.0184 | 0.96 |
+
+Paired 95% intervals of the ROC-AUC difference (one-sided rule: the lower bound must be above 0): challenger − champion [+0.0012, +0.0172], challenger − lookup [−0.0033, +0.0060]. The v1 models, evaluated unchanged on the new population, meet their pre-registered acceptance criteria. Details, the frozen-v1 external validation and the caveats: [docs/results.md](docs/results.md).
+
+### v1, on the 10,000-patient reference population (a development set)
 
 Measured on the 10,000-patient Synthea reference population with the unplanned-readmission label: 6,391 training rows (96 positives) and 1,539 held-out test rows (**41 positives**); 95% patient-clustered bootstrap intervals are in the full write-up.
 
@@ -78,8 +94,8 @@ Measured on the 10,000-patient Synthea reference population with the unplanned-r
 - **The models barely beat the base rate.** Brier skill scores against the training prevalence are 0.022 (logistic regression) and 0.014 (XGBoost), and XGBoost is worse than logistic regression on ROC-AUC (paired −0.047 [−0.092, −0.010]).
 - **Small sample.** 41 test positives is below the trainer's own 50-positive reliability threshold, so `train_models.py` prints an "unreliable" warning on this run by design, and the intervals are wide.
 - **The positive rate shifts** between train and test (1.50% vs 2.66%), and both models under-predict on average.
-- **Not a virgin holdout.** The cutoff date, the features and the label rule were chosen while looking at this test window, so read these as development-set numbers; the untouched validation is the planned larger population.
-- **More data mainly buys precision.** With the larger population an ROC-AUC of about 0.87–0.90 is *expected*, consistent with Synthea generating these events from scripted pathways (a projection, not a measurement).
+- **Not a virgin holdout.** The cutoff date, the features and the label rule were chosen while looking at this test window, so read these as development-set numbers; the untouched validation is the v2 result above.
+- **More data mainly buys precision.** With the larger population an ROC-AUC of about 0.87–0.90 was *expected*, consistent with Synthea generating these events from scripted pathways; v2 measured 0.872 for the retrained model and 0.871 for the lookup.
 
 Full tables, paired intervals, how the label was built and the remaining caveats: [docs/results.md](docs/results.md).
 
@@ -114,13 +130,13 @@ In the same way, the integrity checks and 14 guards in [`validate_bundle`](src/r
 ## Limitations
 
 - Synthetic data, not clinical evidence — see [About the data](#about-the-data).
-- Weak, small-sample result: 41 test positives and wide intervals — [details](docs/results.md).
-- Not a virgin holdout: design choices were made while looking at the test window — [details](docs/results.md).
+- The models do not beat a no-model reason-code lookup: on the pre-registered v2 validation (616 test positives) the retrained model is not shown to rank better than it — [details](docs/results.md).
+- The v1 numbers are a small-sample development set (41 test positives; design choices were made while looking at that test window) — [details](docs/results.md).
 - The label/test leakage margin is enforced: training rows whose label depends on a record dated on or after the test start are purged (0 rows on this data; the closest record is about 6.9 days before it) — [details](docs/results.md).
 - The label is still reason-concentrated (one admission reason dominates the test positives) — [details](docs/results.md).
 - The scorer is a demo over held-out rows, not as-of scoring of new discharges — [details](docs/scoring.md).
-- Local only: no cloud deployment yet — see the [Roadmap](#roadmap).
-- One seed, one population, one label definition — see the [Roadmap](#roadmap).
+- The cloud steps run from the operator's laptop; scheduled runs, monitoring and the dashboard are not built yet — see the [Roadmap](#roadmap).
+- One label definition, and two Synthea populations (v1 and the v2 validation) — see the [Roadmap](#roadmap).
 
 ## About the data
 
@@ -128,12 +144,13 @@ In the same way, the integrity checks and 14 guards in [`validate_bundle`](src/r
 
 ## Roadmap
 
-These items make up v2 (the `v2` branch); the v1 releases (v1.0, then v1.1 with the post-release hardening) are the local-only milestone. Ordered by intent, not by date, and in dependency order: the larger run (item 2) targets the cloud setup of item 1 (Dataproc Serverless on GCS), and the billing alert comes first. For scale: the PySpark join reads about a third of the raw export (2.3 GB of 7.5 GB per 10,000 patients), so roughly 23-46 GB at 100k-200k patients (arithmetic, not a measurement).
+These items make up v2 (the `v2` branch, not yet released); the v1 releases (v1.0, then v1.1 with the post-release hardening) are the local-only milestone. Full requirements: the [v2 PRD](notes/prds/v2-mlops-keyless-scheduled-scale-up-2026-10-09.md).
 
-1. **Cloud (not started):** the enabling infrastructure: a ~$20/month billing alert first, then Dataproc Serverless on GCS and the BigQuery gold table via the direct write method (Storage Write API).
-2. **Scale-up (not started):** 100k-200k patients, run on the cloud setup of item 1, with a NEW seed and fresh `reference_date` as the untouched validation, sized for power (about 1,000-2,000 train / 400-800 test positives; arithmetic, not a measurement); the same PySpark job with only the config-driven base path changed. This raises the architecture PRD's original 50k-100k figure so the test window holds enough positives (see [docs/results.md](docs/results.md)).
-3. **Dashboard (not started):** a Streamlit dashboard reading BigQuery (Streamlit Community Cloud first, Cloud Run later).
-4. **Smaller follow-ups:** label v2 after scale-up, as-of scoring, hyperparameter tuning, feature attribution, hosted MLflow, dbt once there is more than one BigQuery table.
+1. **Cloud (done on `v2`, except two parts):** billing alerts, Terraform-managed GCS buckets and service accounts, a keyless GitHub Actions identity (Workload Identity Federation), the PySpark job on Dataproc Serverless reading and writing GCS, and scoring into BigQuery behind SQL data tests. Still planned: the BigQuery gold table via the direct write method (Storage Write API), and the first workflow runs from `main` after the v2 merge.
+2. **Scale-up (done on `v2`):** a 200,000-patient population with a new seed and fresh `reference_date` as the untouched validation, pre-registered before it was generated (616 test positives); a retrained model went through a pre-registered promotion gate and was refused because it does not beat the reason-code lookup ([results](docs/results.md)).
+3. **Monitoring (not started):** a scheduled weekly check of observed-versus-expected calibration on matured labels, with a run ledger.
+4. **Dashboard (not started):** a Streamlit dashboard reading BigQuery (Streamlit Community Cloud first, Cloud Run later).
+5. **Smaller follow-ups:** a portable (non-pickle) export of the v1 models, label v2, as-of scoring, hyperparameter tuning, feature attribution, hosted MLflow.
 
 ## What this shows
 
@@ -142,6 +159,7 @@ These items make up v2 (the `v2` branch); the v1 releases (v1.0, then v1.1 with 
 | Data engineering | Schema-first PySpark join (hand-declared `StructType`, no `inferSchema`), planned-stay and continuation logic, gold-table provenance metadata, hash-pinned lockfiles, CI | [big_join.py](src/readmission_risk/pipeline/big_join.py), [schemas.py](src/readmission_risk/pipeline/schemas.py), [gold_metadata.py](src/readmission_risk/pipeline/gold_metadata.py), [requirements.txt](requirements.txt), [ci.yml](.github/workflows/ci.yml) |
 | Data science | Chronological, patient-disjoint split with a censoring buffer and a label-window purge; label-definition work; calibration metrics; clustered-bootstrap intervals; a no-model baseline; an honest weak result | [split.py](src/readmission_risk/models/split.py), [evaluate.py](src/readmission_risk/models/evaluate.py), [baselines.py](src/readmission_risk/models/baselines.py), [results](docs/results.md) |
 | ML engineering | MLflow tracking; manifest-checked model bundles (14 guards + integrity checks) and a champion pointer; idempotent, partitioned batch scoring with an injectable writer | [tracking.py](src/readmission_risk/models/tracking.py), [bundle_export.py](src/readmission_risk/models/bundle_export.py), [bundle_guard.py](src/readmission_risk/scoring/bundle_guard.py), [pipeline.py](src/readmission_risk/scoring/pipeline.py), [score_discharges.py](scripts/score_discharges.py) |
+| MLOps (v2) | Terraform with least-privilege service accounts and keyless CI identity; Dataproc Serverless runs; write-audit-publish into BigQuery with SQL data tests; pre-registration, an analysis lock and a promotion gate that refuses on any drift | [infra/](infra/), [score.yml](.github/workflows/score.yml), [warehouse/](src/readmission_risk/warehouse/), [prereg.yaml](prereg.yaml), [gate_run.py](src/readmission_risk/ops/gate_run.py) |
 
 ## Quick start
 
@@ -160,7 +178,7 @@ Needs a JDK 17+ on `PATH` (PySpark local mode) and, on macOS, `brew install libo
 
 Developed with Claude Code (Anthropic's coding agent) under a design-first workflow inspired by [Elephants, Goldfish, and the New Golden Age of Software Engineering](https://drensin.medium.com/elephants-goldfish-and-the-new-golden-age-of-software-engineering-c33641a48874). Claude drafted the code, tests and documents; the project owner set the goals and made the decisions recorded in `notes/`. Designs and diffs went through independent fresh-context reviewer passes; where a pass did not close, the notes say so and record the owner's decision to proceed. Commits carry a `Co-Authored-By` trailer.
 
-The workflow lives in [.claude/commands/](.claude/commands/) and [CLAUDE.md](CLAUDE.md). Four notes show the trail: the [architecture PRD](notes/prds/big-join-architecture-lock-in-2026-09-15.md), the [model-training design](notes/eg-new-feature/model-training-2026-09-19.md), the [label design](notes/eg-new-feature/readmission-label-planned-exclusion-2026-09-20.md) and the [batch-scoring design](notes/eg-new-feature/batch-scoring-cli-2026-09-20.md).
+The workflow lives in [.claude/commands/](.claude/commands/) and [CLAUDE.md](CLAUDE.md). Four notes show the trail: the [architecture PRD](notes/prds/big-join-architecture-lock-in-2026-09-15.md), the [model-training design](notes/eg-new-feature/model-training-2026-09-19.md), the [label design](notes/eg-new-feature/readmission-label-planned-exclusion-2026-09-20.md) and the [batch-scoring design](notes/eg-new-feature/batch-scoring-cli-2026-09-20.md); for v2, the [v2 PRD](notes/prds/v2-mlops-keyless-scheduled-scale-up-2026-10-09.md) and the [promotion-gate design](notes/eg-new-feature/v2-slice6b-promotion-gate-frozen-v1-2026-10-16.md).
 
 Commands to regenerate the data and re-derive the reported numbers are given in [docs/setup.md](docs/setup.md), [docs/results.md](docs/results.md) and the [measurements note](notes/eg-new-feature/readmission-label-planned-exclusion-2026-09-20-measurements.md); a bit-exact regeneration from the same seed has not been verified, and the MLflow store is local and not published. Notes are dated historical records and may cite the README as it was at the time.
 
@@ -172,6 +190,9 @@ src/readmission_risk/models/    # split, features, training, evaluation, MLflow 
 src/readmission_risk/scoring/   # Top-N triage scorer (pure functions)
 src/readmission_risk/reporting/  # README figure and sample table, built from MLflow runs and a predictions file
 src/readmission_risk/bundles/   # model bundle format: manifest, local store, champion pointer
+src/readmission_risk/warehouse/ # BigQuery: staging, SQL data tests, publish into serving tables
+src/readmission_risk/ops/       # laptop CLIs for the cloud runs, population checks, the promotion gate
+prereg.yaml                     # the pre-registration: rules (Phase A), analysis lock, results (Phase B)
 deploy/champion.json            # the live model bundle (promotion = a PR editing it)
 scripts/                        # command-line entry points
 tests/                          # pytest suite (tests/test_docs.py covers these docs)
