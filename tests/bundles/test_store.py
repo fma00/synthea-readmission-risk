@@ -199,3 +199,61 @@ def test_missing_bundle_and_non_directory(tmp_path):
     file.write_text("x")
     with pytest.raises(ValueError, match="is not a directory"):
         list_bundle_entries(str(file))
+
+
+# --------------------------------------------------------------------------------------------- schema 2 (v2 slice 6c)
+from readmission_risk.bundles.manifest import (
+    TOP_LEVEL_KEYS,
+)
+from readmission_risk.bundles.store import printable_bundle_uri
+
+S2_FILES = {**FILES, "portable.json": b"{}\n", "portable_reference.csv": b"kind\n", "portable_fold_0.ubj": b"b0", "portable_fold_1.ubj": b"b1"}
+
+
+def _schema2_manifest(files=S2_FILES, boosters=("portable_fold_0.ubj", "portable_fold_1.ubj")) -> dict:
+    manifest = dict.fromkeys(TOP_LEVEL_KEYS)
+    manifest.update(
+        schema_version=2,
+        files={n: file_entry(n, d) for n, d in files.items()},
+        portable={
+            "format_version": 1, "params_file": "portable.json", "reference_file": "portable_reference.csv",
+            "booster_files": list(boosters), "parity": {"rows": 1, "probe_rows": 0, "max_abs_diff": 0.0},
+            "writer_versions": dict.fromkeys(("numpy", "scipy", "xgboost", "python", "platform", "blas"), "x"),
+        },
+    )  # fmt: skip
+    del manifest["bundle_id"]
+    return {**manifest, "bundle_id": compute_bundle_id(manifest)}
+
+
+def test_write_schema2_bundle_with_boosters(tmp_path):
+    manifest = _schema2_manifest()
+    uri, created = write_bundle(S2_FILES, manifest, tmp_path)
+    assert created and sorted(os.listdir(uri)) == sorted([*S2_FILES, "manifest.json"])
+    assert _mode(uri) == 0o555 and all(_mode(os.path.join(uri, n)) == 0o444 for n in S2_FILES)
+    assert write_bundle(S2_FILES, manifest, tmp_path) == (uri, False)
+
+
+@pytest.mark.parametrize(
+    "files",
+    [
+        {k: v for k, v in S2_FILES.items() if k != "portable_fold_1.ubj"},
+        {**S2_FILES, "portable_fold_2.ubj": b"b2"},
+        {k: v for k, v in S2_FILES.items() if k != "portable.json"},
+        {k: v for k, v in S2_FILES.items() if k != "portable_reference.csv"},
+    ],
+    ids=["missing-booster", "extra-booster", "missing-params", "missing-reference"],
+)
+def test_schema2_file_set_must_match_portable_block(tmp_path, files):
+    manifest = _schema2_manifest(files=files)  # the table matches the files; the portable block does not
+    with pytest.raises(ValueError):
+        write_bundle(files, manifest, tmp_path)
+    assert not any(tmp_path.iterdir())
+
+
+def test_printable_bundle_uri(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "bundles" / "abc").mkdir(parents=True)
+    assert printable_bundle_uri("gs://b/x") == ("gs://b/x", True)
+    assert printable_bundle_uri(str(tmp_path / "bundles" / "abc")) == ("bundles/abc", True)
+    outside = tmp_path.parent / "elsewhere"
+    assert printable_bundle_uri(str(outside)) == (str(outside.resolve()), False)

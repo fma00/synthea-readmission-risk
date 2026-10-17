@@ -191,3 +191,35 @@ def test_gcs_integrity_cases(fake, scoring_env, loaded_gold, tmp_path, how, key)
     with pytest.raises(ValueError) as remote:
         validate_bundle(uri, gold=gold, metadata=metadata)
     assert str(remote.value).startswith(key), str(remote.value)
+
+
+# --------------------------------------------------------------------------------------------- schema 2 (v2 slice 6c)
+def test_write_schema2_bundle_to_gs(fake, portable_env):
+    files, manifest = _bundle_files(portable_env.xgb_portable_uri)
+    uri, created = write_bundle(files, manifest, f"gs://{BUCKET}")
+    uploads = [c for c in fake.calls if c[0] == "upload"]
+    assert created and len(uploads) == 10
+    assert uploads[-1][2].rsplit("/", 1)[1] == MANIFEST_FILENAME
+    assert all(c[3] == {"if_generation_match": 0, "retry": None} for c in uploads)
+    assert uri == f"gs://{BUCKET}/{manifest['bundle_id']}"
+
+
+def _upload(fake, local_uri: str) -> str:
+    files, manifest = _bundle_files(local_uri)
+    return write_bundle(files, manifest, f"gs://{BUCKET}")[0]
+
+
+def test_read_portable_bundle_from_gs(fake, portable_env):
+    from readmission_risk.portable.predictor import (
+        read_portable_bundle,
+        verify_reference,
+    )
+
+    model, reference = read_portable_bundle(_upload(fake, portable_env.xgb_portable_uri))
+    assert verify_reference(model, reference) == 0.0
+
+
+def test_validate_schema2_bundle_from_gs(fake, scoring_env, portable_env):
+    gold, metadata = load_gold_table_with_metadata(scoring_env.gold_dir)
+    bundle = validate_bundle(_upload(fake, portable_env.lr_portable_uri), gold=gold, metadata=metadata)
+    assert bundle.bundle_id == portable_env.lr_result.bundle_id

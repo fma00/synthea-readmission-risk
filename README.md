@@ -125,7 +125,7 @@ $ python scripts/score_discharges.py --gold-dir data/gold/full_run_2b --run-date
 ERROR: window [2022-06-01T00:00:00+00:00, 2022-07-01T00:00:00+00:00) contains 27 in-sample (training-partition) discharge(s) and 9 discharge(s) excluded by the split (neither partition); a held-out Top-N list needs every discharge in the window to be a held-out row
 ```
 
-In the same way, the integrity checks and 14 guards in [`validate_bundle`](src/readmission_risk/scoring/bundle_guard.py) refuse a tampered bundle, or a model trained on a different gold table, label definition, library version or Python version, before it is unpickled; [docs/scoring.md](docs/scoring.md) lists every refusal. The command scores with the committed champion bundle (`deploy/champion.json`, in a private bucket since v2 slice 4, so it needs the author's credentials); on a fresh clone, train, export and score your own bundle offline with `--bundle bundles/<id>`, as [docs/scoring.md](docs/scoring.md#model-bundles) describes.
+In the same way, the integrity checks and 14 guards in [`validate_bundle`](src/readmission_risk/scoring/bundle_guard.py) refuse a tampered bundle, or a model trained on a different gold table, label definition, library version or Python version, before it is unpickled; [docs/scoring.md](docs/scoring.md) lists every refusal. The command scores with the committed champion bundle (`deploy/champion.json`, in a private bucket since v2 slice 4, so it needs the author's credentials); on a fresh clone, train, export and score your own bundle offline with `--bundle bundles/<id>`, as [docs/scoring.md](docs/scoring.md#model-bundles) describes. The two frozen v1 models also exist as schema-2 bundles that carry a portable (non-pickle) form, which reproduces them exactly (maximum absolute difference 0) and can re-prove that after a library upgrade without the pickle.
 
 ## Limitations
 
@@ -150,7 +150,7 @@ These items make up v2 (the `v2` branch, not yet released); the v1 releases (v1.
 2. **Scale-up (done on `v2`):** a 200,000-patient population with a new seed and fresh `reference_date` as the untouched validation, pre-registered before it was generated (616 test positives); a retrained model went through a pre-registered promotion gate and was refused because it does not beat the reason-code lookup ([results](docs/results.md)).
 3. **Monitoring (not started):** a scheduled weekly check of observed-versus-expected calibration on matured labels, with a run ledger.
 4. **Dashboard (not started):** a Streamlit dashboard reading BigQuery (Streamlit Community Cloud first, Cloud Run later).
-5. **Smaller follow-ups:** a portable (non-pickle) export of the v1 models, label v2, as-of scoring, hyperparameter tuning, feature attribution, hosted MLflow.
+5. **Smaller follow-ups:** label v2, as-of scoring, hyperparameter tuning, feature attribution, hosted MLflow.
 
 ## What this shows
 
@@ -190,6 +190,7 @@ src/readmission_risk/models/    # split, features, training, evaluation, MLflow 
 src/readmission_risk/scoring/   # Top-N triage scorer (pure functions)
 src/readmission_risk/reporting/  # README figure and sample table, built from MLflow runs and a predictions file
 src/readmission_risk/bundles/   # model bundle format: manifest, local store, champion pointer
+src/readmission_risk/portable/  # portable (non-pickle) form of the frozen v1 models: predictor, one-time export
 src/readmission_risk/warehouse/ # BigQuery: staging, SQL data tests, publish into serving tables
 src/readmission_risk/ops/       # laptop CLIs for the cloud runs, population checks, the promotion gate
 prereg.yaml                     # the pre-registration: rules (Phase A), analysis lock, results (Phase B)

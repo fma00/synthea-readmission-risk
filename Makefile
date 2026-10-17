@@ -20,6 +20,8 @@ TRAIN_ARGS       ?=
 SCORE_ARGS       ?=
 EXPORT_MODEL     ?= logistic_regression
 EXPORT_ARGS      ?=
+SOURCE_BUNDLE    ?=
+PORTABLE_ARGS    ?=
 TERRAFORM        ?= terraform
 GOLD_URI         ?= gs://synthea-readmission-risk-gold/full_run_2b
 SCORER_SA        ?= scorer@synthea-readmission-risk.iam.gserviceaccount.com
@@ -42,7 +44,7 @@ define fresh_venv
 case "$(1)" in */*|*..*) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; .venv-*) ;; *) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; esac; rm -rf "$(1)" && $(2) -m venv "$(1)"
 endef
 
-.PHONY: help setup hooks lint test pre-commit train export score score-bq m5-check setup-runtime test-runtime lock-main lock-dev lock-runtime tf-validate spark-zip generate-vm bigjoin-batch check-population gate prereg-lock prereg-phase-b
+.PHONY: help setup hooks lint test pre-commit train export export-portable score score-bq m5-check setup-runtime test-runtime lock-main lock-dev lock-runtime tf-validate spark-zip generate-vm bigjoin-batch check-population gate prereg-lock prereg-phase-b
 .DEFAULT_GOAL := help
 
 help: ## List the targets
@@ -78,6 +80,10 @@ train: ## Train both models into TRAIN_EXPERIMENT (required, must not be EXPERIM
 
 export: ## Export the EXPORT_MODEL run of EXPERIMENT as a model bundle under bundles/; extra flags via EXPORT_ARGS
 	$(BIN)/python scripts/export_bundle.py --experiment-name $(EXPERIMENT) --model $(EXPORT_MODEL) $(EXPORT_ARGS)
+
+export-portable: ## Export the local schema-1 bundle SOURCE_BUNDLE (required) once more with its portable form and parity reference (FR0.3); extra flags via PORTABLE_ARGS
+	@test -n "$(SOURCE_BUNDLE)" || { echo "ERROR: set SOURCE_BUNDLE=<a local schema-1 bundle directory>" >&2; exit 1; }
+	$(BIN)/python scripts/export_portable_bundle.py --source-bundle $(SOURCE_BUNDLE) --gold-dir $(GOLD_DIR) $(PORTABLE_ARGS)
 
 score: ## Score the Top-N triage list for RUN_DATE with the champion bundle (deploy/champion.json); extra flags via SCORE_ARGS
 	$(BIN)/python scripts/score_discharges.py --gold-dir $(GOLD_DIR) --run-date $(RUN_DATE) $(SCORE_ARGS)

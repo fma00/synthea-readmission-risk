@@ -24,7 +24,7 @@ MAKEFILE = ROOT / "Makefile"
 PRE_COMMIT_CONFIG = ROOT / ".pre-commit-config.yaml"
 
 EXPECTED_TARGETS = {
-    "help", "setup", "hooks", "lint", "test", "pre-commit", "train", "export", "score", "score-bq", "m5-check",
+    "help", "setup", "hooks", "lint", "test", "pre-commit", "train", "export", "export-portable", "score", "score-bq", "m5-check",
     "setup-runtime", "test-runtime", "lock-main", "lock-dev", "lock-runtime", "tf-validate", "spark-zip", "generate-vm", "bigjoin-batch",
     "check-population", "gate", "prereg-lock", "prereg-phase-b",
 }
@@ -32,7 +32,7 @@ EXPECTED_TARGETS = {
 # shell exporting VENV=...) must not change what these tests see.
 MAKEFILE_VARIABLES = ("PYTHON", "PYTHON312", "VENV", "RUNTIME_VENV", "LOCK_VENV", "LOCK314_VENV", "GOLD_DIR",
                       "REFERENCE_DATE", "TEST_START_DATE", "EXPERIMENT", "RUN_DATE", "TRAIN_EXPERIMENT", "TRAIN_ARGS", "SCORE_ARGS",
-                      "EXPORT_MODEL", "EXPORT_ARGS", "TERRAFORM", "GOLD_URI", "SCORER_SA", "RUN", "JDK_TARBALL", "GEN_ARGS", "CHECK_ARGS", "GATE_ARGS", "LOCK_ARGS", "PHASE_B_ARGS",
+                      "EXPORT_MODEL", "EXPORT_ARGS", "SOURCE_BUNDLE", "PORTABLE_ARGS", "TERRAFORM", "GOLD_URI", "SCORER_SA", "RUN", "JDK_TARBALL", "GEN_ARGS", "CHECK_ARGS", "GATE_ARGS", "LOCK_ARGS", "PHASE_B_ARGS",
                       "BATCH_ARGS")
 SCRUBBED_ENV = ("MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "GNUMAKEFLAGS", "MAKEFILES", *MAKEFILE_VARIABLES)
 EXPECTED_PRE_COMMIT = [
@@ -307,7 +307,7 @@ def test_terraform_fmt_hook_flags_unformatted_file(tmp_path):
 def test_live_targets_refuse_without_required_variables(tmp_path):
     """v2 slice 5: the two targets that spend money refuse to run without their variables, and pass them through."""
     for target, needed in (("generate-vm", "set RUN="), ("bigjoin-batch", "set RUN="), ("gate", "set RUN="),
-                           ("prereg-lock", "set LOCK_ARGS=")):
+                           ("prereg-lock", "set LOCK_ARGS="), ("export-portable", "set SOURCE_BUNDLE=")):
         result = run_make(target, f"VENV={tmp_path}/novenv")
         assert result.returncode != 0 and needed in result.stderr, target
     no_jdk = run_make("generate-vm", f"VENV={tmp_path}/novenv", "RUN=pilot_20k")
@@ -322,4 +322,8 @@ def test_live_targets_refuse_without_required_variables(tmp_path):
         "prereg-lock", "LOCK_ARGS=--experiment-name x"
     )
     assert "scripts/prereg_append.py phase-b" in _dry_run("prereg-phase-b")
+    # v2 slice 6c: not live, but its required variable is checked the same way, and it passes GOLD_DIR like train/score
+    assert "scripts/export_portable_bundle.py --source-bundle bundles/x --gold-dir data/gold/full_run_2b --bundles-dir y" in _dry_run(
+        "export-portable", "SOURCE_BUNDLE=bundles/x", "PORTABLE_ARGS=--bundles-dir y"
+    )
 

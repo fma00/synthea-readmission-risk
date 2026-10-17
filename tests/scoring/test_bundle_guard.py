@@ -216,3 +216,17 @@ def test_rowhash_bundle_refuses_metadata_fingerprint_mismatch(scoring_env, loade
     fingerprint = rowhash_fingerprint(gold)
     with pytest.raises(ValueError, match="the gold metadata records spark-rowhash-v1 fingerprint"):
         validate_bundle(_rowhash_bundle(scoring_env, tmp_path, fingerprint), gold=gold, metadata=_as_v2(metadata, "f" * 64))
+
+
+@pytest.mark.parametrize("which", ["lr", "xgb"])
+def test_schema2_bundle_validates_like_its_source(scoring_env, portable_env, loaded_gold, which):
+    """v2 slice 6c: a schema-2 bundle yields the same ModelBundle facts as its schema-1 source, bar its id and URI."""
+    gold, metadata = loaded_gold
+    source_uri = scoring_env.lr_bundle_uri if which == "lr" else scoring_env.xgb_bundle_uri
+    schema2_uri = portable_env.lr_portable_uri if which == "lr" else portable_env.xgb_portable_uri
+    source = validate_bundle(source_uri, gold=gold, metadata=metadata)
+    schema2 = validate_bundle(schema2_uri, gold=gold, metadata=metadata)
+    assert (schema2.bundle_id, schema2.bundle_uri) == (Path(schema2_uri).name, schema2_uri)
+    for name in ("mlflow_run_id", "model_name", "test_start_date", "gold_fingerprint", "git_commit", "git_dirty", "model_bytes"):
+        assert getattr(schema2, name) == getattr(source, name), name
+    assert schema2.partition_of.equals(source.partition_of)
