@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import os
 import re
@@ -35,6 +36,7 @@ from tests.scoring.helpers import (
     DEFAULT_RUN_DATE,
     DEFAULT_WINDOW_DAYS,
     INTEGRITY_CASES,
+    SCHEMA2_INTEGRITY_CASES,
     assert_count_phrase,
     forbid_model_loading,
     tamper_bundle,
@@ -99,13 +101,12 @@ def _independent_scores(env, run_id: str, run_date: str = DEFAULT_RUN_DATE, wind
 _CASES = BUNDLE_CASES + INTEGRITY_CASES
 
 
-@pytest.mark.parametrize("case", _CASES, ids=[c.case_id for c in _CASES])
-def test_each_check_refuses_exactly_its_defect(scoring_env, tmp_path, monkeypatch, case):
-    overrides, extras = case.build(scoring_env, tmp_path)
+def _assert_case_refuses(env, case, tmp_path, monkeypatch) -> None:
+    overrides, extras = case.build(env, tmp_path)
     recorder, out = Recorder(), tmp_path / "out"
     forbid_model_loading(monkeypatch)  # applied after the fixture is built, around the scoring call only
     with pytest.raises(ValueError) as info:
-        score_run_date(_config(scoring_env, out, **overrides), loader=recorder.strict_loader, writer=recorder.strict_writer)
+        score_run_date(_config(env, out, **overrides), loader=recorder.strict_loader, writer=recorder.strict_writer)
     message = str(info.value)
     assert message.startswith(case.key) if case.starts_with else case.key in message, message
     for extra in extras:  # full sentences carrying exact counts; the count must not be the tail of a longer number
@@ -113,6 +114,32 @@ def test_each_check_refuses_exactly_its_defect(scoring_env, tmp_path, monkeypatc
     for forbidden in case.forbidden:
         assert forbidden not in message
     assert recorder.calls == [] and not out.exists()
+
+
+@pytest.mark.parametrize("case", _CASES, ids=[c.case_id for c in _CASES])
+def test_each_check_refuses_exactly_its_defect(scoring_env, tmp_path, monkeypatch, case):
+    _assert_case_refuses(scoring_env, case, tmp_path, monkeypatch)
+
+
+# v2 slice 6c: the guards are not weakened for schema-2 bundles: every guard case, tampering the schema-2 LR bundle
+@pytest.mark.parametrize("case", BUNDLE_CASES, ids=[c.case_id for c in BUNDLE_CASES])
+def test_guards_refuse_schema2_bundles(scoring_env, portable_env, tmp_path, monkeypatch, case):
+    env = dataclasses.replace(scoring_env, lr_bundle_uri=portable_env.lr_portable_uri)
+    _assert_case_refuses(env, case, tmp_path, monkeypatch)
+
+
+@pytest.mark.parametrize("case", SCHEMA2_INTEGRITY_CASES, ids=[c.case_id for c in SCHEMA2_INTEGRITY_CASES])
+def test_schema2_integrity_cases(scoring_env, portable_env, tmp_path, monkeypatch, case):
+    env = dataclasses.replace(scoring_env, lr_bundle_uri=portable_env.xgb_portable_uri)
+    _assert_case_refuses(env, case, tmp_path, monkeypatch)
+
+
+def test_scoring_a_schema2_bundle_gives_identical_scores(scoring_env, portable_env, tmp_path):
+    source = score_run_date(_config(scoring_env, tmp_path / "a")).predictions
+    schema2 = score_run_date(_config(scoring_env, tmp_path / "b", bundle_uri=portable_env.lr_portable_uri)).predictions
+    assert (schema2["model_bundle_id"] == portable_env.lr_result.bundle_id).all()
+    assert (source["model_bundle_id"] == Path(scoring_env.lr_bundle_uri).name).all()
+    pd.testing.assert_frame_equal(source.drop(columns="model_bundle_id"), schema2.drop(columns="model_bundle_id"), check_exact=True)
 
 
 # --------------------------------------------------------------------------------------------- end to end

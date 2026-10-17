@@ -19,21 +19,11 @@ import typer
 
 from readmission_risk import gcp
 from readmission_risk.bundles.champion import champion_json
+from readmission_risk.bundles.store import printable_bundle_uri
 from readmission_risk.models.bundle_export import export_bundle
 from readmission_risk.models.tracking import resolve_run_id
 
 app = typer.Typer(add_completion=False, rich_markup_mode=None, pretty_exceptions_enable=False)
-
-
-def _printable_uri(bundle_uri: str) -> tuple[str, bool]:
-    """(uri, is_relative): a gs:// URI unchanged (it is location-independent); a local bundle relative to the current
-    directory with POSIX separators when it lies inside it, otherwise the absolute path."""
-    if bundle_uri.startswith("gs://"):
-        return bundle_uri, True
-    resolved, cwd = Path(bundle_uri).resolve(), Path.cwd().resolve()
-    if resolved.is_relative_to(cwd):
-        return resolved.relative_to(cwd).as_posix(), True
-    return str(resolved), False
 
 
 @app.command(help=__doc__.split("\n\n")[1])
@@ -64,7 +54,7 @@ def main(
             "will refuse this bundle (guard 2), so do not promote it",
             file=sys.stderr,
         )
-    uri, is_relative = _printable_uri(result.bundle_uri)
+    uri, is_relative = printable_bundle_uri(result.bundle_uri)
     if not is_relative:
         print("WARNING: bundle_uri is an absolute, machine-specific path; do not commit it", file=sys.stderr)
     print(f"bundle_id: {result.bundle_id}")

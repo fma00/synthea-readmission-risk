@@ -3,7 +3,9 @@ execute arbitrary code on load). Integrity checks I1-I5 (manifest present and pa
 hash, every file's sha256, the manifest's shape) run first, then guards 1-14 on the manifest's facts, one to one with
 the MLflow-run guards they replace. Never imports mlflow. See
 notes/eg-new-feature/v2-slice2-model-bundle-and-manifest-2026-10-11.md (Interfaces > scoring/bundle_guard.py and the
-guard mapping table); guard 14: notes/eg-new-feature/python-version-guard-2026-10-09.md.
+guard mapping table); guard 14: notes/eg-new-feature/python-version-guard-2026-10-09.md. Manifest schema 2 (v2 slice 6c,
+notes/eg-new-feature/v2-slice6c-portable-v1-export-2026-10-17.md) adds the portable files: I4 verifies them like every file,
+I5 checks the portable block's structure; nothing here parses or uses them, and guards 1-14 do not depend on the schema.
 
 Uniform rule for absent, malformed or unreadable bundle facts: a ValueError whose message carries the check's key
 (integrity keys start the message, followed by ": "), never a KeyError / TypeError / OSError / JSON or pandas parse error
@@ -34,8 +36,12 @@ from readmission_risk.bundles.manifest import (
     MODEL_FILENAME,
     NESTED_KEYS,
     SPLIT_FILENAME,
+    SUPPORTED_SCHEMA_VERSIONS,
     TOP_LEVEL_KEYS,
+    check_portable_block,
+    check_schema2_files_table,
     compute_bundle_id,
+    file_role,
     manifest_bytes,
     sha256_hex,
 )
@@ -129,8 +135,8 @@ def _read_manifest(uri: str, champion_sha: str | None, champion_path: Path | Non
     if not isinstance(manifest, dict):
         raise ValueError(f"manifest: {MANIFEST_FILENAME} of bundle at {uri} is not a JSON object")  # noqa: TRY004 -- malformed input is a ValueError by design (the CLI's user-error type)
     schema = manifest.get("schema_version")
-    if type(schema) is not int or schema != MANIFEST_SCHEMA_VERSION:
-        raise ValueError(f"manifest: bundle at {uri} has unsupported schema_version {schema!r} (this scorer reads {MANIFEST_SCHEMA_VERSION})")
+    if type(schema) is not int or schema not in SUPPORTED_SCHEMA_VERSIONS:
+        raise ValueError(f"manifest: bundle at {uri} has unsupported schema_version {schema!r} (this scorer reads 1 and 2)")
     # I3
     bundle_id = manifest.get("bundle_id")
     if bundle_id is None:
@@ -152,13 +158,20 @@ def _read_manifest(uri: str, champion_sha: str | None, champion_path: Path | Non
 
 
 def _read_files(uri: str, manifest: dict, entries: list[str]) -> dict[str, bytes]:
-    """I4: the files table, the directory listing, and each file's size and sha256."""
+    """I4: the files table, the directory listing, and each file's size and sha256. Schema 2 (v2 slice 6c) adds the portable
+    files: portable.json, portable_reference.csv and portable_fold_<k>.ubj."""
     table = manifest.get("files")
     if table is None:
         raise ValueError(f"files: manifest of bundle at {uri} has no files table")
-    if not isinstance(table, dict) or set(table) != set(FILE_ROLES):
-        names = sorted(table) if isinstance(table, dict) else type(table).__name__
-        raise ValueError(f"files: the files table of bundle at {uri} must list exactly {sorted(FILE_ROLES)}; got {names}")
+    if manifest["schema_version"] == MANIFEST_SCHEMA_VERSION:
+        if not isinstance(table, dict) or set(table) != set(FILE_ROLES):
+            names = sorted(table) if isinstance(table, dict) else type(table).__name__
+            raise ValueError(f"files: the files table of bundle at {uri} must list exactly {sorted(FILE_ROLES)}; got {names}")
+    else:
+        try:
+            check_schema2_files_table(table)
+        except ValueError as exc:
+            raise ValueError(f"files: the files table of bundle at {uri} {exc}") from exc
     for name, entry in table.items():
         if (
             not isinstance(entry, dict)
@@ -166,10 +179,10 @@ def _read_files(uri: str, manifest: dict, entries: list[str]) -> dict[str, bytes
             or type(entry["sha256"]) is not str
             or not HEX64_RE.fullmatch(entry["sha256"])
             or type(entry["size"]) is not int
-            or entry["role"] != FILE_ROLES[name]
+            or entry["role"] != file_role(name)
         ):
             raise ValueError(f"files: entry {name!r} of bundle at {uri} is malformed: {entry!r}")
-    expected = sorted({MANIFEST_FILENAME, *FILE_ROLES})
+    expected = sorted({MANIFEST_FILENAME, *table})
     if entries != expected:
         missing, unlisted = sorted(set(expected) - set(entries)), sorted(set(entries) - set(expected))
         raise ValueError(f"files: bundle at {uri} is missing {missing} and holds unlisted entries {unlisted}")
@@ -206,8 +219,15 @@ def _check_shape(uri: str, manifest: dict) -> None:
     for name in ("commit", "dirty"):
         if git[name] is not None and type(git[name]) is not str:
             raise ValueError(f"{key}: git.{name} of bundle at {uri} must be a string or null; got {git[name]!r}")
-    if manifest["portable"] is not None:
-        raise ValueError(f"{key}: portable of bundle at {uri} must be null in schema_version 1; got {manifest['portable']!r}")
+    if manifest["schema_version"] == MANIFEST_SCHEMA_VERSION:
+        if manifest["portable"] is not None:
+            raise ValueError(f"{key}: portable of bundle at {uri} must be null in schema_version 1; got {manifest['portable']!r}")
+    else:
+        # Schema 2: structural only (D2: the scorer validates the portable files but never parses or uses them)
+        try:
+            check_portable_block(manifest)
+        except ValueError as exc:
+            raise ValueError(f"{key}: portable of bundle at {uri} {exc}") from exc
 
 
 # --------------------------------------------------------------------------------------------- guards 11, 12, 14

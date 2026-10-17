@@ -572,7 +572,9 @@ INTEGRITY_CASES: list[BundleCase] = [
     _ic("I1-no-manifest", "manifest: ", _integrity(drop_manifest=True)),
     _ic("I1-not-json", "manifest: ", _integrity(manifest_raw=b"not json")),
     _ic("I1-not-object", "manifest: ", _integrity(manifest_raw=b"[]\n")),
-    _ic("I1-schema-version-2", "manifest: ", _integrity(set={"schema_version": 2})),
+    _ic("I1-schema-version-3", "manifest: ", _integrity(set={"schema_version": 3})),
+    # v2 slice 6c: schema 2 is accepted at I1, so a schema-1 bundle relabelled 2 lacks the portable files and fails at I4
+    _ic("I4-schema1-relabelled-2", "files: ", _integrity(set={"schema_version": 2})),
     _ic("I1-schema-version-true", "manifest: ", _integrity(set={"schema_version": True})),
     _ic("I3-edited-without-rehash", "bundle_id: ", _integrity(set={"model_name": "xgboost_calibrated"}, rehash=False)),
     _ic("I3-renamed-dir", "bundle_id: ", _integrity(dir_name="f" * 64)),
@@ -603,6 +605,41 @@ INTEGRITY_CASES: list[BundleCase] = [
     _ic("I2-invalid-json-under-champion", "champion sha256: ", _under_champion(manifest_raw=b"not json"), ("manifest:",)),
 ]
 
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Schema-2 integrity cases (v2 slice 6c). The tests run them with env = dataclasses.replace(scoring_env,
+# lr_bundle_uri=<the schema-2 XGB bundle>), so these are ordinary builders tampering env.lr_bundle_uri.
+# ---------------------------------------------------------------------------------------------------------------
+def _renamed_booster_entry(env: ScoringEnv, tmp: Path):
+    table = env.manifest()["files"]
+    table = {("portable_fold_01.ubj" if name == "portable_fold_0.ubj" else name): entry for name, entry in table.items()}
+    return {"bundle_uri": tamper_bundle(env.lr_bundle_uri, tmp / "bundles", set={"files": table})}, ()
+
+
+def _flipped_booster(env: ScoringEnv, tmp: Path):
+    data = (Path(env.lr_bundle_uri) / "portable_fold_0.ubj").read_bytes()
+    return {"bundle_uri": tamper_bundle(env.lr_bundle_uri, tmp / "bundles", files={"portable_fold_0.ubj": _flip_first_byte(data)}, rehash=False)}, ()
+
+
+_FOLDS = [f"portable_fold_{k}.ubj" for k in range(5)]
+SCHEMA2_INTEGRITY_CASES: list[BundleCase] = [
+    _ic("I4-s2-missing-params", "files: ", _integrity(files={"portable.json": None})),
+    _ic("I4-s2-missing-reference", "files: ", _integrity(files={"portable_reference.csv": None})),
+    _ic("I4-s2-missing-booster", "files: ", _integrity(files={"portable_fold_0.ubj": None})),
+    _ic("I4-s2-extra-booster-unlisted", "files: ", _integrity(extra_entries={"portable_fold_9.ubj": b"x"})),
+    _ic("I4-s2-bad-booster-name", "files: ", _renamed_booster_entry),
+    _ic("I4-s2-wrong-role", "files: ", _integrity(set={("files", "portable.json", "role"): "x"})),
+    _ic("I4-s2-booster-byte-flipped", "files: ", _flipped_booster),
+    _ic("I5-s2-portable-null", "manifest shape: ", _integrity(set={"portable": None})),
+    _ic("I5-s2-portable-missing-key", "manifest shape: ", _integrity(delete=("portable.parity",))),
+    _ic("I5-s2-format-version-2", "manifest shape: ", _integrity(set={"portable.format_version": 2})),
+    _ic("I5-s2-booster-list-mismatch", "manifest shape: ", _integrity(set={"portable.booster_files": _FOLDS[:4]})),
+    _ic("I5-s2-non-contiguous-folds", "manifest shape: ", _integrity(set={"portable.booster_files": [*_FOLDS[:4], "portable_fold_5.ubj"]})),
+    _ic("I5-s2-parity-nonzero", "manifest shape: ", _integrity(set={"portable.parity.max_abs_diff": 1e-17})),
+    _ic("I5-s2-parity-rows-bool", "manifest shape: ", _integrity(set={"portable.parity.rows": True})),
+    _ic("I5-s2-writer-version-int", "manifest shape: ", _integrity(set={"portable.writer_versions.numpy": 2})),
+]
 
 # ---------------------------------------------------------------------------------------------------------------
 # A hand-built ScoringResult (report and CLI tests)

@@ -16,7 +16,7 @@ import uuid
 from collections.abc import Mapping
 from pathlib import Path
 
-from .manifest import FILE_ROLES, MANIFEST_FILENAME, file_entry, manifest_bytes
+from .manifest import MANIFEST_FILENAME, expected_file_names, file_entry, manifest_bytes
 
 _SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 
@@ -46,6 +46,17 @@ def check_bundle_uri(bundle_uri: str) -> None:
     local_bundle_path(bundle_uri)
 
 
+def printable_bundle_uri(bundle_uri: str) -> tuple[str, bool]:
+    """(uri, is_relative): a gs:// URI unchanged (it is location-independent); a local bundle relative to the current
+    directory with POSIX separators when it lies inside it, otherwise the absolute path. Shared by the export CLIs."""
+    if bundle_uri.startswith("gs://"):
+        return bundle_uri, True
+    resolved, cwd = Path(bundle_uri).resolve(), Path.cwd().resolve()
+    if resolved.is_relative_to(cwd):
+        return resolved.relative_to(cwd).as_posix(), True
+    return str(resolved), False
+
+
 def bundle_uri_leaf(bundle_uri: str) -> str:
     """The last path segment of a bundle URI: the directory (or object prefix) a bundle lives in, which I3 compares with
     its bundle_id."""
@@ -57,12 +68,15 @@ def bundle_uri_leaf(bundle_uri: str) -> str:
 
 
 def _expected_bytes(files: Mapping[str, bytes], manifest: dict) -> dict[str, bytes]:
-    """Every check that can fail, before the filesystem is touched; returns {name: bytes} including manifest.json."""
-    if set(files) != set(FILE_ROLES):
-        raise ValueError(f"a bundle holds exactly the files {sorted(FILE_ROLES)}; got {sorted(files)}")
-    expected_table = {name: file_entry(name, data) for name, data in files.items()}
+    """Every check that can fail, before the filesystem is touched; returns {name: bytes} including manifest.json. Order
+    (v2 slice 6c): the files table is verified against the bytes first, so expected_file_names (schema 2: the portable
+    block) only ever sees a verified table."""
+    expected_table = {name: file_entry(name, data) for name, data in files.items()}  # ValueError on an unknown name
     if manifest.get("files") != expected_table:
         raise ValueError("the manifest's files table does not match the files' sha256 and size")
+    expected = expected_file_names(manifest)
+    if set(files) != expected:
+        raise ValueError(f"a bundle with this manifest holds exactly the files {sorted(expected)}; got {sorted(files)}")
     return {MANIFEST_FILENAME: manifest_bytes(manifest), **files}
 
 

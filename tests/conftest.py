@@ -35,6 +35,26 @@ def scoring_env(tmp_path_factory):
     mlflow.set_tracking_uri(original_uri)
 
 
+@pytest.fixture(scope="session")
+def portable_env(scoring_env, tmp_path_factory):
+    """Exports both scoring_env bundles ONCE per session as schema-2 bundles with their portable form (v2 slice 6c,
+    notes/eg-new-feature/v2-slice6c-portable-v1-export-2026-10-17.md). Imports inside the body, like scoring_env."""
+    from types import SimpleNamespace
+
+    from readmission_risk.portable.export import export_portable_bundle
+
+    root = tmp_path_factory.mktemp("portable-env") / "bundles"
+    lr = export_portable_bundle(scoring_env.lr_bundle_uri, scoring_env.gold_dir, root)
+    xgb = export_portable_bundle(scoring_env.xgb_bundle_uri, scoring_env.gold_dir, root)
+    return SimpleNamespace(
+        bundles_root=root,
+        lr_portable_uri=lr.bundle_uri,
+        xgb_portable_uri=xgb.bundle_uri,
+        lr_result=lr,
+        xgb_result=xgb,
+    )
+
+
 @pytest.fixture(autouse=True)
 def _no_real_gcp(request, monkeypatch):
     """Tests never reach Google Cloud (v2 slice 4): the credential and client factories raise unless a test replaces them
