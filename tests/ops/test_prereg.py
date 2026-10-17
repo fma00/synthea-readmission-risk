@@ -19,9 +19,9 @@ from readmission_risk.ops.prereg import (
     parse_prereg,
     resolve_test_start,
 )
-from tests.ops.conftest import REPO, git
+from tests.ops.conftest import PHASE_A_TEXT, REPO, git, phase_a_text
 
-TEXT = (REPO / "prereg.yaml").read_text(encoding="utf-8")
+TEXT = PHASE_A_TEXT  # the repository file may already carry appended blocks (slice 6b)
 
 
 def doc() -> dict:
@@ -293,6 +293,16 @@ def with_blocks(lock: dict | None = LOCK, phase_b: dict | None = None) -> dict:
     if phase_b is not None:
         d["phase_b"] = phase_b
     return d
+
+
+def test_phase_a_text_strips_appended_blocks():
+    locked = TEXT + "\n# lock header\n" + yaml.safe_dump({"analysis_lock": LOCK}, sort_keys=False)
+    assert phase_a_text(locked) == TEXT and phase_a_text(TEXT) == TEXT
+    assert parse_prereg(phase_a_text((REPO / "prereg.yaml").read_text())).analysis_lock is None
+
+
+def test_repository_prereg_appended_blocks_parse():
+    load_prereg(REPO / "prereg.yaml")  # Phase A plus whatever has been appended (lock, Phase B) must parse
 
 
 def test_phase_a_alone_has_no_appended_blocks():

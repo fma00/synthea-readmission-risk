@@ -104,3 +104,12 @@ outcomes:
     a reported finding, not a failure.
 
 deviations: []
+
+# Slice 6b analysis lock (scripts/prereg_append.py); Phase A above is unchanged.
+analysis_lock:
+  locked_on: '2026-10-17'
+  challenger_model: logistic_regression
+  experiment_name: readmission-risk-v2-main200k
+  frozen_v1_rows: modeling_rows
+  negative_control: constant_train_prevalence
+  code_commit: 1b3b44bfc1c39c2b6258b3846e3bb54ac816d382
