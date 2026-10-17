@@ -663,8 +663,8 @@ compared in Results). `write_files` uploads with `retry=None`, create-only, `man
 
 **Partial-upload recovery** (documented in `docs/scoring.md` > Model bundles): a failure mid-upload leaves a prefix
 without `manifest.json` that the writer can never complete (re-runs report "already exists"). Recovery: the owner, as
-their own (privileged) identity, lists the prefix, deletes its objects (`gcloud storage rm
-gs://synthea-readmission-risk-bundles/<id>/**`; the bucket is versioned, so the deleted generations stay recoverable),
+their own (privileged) identity, lists the prefix, deletes it (`gcloud storage rm --recursive
+--all-versions gs://synthea-readmission-risk-bundles/<id>/`, the recipe in `docs/setup.md` > Scoring into BigQuery),
 and re-runs the upload. **Acceptance:** as a reader (owner ADC), the listing of each prefix shows exactly 5 (LR) / 10
 (XGB) objects, and `read_portable_bundle("gs://…/<id>")` plus `verify_reference` pass on both, and
 `validate_bundle("gs://…/<id>", gold=…, metadata=…)` passes on both.
