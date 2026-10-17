@@ -1,0 +1,260 @@
+{
+  "analysis_lock": {
+    "challenger_model": "logistic_regression",
+    "code_commit": "1b3b44bfc1c39c2b6258b3846e3bb54ac816d382",
+    "experiment_name": "readmission-risk-v2-main200k",
+    "frozen_v1_rows": "modeling_rows",
+    "locked_on": "2026-10-17",
+    "negative_control": "constant_train_prevalence"
+  },
+  "challenger": {
+    "bundle_id": "569fdab6c17d433542b2cd6b531ed8efc5677fb37b00a792d84f79803c6a0f72",
+    "git_commit": "55dce06c09185ac65857abb8b91657e535b39d62",
+    "replaced_by": "constant_train_prevalence",
+    "run_id": "a9f32f4b7c584f4c8fe992748410789f"
+  },
+  "champion": {
+    "bundle_id": "75a1448729ef561c596f5e850f5bedce50ed63355ca2de38dc724c635d24eef4",
+    "run_id": "fe9633ca42384ea5aeaba83e13d65701"
+  },
+  "error": null,
+  "frozen_v1": {
+    "models": {
+      "logistic_regression": {
+        "accepted": true,
+        "intervals": {
+          "brier_score": [
+            0.012926226247674654,
+            0.01397845870264125
+          ],
+          "observed_expected_ratio": [
+            0.9937483182199944,
+            1.068275554321206
+          ],
+          "roc_auc": [
+            0.8991212774573296,
+            0.9105288622516245
+          ]
+        },
+        "observed_expected_overlap_ok": true,
+        "point": {
+          "brier_score": 0.013454276064792796,
+          "observed_expected_ratio": 1.030335940036044,
+          "roc_auc": 0.9048055164779503
+        },
+        "roc_auc_ci_lower_ok": true,
+        "run_id": "fe9633ca42384ea5aeaba83e13d65701"
+      },
+      "xgboost_calibrated": {
+        "accepted": true,
+        "intervals": {
+          "brier_score": [
+            0.014968462128001118,
+            0.016131947303544468
+          ],
+          "observed_expected_ratio": [
+            1.0509350827129957,
+            1.1357925503209276
+          ],
+          "roc_auc": [
+            0.8492417996756171,
+            0.8617606681403901
+          ]
+        },
+        "observed_expected_overlap_ok": true,
+        "point": {
+          "brier_score": 0.015539915037459334,
+          "observed_expected_ratio": 1.0928223271991133,
+          "roc_auc": 0.8554155341437498
+        },
+        "roc_auc_ci_lower_ok": true,
+        "run_id": "abe9c605509b49dda4d8ba0aef511a60"
+      }
+    },
+    "n_positive": 2542,
+    "n_rows": 157827,
+    "rows": "modeling_rows"
+  },
+  "gate": {
+    "decision": "REFUSE",
+    "differences": {
+      "challenger_minus_champion": {
+        "abs_calibration_gap": [
+          0.0017604948492931157,
+          0.0027418521612827358
+        ],
+        "brier_score": [
+          0.0005922960687337725,
+          0.0013179909243091973
+        ],
+        "calibration_gap": [
+          -0.002741852161282736,
+          -0.0017811472692307309
+        ],
+        "expected_calibration_error": [
+          -0.0009477135547784387,
+          0.0014608934187333202
+        ],
+        "observed_expected_ratio": [
+          0.12717726234508778,
+          0.20327921465510151
+        ],
+        "roc_auc": [
+          -0.37585445996949673,
+          -0.34822628067471795
+        ]
+      },
+      "challenger_minus_reason_code_lookup": {
+        "abs_calibration_gap": [
+          0.00029880739673866666,
+          0.005379696968675297
+        ],
+        "brier_score": [
+          0.00018991869642126676,
+          0.0012266161172005121
+        ],
+        "calibration_gap": [
+          -0.005658333104105481,
+          -0.004313410510540366
+        ],
+        "expected_calibration_error": [
+          -0.001548914368586796,
+          0.0036784630833919772
+        ],
+        "observed_expected_ratio": [
+          0.2650978453459407,
+          0.36313013566284275
+        ],
+        "roc_auc": [
+          -0.38445108910419473,
+          -0.35578511544698804
+        ]
+      }
+    },
+    "lookup_still_wins": true,
+    "n_resamples_skipped": 0,
+    "n_resamples_used": 2000,
+    "point": {
+      "challenger": {
+        "abs_calibration_gap": 0.004191981832174261,
+        "brier_score": 0.019096326846075342,
+        "brier_skill_score": 0.0,
+        "calibration_gap": -0.004191981832174261,
+        "expected_calibration_error": 0.004191981832174261,
+        "log_loss": 0.09645765639268601,
+        "mean_predicted_probability": 0.015265360471751952,
+        "n_positive": 616.0,
+        "n_rows": 31659.0,
+        "observed_expected_ratio": 1.274607457840998,
+        "observed_prevalence": 0.019457342303926213,
+        "pr_auc": 0.019457342303926213,
+        "roc_auc": 0.5
+      },
+      "champion": {
+        "abs_calibration_gap": 0.0019449571018940945,
+        "brier_score": 0.018138940074311723,
+        "brier_skill_score": 0.050134603344432205,
+        "calibration_gap": -0.0019449571018940945,
+        "expected_calibration_error": 0.00357333681159081,
+        "log_loss": 0.07687334216497539,
+        "mean_predicted_probability": 0.01751238520203212,
+        "n_positive": 616.0,
+        "n_rows": 31659.0,
+        "observed_expected_ratio": 1.1110618045146932,
+        "observed_prevalence": 0.019457342303926213,
+        "pr_auc": 0.1239431945812893,
+        "roc_auc": 0.8624661707200443
+      },
+      "reason_code_lookup": {
+        "abs_calibration_gap": 0.0007970314574372306,
+        "brier_score": 0.01839145111922087,
+        "brier_skill_score": 0.036911586847883204,
+        "calibration_gap": 0.0007970314574372306,
+        "expected_calibration_error": 0.002942622711684508,
+        "log_loss": 0.07541644890444545,
+        "mean_predicted_probability": 0.020254373761363444,
+        "n_positive": 616.0,
+        "n_rows": 31659.0,
+        "observed_expected_ratio": 0.9606489212242336,
+        "observed_prevalence": 0.019457342303926213,
+        "pr_auc": 0.12037137268074531,
+        "roc_auc": 0.8706188755354429
+      }
+    },
+    "rules": [
+      {
+        "name": "roc_auc_vs_champion",
+        "passed": false,
+        "statistic": "lower bound of the 95% paired CI of roc_auc(challenger) - roc_auc(champion)",
+        "threshold": 0.0,
+        "value": -0.37585445996949673
+      },
+      {
+        "name": "roc_auc_vs_reason_code_lookup",
+        "passed": false,
+        "statistic": "lower bound of the 95% paired CI of roc_auc(challenger) - roc_auc(reason_code_lookup)",
+        "threshold": 0.0,
+        "value": -0.38445108910419473
+      },
+      {
+        "name": "brier_noninferior_vs_champion",
+        "passed": false,
+        "statistic": "upper bound of the 95% paired CI of brier(challenger) - brier(champion)",
+        "threshold": 0.0009069470037155862,
+        "value": 0.0013179909243091973
+      }
+    ]
+  },
+  "generated_at_utc": "2026-10-17T13:05:46Z",
+  "gold_fingerprint": "80edd13dcc967d69b6fa4cfa17b4d7fa40188f8e7e17b2031b833332a59c63f3",
+  "head_commit": "55dce06c09185ac65857abb8b91657e535b39d62",
+  "lock_time_utc": "2026-10-17T12:29:23Z",
+  "mode": "negative_control",
+  "phase_a_commit": "c9427b2e28cefd768d7c6c3c2843cf0c44bd198a",
+  "power": {
+    "min_test_positives": 400,
+    "n_test": 31659,
+    "n_test_positive": 616
+  },
+  "prereg_sha256": "849399b57b6e69868df38a1fa2c105ebcdf60ffe439befb2d6f02cfc7ba76cc2",
+  "rehearsal": false,
+  "run": "main_200k",
+  "runs_on_this_gold": {
+    "readmission-risk-v2-main200k": {
+      "active": 2,
+      "deleted": 0
+    }
+  },
+  "split_summary": {
+    "n_dropped_before_train_start": 0,
+    "n_dropped_censor_buffer": 8,
+    "n_dropped_label_horizon_purge": 0,
+    "n_dropped_label_window_purge": 751,
+    "n_dropped_patient_overlap": 26708,
+    "n_input": 185294,
+    "n_test": 31659,
+    "n_test_patients": 26266,
+    "n_test_positive": 616,
+    "n_train": 126168,
+    "n_train_patients": 82706,
+    "n_train_positive": 1926
+  },
+  "xgboost_reported": {
+    "point": {
+      "abs_calibration_gap": 0.0051346674429608215,
+      "brier_score": 0.018540397945767315,
+      "brier_skill_score": 0.02911182369201437,
+      "calibration_gap": -0.0051346674429608215,
+      "expected_calibration_error": 0.011471314800819058,
+      "log_loss": 0.08059324425675002,
+      "mean_predicted_probability": 0.014322674860965392,
+      "n_positive": 616.0,
+      "n_rows": 31659.0,
+      "observed_expected_ratio": 1.3584991974477267,
+      "observed_prevalence": 0.019457342303926213,
+      "pr_auc": 0.1393238539627547,
+      "roc_auc": 0.8804826547675177
+    },
+    "run_id": "17b5c6042a8a41cf9121633acbeaec0f"
+  }
+}
