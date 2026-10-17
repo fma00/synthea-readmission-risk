@@ -113,3 +113,70 @@ analysis_lock:
   frozen_v1_rows: modeling_rows
   negative_control: constant_train_prevalence
   code_commit: 1b3b44bfc1c39c2b6258b3846e3bb54ac816d382
+
+# Slice 6b Phase B: results against the rules above (scripts/prereg_append.py).
+phase_b:
+  recorded_on: '2026-10-17'
+  reports:
+    gate:
+      path: notes/eg-new-feature/v2-slice6b-reports/gate_report.json
+      sha256: 70e046b26689d9ace2a94b4e5d6466588bcc9a4836f4bbce690f5dc8c25cef56
+    negative_control:
+      path: notes/eg-new-feature/v2-slice6b-reports/negative_control_report.json
+      sha256: d045bf20e58f2678e1cd5d6e34ea3c8d59eb5dae7f921456fb86fe7ca4897fa9
+  decision: REFUSE
+  challenger:
+    run_id: a9f32f4b7c584f4c8fe992748410789f
+    bundle_id: 569fdab6c17d433542b2cd6b531ed8efc5677fb37b00a792d84f79803c6a0f72
+    git_commit: 55dce06c09185ac65857abb8b91657e535b39d62
+  champion:
+    run_id: fe9633ca42384ea5aeaba83e13d65701
+    bundle_id: 75a1448729ef561c596f5e850f5bedce50ed63355ca2de38dc724c635d24eef4
+  rules:
+  - name: roc_auc_vs_champion
+    value: 0.0011807942959557371
+    threshold: 0.0
+    passed: true
+  - name: roc_auc_vs_reason_code_lookup
+    value: -0.003338644059238269
+    threshold: 0.0
+    passed: false
+  - name: brier_noninferior_vs_champion
+    value: 0.00027066818277942886
+    threshold: 0.0009069470037155862
+    passed: true
+  lookup_still_wins: true
+  negative_control_decision: REFUSE
+  frozen_v1:
+    logistic_regression:
+      roc_auc:
+      - 0.9048055164779503
+      - 0.8991212774573296
+      - 0.9105288622516245
+      brier_score:
+      - 0.013454276064792796
+      - 0.012926226247674654
+      - 0.01397845870264125
+      observed_expected_ratio:
+      - 1.030335940036044
+      - 0.9937483182199944
+      - 1.068275554321206
+      accepted: true
+    xgboost_calibrated:
+      roc_auc:
+      - 0.8554155341437498
+      - 0.8492417996756171
+      - 0.8617606681403901
+      brier_score:
+      - 0.015539915037459334
+      - 0.014968462128001118
+      - 0.016131947303544468
+      observed_expected_ratio:
+      - 1.0928223271991133
+      - 1.0509350827129957
+      - 1.1357925503209276
+      accepted: true
+  power:
+    n_test: 31659
+    n_test_positive: 616
+    min_test_positives: 400
