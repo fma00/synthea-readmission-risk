@@ -512,3 +512,31 @@ def test_no_mixing_warning_for_a_fresh_experiment_or_repeat_runs_of_the_same_lab
             warnings.simplefilter("always")
             train_and_evaluate(_config(gold, tracking_dir, n_bootstrap=0))
         assert not _mixing_warnings(caught)
+
+
+# --- v2 slice 5: rowhash tag for version-2 gold, gold_source param ---
+
+
+def test_rowhash_tag_only_for_v2_gold(e2e, tmp_path):
+    from readmission_risk.models.constants import ROWHASH_TAG
+    from readmission_risk.pipeline.gold_metadata import read_gold_metadata
+
+    _, runs = _runs(e2e)
+    assert all(ROWHASH_TAG not in r.data.tags for r in runs)  # version-1 gold: unchanged behaviour
+
+    gold_dir = _write_gold(tmp_path / "gold", make_gold_frame(600, seed=0), version=2)
+    result = train_and_evaluate(_config(gold_dir, tmp_path / "tracking", n_bootstrap=0))
+    client = MlflowClient(tracking_uri=mlflow_tracking_uri(tmp_path / "tracking"))
+    expected = read_gold_metadata(gold_dir).gold_fingerprint
+    for model in result.models.values():
+        assert client.get_run(model.run_id).data.tags[ROWHASH_TAG] == expected
+
+
+def test_gold_source_param_logged(e2e, tmp_path):
+    _, runs = _runs(e2e)
+    assert {r.data.params["gold_source"] for r in runs} == {str(e2e["gold_dir"])}  # default: the gold_dir itself
+
+    gold_dir = _write_gold(tmp_path / "gold", make_gold_frame(600, seed=0))
+    result = train_and_evaluate(_config(gold_dir, tmp_path / "tracking", n_bootstrap=0, gold_source="gs://bucket/gold/v2/x"))
+    client = MlflowClient(tracking_uri=mlflow_tracking_uri(tmp_path / "tracking"))
+    assert {client.get_run(m.run_id).data.params["gold_source"] for m in result.models.values()} == {"gs://bucket/gold/v2/x"}

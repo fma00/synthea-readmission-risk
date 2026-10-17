@@ -14,8 +14,8 @@ from readmission_risk.scoring.ranking import PREDICTION_COLUMNS
 from tests.scoring.helpers import (
     DEFAULT_RUN_DATE,
     DEFAULT_WINDOW_DAYS,
-    SCORING_EXPERIMENT,
     make_result,
+    write_champion,
 )
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "score_discharges.py"
@@ -32,8 +32,7 @@ def cli():
 def _real_args(env, out: Path, *extra: str) -> list[str]:
     return [
         "--gold-dir", str(env.gold_dir),
-        "--tracking-dir", str(env.tracking_dir),
-        "--experiment-name", SCORING_EXPERIMENT,
+        "--bundle", env.lr_bundle_uri,
         "--run-date", DEFAULT_RUN_DATE,
         "--window-days", str(DEFAULT_WINDOW_DAYS),
         "--top-n", "3",
@@ -59,25 +58,23 @@ def test_cli_maps_every_flag_to_config_and_defaults(cli, monkeypatch):
     seen = _record_config(cli, monkeypatch)
     runner = CliRunner()
     distinct = [
-        "--gold-dir", "g", "--run-date", "20260630", "--output-dir", "o", "--tracking-dir", "t", "--experiment-name", "x",
-        "--model", "xgboost_calibrated", "--top-n", "3", "--window-days", "45", "--show-observed-outcomes",
+        "--gold-dir", "g", "--run-date", "20260630", "--output-dir", "o", "--bundle", "bundles/b",
+        "--top-n", "3", "--window-days", "45", "--show-observed-outcomes",
     ]  # fmt: skip
     assert runner.invoke(cli.app, distinct).exit_code == 0
     config = seen[-1]
     assert config.gold_dir == Path("g") and config.run_date == "20260630" and config.output_dir == Path("o")
-    assert config.tracking_dir == Path("t") and config.experiment_name == "x"
-    assert config.model_name == "xgboost_calibrated" and config.run_id is None
+    assert config.bundle_uri == "bundles/b" and config.champion_path is None
     assert config.top_n == 3 and config.window_days == 45  # a top_n/window_days swap fails here
     assert config.show_observed_outcomes is True
 
-    assert runner.invoke(cli.app, ["--gold-dir", "g", "--run-date", "20260630", "--run-id", "abc"]).exit_code == 0
-    assert seen[-1].run_id == "abc" and seen[-1].model_name is None
+    assert runner.invoke(cli.app, ["--gold-dir", "g", "--run-date", "20260630", "--champion", "c.json"]).exit_code == 0
+    assert seen[-1].champion_path == Path("c.json") and seen[-1].bundle_uri is None
 
     assert runner.invoke(cli.app, ["--gold-dir", "g", "--run-date", "20260630"]).exit_code == 0
-    default = seen[-1]  # every default (kills a wrong CLI default)
-    assert default.output_dir == Path("data/predictions") and default.tracking_dir == Path("mlflow")
-    assert default.experiment_name == "readmission-risk" and default.top_n == 10 and default.window_days is None
-    assert default.model_name is None and default.run_id is None and default.show_observed_outcomes is False
+    default = seen[-1]  # every default (kills a wrong CLI default; --bundle alone must never trip the exclusion)
+    assert default.output_dir == Path("data/predictions") and default.bundle_uri is None and default.champion_path is None
+    assert default.top_n == 10 and default.window_days is None and default.show_observed_outcomes is False
 
 
 def test_cli_end_to_end_prints_report_and_writes_partition(cli, scoring_env, tmp_path):
@@ -85,19 +82,24 @@ def test_cli_end_to_end_prints_report_and_writes_partition(cli, scoring_env, tmp
     result = CliRunner().invoke(cli.app, _real_args(scoring_env, out))
     assert result.exit_code == 0, result.stderr
     assert result.stdout.startswith(DEMO_NOTICE)
-    assert f"model: logistic_regression run_id={scoring_env.lr_run_id}" in result.stdout
+    bundle_id = Path(scoring_env.lr_bundle_uri).name
+    assert f"model: logistic_regression bundle={bundle_id[:12]} mlflow_run_id={scoring_env.lr_run_id}" in result.stdout
     assert re.search(r"Top 3 of \d+ scored discharges:", result.stdout)
     assert (out / "run_date=20260630" / "predictions.parquet").is_file()
 
 
-def test_cli_reports_user_errors_with_exit_1(cli, scoring_env, tmp_path):
+def test_cli_reports_user_errors_with_exit_1(cli, scoring_env, tmp_path, monkeypatch):
     runner, env = CliRunner(), scoring_env
     out = tmp_path / "out"
+    monkeypatch.chdir(tmp_path)  # no deploy/champion.json here
+    absent_champion = write_champion(tmp_path / "absent-bundle-champion.json", str(tmp_path / "bundles" / ("0" * 64)), "0" * 64)
+    no_bundle_args = ["--gold-dir", str(env.gold_dir), "--run-date", DEFAULT_RUN_DATE, "--window-days", str(DEFAULT_WINDOW_DAYS), "--output-dir", str(out)]
     cases = {
         "missing gold dir": ["--gold-dir", str(tmp_path / "nope"), "--run-date", DEFAULT_RUN_DATE, "--output-dir", str(out)],
         "in-sample window": _real_args(env, out, "--run-date", "20221130", "--window-days", "30"),
-        "--model with --run-id": _real_args(env, out, "--model", "xgboost_calibrated", "--run-id", env.xgb_run_id),
-        "unknown model": _real_args(env, out, "--model", "random_forest"),  # exit 1, not Typer's usage exit 2
+        "--bundle with --champion": _real_args(env, out, "--champion", "c.json"),  # exit 1, not Typer's usage exit 2
+        "no champion file and no --bundle": no_bundle_args,
+        "champion points at an absent bundle": [*no_bundle_args, "--champion", str(absent_champion)],
     }
     for label, args in cases.items():
         result = runner.invoke(cli.app, args)
@@ -133,3 +135,29 @@ def test_cli_observed_flag(cli, scoring_env, tmp_path):
     for out in ("off", "on"):  # either way the file carries no label or observed column
         frame = pd.read_parquet(tmp_path / out / "run_date=20260630" / "predictions.parquet")
         assert list(frame.columns) == list(PREDICTION_COLUMNS)
+
+
+def test_cli_gs_gold_dir_reaches_the_download_as_the_same_string(cli, monkeypatch, tmp_path):
+    """v2 slice 4: --gold-dir is a str, so gs:// is not collapsed to gs:/ by Path; the download context gets it as given
+    and the scorer gets the downloaded directory."""
+    seen_uris = []
+    downloaded = tmp_path / "downloaded"
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def fake_materialize(uri):
+        seen_uris.append(uri)
+        yield downloaded
+
+    monkeypatch.setattr(cli, "materialized_gold_dir", fake_materialize)
+    seen = _record_config(cli, monkeypatch)
+    result = CliRunner().invoke(cli.app, ["--gold-dir", "gs://bucket/full_run_2b", "--run-date", "20260630"])
+    assert result.exit_code == 0, result.stderr
+    assert seen_uris == ["gs://bucket/full_run_2b"] and seen[-1].gold_dir == downloaded
+
+
+def test_cli_bad_impersonation_email_is_an_error(cli, monkeypatch):
+    _record_config(cli, monkeypatch)
+    result = CliRunner().invoke(cli.app, ["--gold-dir", "g", "--run-date", "20260630", "--impersonate-service-account", "x"])
+    assert result.exit_code == 1 and "service-account email" in result.stderr

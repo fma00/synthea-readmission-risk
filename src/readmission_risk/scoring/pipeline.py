@@ -1,28 +1,30 @@
 """The orchestration: one run date in, one replaced prediction partition out. Every validation happens before the first
-side effect (the write), and no model is unpickled until every guard has passed. See
-notes/eg-new-feature/batch-scoring-cli-2026-09-20.md (Interfaces > pipeline.py; UX flow).
+side effect (the write), and no model is unpickled until every guard has passed. The model comes from a bundle: the
+champion pointer (deploy/champion.json) by default, or an explicit bundle. Never imports mlflow. See
+notes/eg-new-feature/batch-scoring-cli-2026-09-20.md (Interfaces > pipeline.py; UX flow) and
+notes/eg-new-feature/v2-slice2-model-bundle-and-manifest-2026-10-11.md (Interfaces > scoring/pipeline.py).
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
 
+from readmission_risk.bundles.champion import read_champion
 from readmission_risk.models.data import (
     LABEL_COLUMN,
     LABEL_SIDE_COLUMNS,
     load_gold_table_with_metadata,
 )
-from readmission_risk.models.tracking import load_logged_model
-from readmission_risk.models.training import MODEL_NAMES
 from readmission_risk.pipeline.gold_metadata import parse_yyyymmdd
 
-from .constants import DEFAULT_MODEL, DEFAULT_TOP_N
+from .bundle_guard import ModelBundle, load_bundle_model, validate_bundle
+from .constants import DEFAULT_CHAMPION_PATH, DEFAULT_TOP_N
 from .ranking import ObservedSummary, build_predictions, score_batch, summarize_observed
-from .runs import ModelRun, resolve_run_id, validate_run
 from .selection import observation_horizon, select_held_out_window, window_bounds
 from .store import write_partition
 
@@ -34,10 +36,8 @@ class ScoringConfig:
     gold_dir: Path
     run_date: str  # "YYYYMMDD"
     output_dir: Path = Path("data/predictions")
-    tracking_dir: Path = Path("mlflow")
-    experiment_name: str = "readmission-risk"  # the trainer's default; the real runs need "readmission-risk-v1"
-    model_name: str | None = None  # None and run_id None -> DEFAULT_MODEL
-    run_id: str | None = None  # when given, experiment_name is ignored
+    bundle_uri: str | None = None  # an explicit bundle; mutually exclusive with champion_path
+    champion_path: Path | None = None  # None and bundle_uri None -> DEFAULT_CHAMPION_PATH (relative to the CWD)
     top_n: int = DEFAULT_TOP_N
     window_days: int | None = None  # None -> the gold metadata's readmission_window_days
     show_observed_outcomes: bool = False
@@ -46,8 +46,8 @@ class ScoringConfig:
 @dataclass(frozen=True, eq=False)  # holds DataFrames/Series: no generated __eq__/__hash__
 class ScoringResult:
     predictions: pd.DataFrame  # exactly what was handed to the writer
-    partition_path: Path  # what the writer returned
-    run: ModelRun
+    partition_path: Path | str  # what the writer returned (a bigquery:// string from the BigQuery staging writer)
+    bundle: ModelBundle
     window_start: pd.Timestamp
     window_end: pd.Timestamp
     window_days: int  # resolved
@@ -62,18 +62,26 @@ def _validate_config(config: ScoringConfig) -> date:
         raise ValueError(f"top_n must be an int in [1, {_INT32_MAX}]; got {config.top_n!r}")  # the column is int32
     if config.window_days is not None and (type(config.window_days) is not int or not 1 <= config.window_days <= _INT32_MAX):
         raise ValueError(f"window_days must be None or an int in [1, {_INT32_MAX}]; got {config.window_days!r}")
-    if config.model_name is not None and config.model_name not in MODEL_NAMES:
-        raise ValueError(f"model name must be one of {MODEL_NAMES}; got {config.model_name!r}")
-    if config.run_id is not None and (not isinstance(config.run_id, str) or not config.run_id):
-        raise ValueError(f"run_id must be a non-empty string; got {config.run_id!r}")
-    if config.model_name is not None and config.run_id is not None:
-        raise ValueError("--model and --run-id are mutually exclusive")
+    if config.bundle_uri is not None and (type(config.bundle_uri) is not str or not config.bundle_uri):
+        raise ValueError(f"bundle_uri must be None or a non-empty string; got {config.bundle_uri!r}")
+    if config.champion_path is not None and not isinstance(config.champion_path, Path):
+        raise ValueError(f"champion_path must be None or a Path; got {config.champion_path!r}")
+    if config.bundle_uri is not None and config.champion_path is not None:
+        raise ValueError("--bundle and --champion are mutually exclusive")
     return run_date
 
 
-def score_run_date(config: ScoringConfig, *, loader=load_logged_model, writer=write_partition) -> ScoringResult:
+def score_run_date(
+    config: ScoringConfig,
+    *,
+    loader=load_bundle_model,
+    writer=write_partition,
+    on_validated: Callable[[ModelBundle, int], None] | None = None,
+) -> ScoringResult:
     """`loader` and `writer` are injection points: the BigQuery swap replaces `writer`; tests replace both to prove that
-    nothing is loaded or written until every guard has passed."""
+    nothing is loaded or written until every guard has passed. `on_validated(bundle, window_days)` is called exactly once,
+    right after the bundle has passed every guard and before the completeness guard, so a caller can record which bundle
+    a later refusal concerned (v2 slice 4's scoring_runs)."""
     # 1. config
     run_date = _validate_config(config)
 
@@ -85,20 +93,31 @@ def score_run_date(config: ScoringConfig, *, loader=load_logged_model, writer=wr
     window_days = config.window_days if config.window_days is not None else metadata.readmission_window_days
     window_start, window_end = window_bounds(run_date, window_days)
 
-    # 4. resolve and validate the run (all guards; nothing is unpickled)
-    run_id = config.run_id
-    if run_id is None:
-        run_id = resolve_run_id(config.tracking_dir, config.experiment_name, config.model_name or DEFAULT_MODEL)
-    run = validate_run(config.tracking_dir, run_id, gold=gold, metadata=metadata)
+    # 4. resolve the model source and validate the bundle (integrity checks + all guards; nothing is unpickled)
+    if config.bundle_uri is not None:
+        bundle = validate_bundle(config.bundle_uri, gold=gold, metadata=metadata)
+    else:
+        champion_path = config.champion_path or DEFAULT_CHAMPION_PATH
+        champion = read_champion(champion_path)
+        bundle = validate_bundle(
+            champion.bundle_uri,
+            gold=gold,
+            metadata=metadata,
+            expected_manifest_sha256=champion.sha256,
+            champion_path=champion_path,
+        )
+
+    if on_validated is not None:
+        on_validated(bundle, window_days)
 
     # 5. the held-out batch (the completeness guard; may refuse)
     observed_until = observation_horizon(reference_date, metadata.readmission_window_days)
     batch = select_held_out_window(
-        gold, run.partition_of, run_date=run_date, window_days=window_days, observed_until=observed_until
+        gold, bundle.partition_of, run_date=run_date, window_days=window_days, observed_until=observed_until
     )
 
     # 6. ONLY NOW load the model
-    model = loader(config.tracking_dir, run.run_id)
+    model = loader(bundle)
 
     # 7. score a label-free frame: the label AND label_horizon are dropped (both calls refuse a frame that still has either)
     label_free = batch.drop(columns=list(LABEL_SIDE_COLUMNS))
@@ -109,10 +128,11 @@ def score_run_date(config: ScoringConfig, *, loader=load_logged_model, writer=wr
         run_date=run_date,
         top_n=config.top_n,
         window_days=window_days,
-        model_run_id=run.run_id,
-        model_name=run.model_name,
+        model_bundle_id=bundle.bundle_id,
+        model_run_id=bundle.mlflow_run_id,
+        model_name=bundle.model_name,
         label_definition=metadata.label_definition,
-        gold_fingerprint=run.gold_fingerprint,
+        gold_fingerprint=bundle.gold_fingerprint,
         gold_reference_date=metadata.reference_date,
     )
     if len(predictions) != len(batch) or set(predictions["encounter_id"]) != set(batch["encounter_id"]):
@@ -128,7 +148,7 @@ def score_run_date(config: ScoringConfig, *, loader=load_logged_model, writer=wr
     return ScoringResult(
         predictions=predictions,
         partition_path=partition_path,
-        run=run,
+        bundle=bundle,
         window_start=window_start,
         window_end=window_end,
         window_days=window_days,

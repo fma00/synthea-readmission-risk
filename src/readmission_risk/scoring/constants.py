@@ -1,11 +1,13 @@
-"""Constants shared by the scoring modules. Deliberately imports nothing from the rest of the package, so that
+"""Constants shared by the scoring modules. Deliberately imports nothing from the rest of the package (only pathlib), so that
 store.py (which stamps DEMO_NOTICE into the file metadata) and pipeline.py (which imports store.write_partition)
 cannot form an import cycle. See notes/eg-new-feature/batch-scoring-cli-2026-09-20.md.
 """
 
 from __future__ import annotations
 
-DEFAULT_MODEL = "logistic_regression"
+from pathlib import Path
+
+DEFAULT_CHAMPION_PATH = Path("deploy/champion.json")  # relative to the current working directory
 DEFAULT_TOP_N = 10
 PARTITION_TRAIN = "train"
 PARTITION_TEST = "test"

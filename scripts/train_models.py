@@ -27,6 +27,8 @@ from readmission_risk.models.training import (
     TrainingConfig,
     train_and_evaluate,
 )
+from readmission_risk.pipeline.gold_metadata import parse_yyyymmdd
+from readmission_risk.warehouse.gold_source import materialized_gold_dir
 
 _REPORTED_METRICS = (
     "roc_auc",
@@ -42,7 +44,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Train the logistic-regression baseline and the calibrated XGBoost challenger on the gold table."
     )
-    parser.add_argument("--gold-dir", type=Path, required=True)
+    parser.add_argument("--gold-dir", required=True, help="local path, or a gs:// URI (downloaded to a temporary directory)")
     parser.add_argument(
         "--reference-date",
         required=True,
@@ -102,8 +104,27 @@ def _print_report(result, n_bootstrap: int) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    config = TrainingConfig(
-        gold_dir=args.gold_dir,
+    try:
+        # the dates are checked before any download, so a typo never costs a gs:// fetch ("rejected before any side effect")
+        for field, value in (("reference_date", args.reference_date), ("test_start_date", args.test_start_date)):
+            parse_yyyymmdd(value, field)
+        if args.train_start_date is not None:
+            parse_yyyymmdd(args.train_start_date, "train_start_date")
+        with materialized_gold_dir(args.gold_dir) as gold_dir:
+            result = train_and_evaluate(_config(args, gold_dir))
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        if args.verbose:
+            traceback.print_exc()
+        return 1
+
+    _print_report(result, args.n_bootstrap)
+    return 0
+
+
+def _config(args: argparse.Namespace, gold_dir: Path) -> TrainingConfig:
+    return TrainingConfig(
+        gold_dir=gold_dir,
         reference_date=args.reference_date,
         test_start_date=args.test_start_date,
         train_start_date=args.train_start_date,
@@ -114,17 +135,8 @@ def main(argv: list[str] | None = None) -> int:
         calibration_cv_folds=args.calibration_cv_folds,
         calibration_method=args.calibration_method,
         n_bootstrap=args.n_bootstrap,
+        gold_source=args.gold_dir,
     )
-    try:
-        result = train_and_evaluate(config)
-    except (FileNotFoundError, ValueError) as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        if args.verbose:
-            traceback.print_exc()
-        return 1
-
-    _print_report(result, args.n_bootstrap)
-    return 0
 
 
 if __name__ == "__main__":

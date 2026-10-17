@@ -2,3 +2,4 @@ pytest
 ruff
 pip-tools
 zizmor
+pre-commit

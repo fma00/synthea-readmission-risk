@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from readmission_risk.models.split import chronological_group_split
+from readmission_risk.models.split import SPLIT_SUMMARY_KEYS, chronological_group_split
 from tests.models.helpers import (
     REFERENCE_DATE,
     TEST_START,
@@ -304,3 +304,10 @@ def test_split_rejects_bad_inputs(case):
         df = df.iloc[0:0]
     with pytest.raises(ValueError):  # ValueError specifically, never the RuntimeError of the post-conditions
         _split(df, **kwargs)
+
+
+def test_split_summary_keys_constant():
+    """v2 slice 5: prereg.yaml's reported_quantities are checked against SPLIT_SUMMARY_KEYS at run time; it must list exactly the
+    keys a real split reports, in order."""
+    result = _split(make_gold_frame())
+    assert tuple(result.summary) == SPLIT_SUMMARY_KEYS

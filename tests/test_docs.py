@@ -16,7 +16,7 @@ What is checked, and why:
   short list of overclaiming phrases.
 - CI: the workflow requests read-only token permissions, runs pushes only on main, pins every action to a commit SHA
   with a version comment, does not persist checkout credentials and runs zizmor online with a failing exit code;
-  Dependabot covers github-actions only (weekly, cooldown, grouped).
+  Dependabot covers github-actions (weekly, cooldown, grouped) and the Terraform provider in infra/ (weekly, cooldown).
 - .gitignore: git itself is asked (`git check-ignore`) whether local-state and credential-style paths are ignored BY THE
   REPO's .gitignore (not by a local exclude file), whether shared files stay visible, and that no tracked file matches
   an ignore rule. These rules are the only thing standing between a `git add .` and a public credentials leak.
@@ -54,6 +54,7 @@ EXPECTED_H2 = [
     "License and acknowledgements",
 ]
 MUST_BE_IGNORED = [
+    "bundles/0123/manifest.json",
     ".claude/settings.local.json",
     ".claude/worktrees/x/file",
     ".streamlit/secrets.toml",
@@ -81,8 +82,26 @@ MUST_BE_IGNORED = [
     "docs/img/.tmp-abc123/reliability_light.svg",
     ".env",
     ".env.local",
+    ".venv-dataproc/bin/python",
+    ".venv-lock312/bin/python",
+    "infra/terraform.tfvars",
+    "infra/prod.auto.tfvars",
+    "infra/terraform.tfvars.json",
+    "infra/terraform.tfstate",
+    "infra/terraform.tfstate.backup",
+    "infra/.terraform/providers/x",
+    "infra/bootstrap_override.tf",
+    "infra/override.tf",
+    "infra/override.tf.json",
 ]
 MUST_NOT_BE_IGNORED = [
+    "infra/.terraform.lock.hcl",
+    "infra/terraform.tfvars.example",
+    "infra/storage.tf",
+    "infra/bootstrap.sh",
+    "deploy/champion.json",
+    "src/readmission_risk/bundles/manifest.py",
+    "tests/bundles/test_store.py",
     ".claude/commands/eg-prd.md",
     ".env.example",
     "src/readmission_risk/models/split.py",
@@ -91,6 +110,10 @@ MUST_NOT_BE_IGNORED = [
     "LICENSE",
     "README.md",
     "tests/test_docs.py",
+    "Makefile",
+    ".pre-commit-config.yaml",
+    "requirements-dataproc-3.0.txt",
+    "requirements-dataproc-3.0.in",
 ]
 HAS_GIT_CHECKOUT = (ROOT / ".git").exists() and shutil.which("git") is not None
 FORBIDDEN_README_PHRASES = ["production-ready", "production ready", "state-of-the-art", "leakage-safe", "streamlit.app"]
@@ -426,18 +449,28 @@ def test_first_screen_shows_status_limits_and_next_steps():
         assert word in head, f"first 40 lines of the README must mention {word!r}"
 
 
-def test_roadmap_names_the_planned_stages_and_marks_them_not_started():
-    roadmap = "\n".join(split_sections(_read(README))["Roadmap"])
-    for word in ("Scale-up", "Cloud", "Dashboard", "BigQuery", "Streamlit"):
-        assert word in roadmap
-    assert roadmap.count("not started") >= 3
+# v2 slice 6b (2026-10-17): cloud and scale-up are built on the unreleased `v2` branch; monitoring and the dashboard are not.
+# Each stage must state its status explicitly, and built v2 work must say it is unreleased (the latest release is v1).
+ROADMAP_STATUS = {"Cloud": "(done on `v2`", "Scale-up": "(done on `v2`", "Monitoring": "(not started)", "Dashboard": "(not started)"}
+STATUS_ROWS = {"**Cloud**": "Done on `v2` (unreleased)", "**Scale-up**": "Done on `v2` (unreleased)",
+               "**Monitoring**": "Planned (not started)", "**Dashboard**": "Planned (not started)"}  # fmt: skip
 
 
-@pytest.mark.parametrize("stage", ["**Cloud**", "**Scale-up**", "**Dashboard**"])
-def test_status_table_marks_planned_stages_as_planned(stage):
+def test_roadmap_names_the_stages_and_their_status():
+    roadmap = split_sections(_read(README))["Roadmap"]
+    text = "\n".join(roadmap)
+    for word in ("BigQuery", "Streamlit"):
+        assert word in text
+    for stage, status in ROADMAP_STATUS.items():
+        items = [line for line in roadmap if line.lstrip("0123456789. ").startswith(f"**{stage}")]
+        assert len(items) == 1 and status in items[0], (stage, items)
+
+
+@pytest.mark.parametrize(("stage", "status"), list(STATUS_ROWS.items()))
+def test_status_table_marks_each_stage_with_its_status(stage, status):
     rows = [line for line in split_sections(_read(README))["Status"] if line.startswith("|") and stage in line]
     assert len(rows) == 1, rows
-    assert "Planned" in rows[0]
+    assert rows[0].rstrip(" |").split("|")[-1].strip().startswith(status), rows[0]
 
 
 def test_readme_avoids_overclaiming_phrases():
@@ -478,6 +511,12 @@ EXPECTED_DEPENDABOT = [
     "      github-actions-minor-and-patch:",
     '        patterns: ["*"]',
     '        update-types: ["minor", "patch"]',
+    '  - package-ecosystem: "terraform"',
+    '    directory: "/infra"',
+    "    schedule:",
+    '      interval: "weekly"',
+    "    cooldown:",
+    "      default-days: 7",
 ]
 
 
@@ -533,7 +572,7 @@ def test_checkout_steps_do_not_persist_credentials():
     assert found, "no checkout step found in .github/workflows/"
 
 
-def test_dependabot_config_is_github_actions_only_weekly_with_cooldown_and_grouping():
+def test_dependabot_config_is_weekly_with_cooldown_for_actions_and_terraform():
     assert DEPENDABOT.is_file(), ".github/dependabot.yml is missing"
     assert _without_comments(_read(DEPENDABOT).split("\n")) == EXPECTED_DEPENDABOT
 

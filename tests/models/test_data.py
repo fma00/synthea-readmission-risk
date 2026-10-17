@@ -278,3 +278,39 @@ def test_importing_the_models_data_module_never_imports_pyspark():
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+# --- v2 slice 5: the loader checks version-2 metadata's spark-rowhash-v1 fingerprint ---
+
+
+def test_loader_accepts_v2_with_matching_fingerprint(tmp_path):
+    df = make_gold_frame(80, seed=5)
+    _write_parts(df, tmp_path / "gold", spark_like=True, version=2)
+    frame, metadata = load_gold_table_with_metadata(tmp_path / "gold")
+    assert metadata.metadata_version == 2
+    assert len(frame) == len(df)
+
+
+def test_loader_refuses_count_preserving_edit_v2(tmp_path):
+    """The gap CLAUDE.md named ("edits that preserve both counts are NOT detected") is closed for version-2 gold."""
+    df = make_gold_frame(80, seed=5)
+    _write_parts(df, tmp_path / "gold", n_parts=1, spark_like=True, version=2)
+    part = tmp_path / "gold" / "part-00000.parquet"
+    edited = pd.read_parquet(part)
+    i, j = edited.index[edited["gender"] == "F"][0], edited.index[edited["gender"] == "M"][0]
+    edited.loc[[i, j], "gender"] = ["M", "F"]  # same row count, same positives, different content
+    edited.to_parquet(part, index=False)
+    with pytest.raises(ValueError, match=r"spark-rowhash-v1 fingerprint .* records .*edited"):
+        load_gold_table(tmp_path / "gold")
+
+
+def test_loader_v1_unchanged_no_content_check(tmp_path):
+    df = make_gold_frame(80, seed=5)
+    _write_parts(df, tmp_path / "gold", n_parts=1)
+    part = tmp_path / "gold" / "part-00000.parquet"
+    edited = pd.read_parquet(part)
+    i, j = edited.index[edited["gender"] == "F"][0], edited.index[edited["gender"] == "M"][0]
+    edited.loc[[i, j], "gender"] = ["M", "F"]
+    edited.to_parquet(part, index=False)
+    _, metadata = load_gold_table_with_metadata(tmp_path / "gold")  # documented limitation of version-1 metadata
+    assert metadata.metadata_version == 1

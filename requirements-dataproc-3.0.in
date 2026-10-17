@@ -1,0 +1,16 @@
+# Test-only mirror of the Python libraries Dataproc Serverless runtime 3.0 bundles, for CI's pipeline-dataproc-runtime
+# job and `make setup-runtime` ONLY. Never installed on Dataproc (the runtime brings its own libraries; PRD FR3) and
+# never combined with requirements.txt. Compile under Python 3.12 with `make lock-runtime`.
+# Library minors: Google's runtime-3.0 page, https://docs.cloud.google.com/dataproc-serverless/docs/concepts/versions/spark-runtime-3.0,
+# checked 2026-10-12: latest listed sub-version 3.0.14 (2026-08-25) = Python 3.12, Java 21, pandas 2.3, pyarrow 19.0,
+# numpy 2.1 (listed by minor only, so the patch is the newest at compile time; `make lock-runtime` passes --upgrade).
+# Spark patch: what the live runtime ran, because the page lags. The page lists Spark 4.0.1; the 2026-10-12 pilot batch
+# ran Spark 4.0.2 (gold metadata spark_version; notes/eg-new-feature/v2-slice5-gs-big-join-fingerprint-pilot-2026-10-12.md, L6).
+# Refresh by hand when the page changes a library minor, or when a batch's gold metadata records a new Spark patch;
+# nothing alerts on either (see the slice-1 design note's follow-ups).
+pyspark==4.0.2
+pandas==2.3.*
+pyarrow==19.0.*
+numpy==2.1.*
+# Same pytest as requirements-dev.txt, so both CI jobs run one test runner; its transitive pins may differ (accepted).
+pytest==9.1.1

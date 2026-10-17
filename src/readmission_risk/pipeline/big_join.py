@@ -4,8 +4,10 @@ See notes/eg-new-feature/pyspark-big-join-2026-09-19.md for the design this impl
 
 from __future__ import annotations
 
+import copy
 import json
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -13,14 +15,19 @@ from pathlib import Path
 import pyspark.sql.functions as F
 from pyspark.sql import DataFrame, SparkSession, Window
 
+from .fingerprint import combine, partial_sums
 from .gold_metadata import (
+    FINGERPRINT_DEFINITION_ROWHASH_V1,
+    GOLD_METADATA_FILENAME,
     LABEL_DEFINITION,
     PLANNED_PROCEDURE_CODES,
     GoldMetadata,
+    metadata_to_json,
     parse_yyyymmdd,
     write_gold_metadata,
 )
 from .schemas import TABLE_SCHEMAS
+from .storage import LocalStorage, storage_for
 
 TABLES_JOINED: tuple[str, ...] = (
     "patients.csv",
@@ -95,32 +102,67 @@ GOLD_TABLE_COLUMNS: tuple[str, ...] = (
 
 @dataclass(frozen=True)
 class BigJoinConfig:
-    input_dir: Path
-    output_dir: Path
+    # A local Path/str, or a gs:// URI as a str (v2 slice 5, FR11): Path("gs://b/x") silently collapses to "gs:/b/x".
+    input_dir: Path | str
+    output_dir: Path | str
     reference_date: str
     lookback_years: int = 1
     readmission_window_days: int = 30
+    # str -> str recorded as the gold metadata's build_provenance (the code that built it); None -> {}.
+    provenance: Mapping[str, str] | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("input_dir", "output_dir"):
+            value = getattr(self, name)
+            if isinstance(value, Path) and str(value).startswith("gs:/"):
+                raise ValueError(f"{name}: gs:// locations must be passed as str, not Path: {value}")
 
 
-def _count_data_rows(csv_path: Path) -> int:
-    with csv_path.open("r", encoding="utf-8", errors="replace") as f:
-        return max(sum(1 for _ in f) - 1, 0)
-
-
-def load_synthea_tables(spark: SparkSession, input_dir: Path) -> dict[str, DataFrame]:
+def load_synthea_tables(spark: SparkSession, input_dir: Path | str) -> dict[str, DataFrame]:
     """Reads each table in TABLES_JOINED from input_dir/csv/<table> with its hand-declared
     schema. Raises FileNotFoundError for the first missing table, or ValueError for a table that's
-    present but empty (see TABLES_MUST_BE_NONEMPTY), before any Spark read of that file."""
+    present but empty (see TABLES_MUST_BE_NONEMPTY), before any Spark read of that file. input_dir may be a gs:// URI."""
+    storage, base = storage_for(input_dir, spark)
     tables: dict[str, DataFrame] = {}
-    csv_dir = input_dir / "csv"
     for name in TABLES_JOINED:
-        path = csv_dir / name
-        if not path.is_file():
+        path = storage.join(base, "csv", name)
+        if not storage.is_file(path):
             raise FileNotFoundError(f"Required table not found: {path}")
-        if name in TABLES_MUST_BE_NONEMPTY and _count_data_rows(path) == 0:
+        if name in TABLES_MUST_BE_NONEMPTY and not storage.has_data_row(path):
             raise ValueError(f"Required table is present but empty: {path}")
-        tables[name] = spark.read.schema(TABLE_SCHEMAS[name]).option("header", True).csv(str(path))
+        tables[name] = spark.read.schema(TABLE_SCHEMAS[name]).option("header", True).csv(path)
     return tables
+
+
+def spark_rowhash_fingerprint(spark: SparkSession, gold: DataFrame) -> tuple[str, int]:
+    """(spark-rowhash-v1 fingerprint, n_rows) of `gold`, computed in Spark: pipeline.fingerprint's canonicalizer runs per Arrow
+    batch inside the Python workers (mapInPandas), each batch emits its exact (n, sum_h1, sum_h2) as decimal strings, and Spark
+    sums them as decimal(38,0) (a bigint sum would overflow under ANSI mode; 10^7 rows x 2^64 < 10^27). Order-independent, so
+    the partitioning does not matter. RuntimeError unless the session time zone is UTC (timestamps reach the workers as
+    tz-naive values in the session zone, which the canonicalizer reads as UTC)."""
+    zone = spark.conf.get("spark.sql.session.timeZone")
+    if zone != "UTC":
+        raise RuntimeError(f"spark.sql.session.timeZone must be UTC to fingerprint; got {zone!r}")
+
+    def batch_sums(batches):
+        import pandas as pd
+
+        for batch in batches:
+            n, s1, s2 = partial_sums(batch)
+            yield pd.DataFrame({"n": [str(n)], "s1": [str(s1)], "s2": [str(s2)]})
+
+    decimal = "decimal(38,0)"
+    row = (
+        gold.mapInPandas(batch_sums, schema="n string, s1 string, s2 string")
+        .agg(
+            F.sum(F.col("n").cast(decimal)).alias("n"),
+            F.sum(F.col("s1").cast(decimal)).alias("s1"),
+            F.sum(F.col("s2").cast(decimal)).alias("s2"),
+        )
+        .first()
+    )
+    n, s1, s2 = (int(row[k]) if row[k] is not None else 0 for k in ("n", "s1", "s2"))
+    return combine(n, s1, s2), n
 
 
 def flag_inpatient_stays(encounters: DataFrame, procedures: DataFrame) -> DataFrame:
@@ -455,7 +497,9 @@ def join_patient_demographics(features: DataFrame, patients: DataFrame) -> DataF
 
 def build_big_join(spark: SparkSession, config: BigJoinConfig) -> DataFrame:
     """Orchestrates the full join and writes the result to config.output_dir as Parquet, then (last) the
-    _gold_metadata.json sidecar that downstream code validates against."""
+    _gold_metadata.json sidecar (version 2: with the spark-rowhash-v1 fingerprint of the written Parquet, the raw run's
+    generation summary and the build provenance) that downstream code validates against. input_dir and output_dir may each be
+    a local path or a gs:// URI (str)."""
     # Validated with exactly the metadata validator's strictness, before any I/O, so a bad config can never leave a Parquet
     # directory without metadata behind. `type(...) is int` rejects bool and float.
     if type(config.readmission_window_days) is not int or config.readmission_window_days < 1:
@@ -464,14 +508,25 @@ def build_big_join(spark: SparkSession, config: BigJoinConfig) -> DataFrame:
         # >= 1 is a deliberate tightening: 0/negative gives an empty/inverted window in which every windowed feature is 0
         raise ValueError(f"lookback_years must be an int >= 1; got {config.lookback_years!r}")
     reference_date = parse_yyyymmdd(config.reference_date, "reference_date")
+    provenance = dict(config.provenance or {})
+    if not all(isinstance(k, str) and k and isinstance(v, str) and v for k, v in provenance.items()):
+        raise ValueError(f"provenance must map non-empty strings to non-empty strings; got {provenance!r}")
 
-    if config.output_dir.exists():
-        raise FileExistsError(f"output_dir already exists: {config.output_dir}")
+    input_storage, input_dir = storage_for(config.input_dir, spark)
+    output_storage, output_dir = storage_for(config.output_dir, spark)
+    if output_storage.exists(output_dir):
+        raise FileExistsError(f"output_dir already exists: {output_dir}")
 
-    summary_path = config.input_dir / "generation_summary.json"
-    if not summary_path.is_file():
+    summary_path = input_storage.join(input_dir, "generation_summary.json")
+    if not input_storage.is_file(summary_path):
         raise FileNotFoundError(f"generation_summary.json not found: {summary_path}")
-    summary = json.loads(summary_path.read_text())
+    try:
+        summary = json.loads(input_storage.read_text(summary_path))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{summary_path} is not valid JSON: {exc}") from exc
+    # Validated here, before any Spark work, so a malformed summary can never leave a Parquet directory without metadata.
+    if not isinstance(summary, dict):
+        raise ValueError(f"{summary_path} must hold a JSON object")  # noqa: TRY004 -- ValueError like every bad-input case here
     if "reference_date" not in summary:
         raise ValueError(f"{summary_path} is missing a 'reference_date' key")
     recorded_reference_date = summary["reference_date"]
@@ -481,7 +536,7 @@ def build_big_join(spark: SparkSession, config: BigJoinConfig) -> DataFrame:
             f"data's own reference_date ({recorded_reference_date}) -- see {summary_path}"
         )
 
-    tables = load_synthea_tables(spark, config.input_dir)
+    tables = load_synthea_tables(spark, input_dir)
 
     index_encounters = build_index_encounters(
         tables["encounters.csv"],
@@ -517,12 +572,12 @@ def build_big_join(spark: SparkSession, config: BigJoinConfig) -> DataFrame:
         .first()
     )
 
-    gold.write.parquet(str(config.output_dir))
-    written_stats = (
-        spark.read.parquet(str(config.output_dir))
-        .agg(F.count(F.lit(1)).alias("n_rows"), F.sum("is_readmitted").alias("n_positive"))
-        .first()
-    )
+    gold.write.parquet(output_dir)
+    written = spark.read.parquet(output_dir)
+    written_stats = written.agg(F.count(F.lit(1)).alias("n_rows"), F.sum("is_readmitted").alias("n_positive")).first()
+    fingerprint, n_fingerprinted = spark_rowhash_fingerprint(spark, written)
+    if n_fingerprinted != int(written_stats["n_rows"]):
+        raise RuntimeError(f"fingerprinted {n_fingerprinted} rows but counted {written_stats['n_rows']} in {output_dir}")
     # Written LAST, so its presence is a completion marker (like _SUCCESS). `sum` over zero rows is null -> 0.
     metadata = GoldMetadata(
         label_definition=LABEL_DEFINITION,
@@ -536,8 +591,16 @@ def build_big_join(spark: SparkSession, config: BigJoinConfig) -> DataFrame:
         n_planned_stays=int(stay_stats["n_planned_stays"] or 0),
         n_continuation_stays=int(stay_stats["n_continuation_stays"] or 0),
         n_nonterminal_stays=int(stay_stats["n_nonterminal_stays"] or 0),
+        gold_fingerprint=fingerprint,
+        gold_fingerprint_definition=FINGERPRINT_DEFINITION_ROWHASH_V1,
+        spark_version=spark.version,
+        generation_summary=copy.deepcopy(summary),
+        build_provenance=provenance,
     )
-    write_gold_metadata(config.output_dir, metadata)
+    if isinstance(output_storage, LocalStorage):
+        write_gold_metadata(Path(output_dir), metadata)
+    else:
+        output_storage.write_text_new(output_storage.join(output_dir, GOLD_METADATA_FILENAME), metadata_to_json(metadata))
     if metadata.n_planned_stays == 0 and metadata.n_inpatient_stays > 0:
         warnings.warn(
             "no inpatient stay matched PLANNED_PROCEDURE_CODES; the label reduces to the continuation/terminal rules only "
