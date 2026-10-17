@@ -26,13 +26,13 @@ PRE_COMMIT_CONFIG = ROOT / ".pre-commit-config.yaml"
 EXPECTED_TARGETS = {
     "help", "setup", "hooks", "lint", "test", "pre-commit", "train", "export", "score", "score-bq", "m5-check",
     "setup-runtime", "test-runtime", "lock-main", "lock-dev", "lock-runtime", "tf-validate", "spark-zip", "generate-vm", "bigjoin-batch",
-    "check-population",
+    "check-population", "gate", "prereg-lock", "prereg-phase-b",
 }
 # Every variable the Makefile reads, plus make's own propagation variables: a pytest started by `make test X=y` (or a
 # shell exporting VENV=...) must not change what these tests see.
 MAKEFILE_VARIABLES = ("PYTHON", "PYTHON312", "VENV", "RUNTIME_VENV", "LOCK_VENV", "LOCK314_VENV", "GOLD_DIR",
                       "REFERENCE_DATE", "TEST_START_DATE", "EXPERIMENT", "RUN_DATE", "TRAIN_EXPERIMENT", "TRAIN_ARGS", "SCORE_ARGS",
-                      "EXPORT_MODEL", "EXPORT_ARGS", "TERRAFORM", "GOLD_URI", "SCORER_SA", "RUN", "JDK_TARBALL", "GEN_ARGS", "CHECK_ARGS",
+                      "EXPORT_MODEL", "EXPORT_ARGS", "TERRAFORM", "GOLD_URI", "SCORER_SA", "RUN", "JDK_TARBALL", "GEN_ARGS", "CHECK_ARGS", "GATE_ARGS", "LOCK_ARGS", "PHASE_B_ARGS",
                       "BATCH_ARGS")
 SCRUBBED_ENV = ("MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "GNUMAKEFLAGS", "MAKEFILES", *MAKEFILE_VARIABLES)
 EXPECTED_PRE_COMMIT = [
@@ -306,7 +306,8 @@ def test_terraform_fmt_hook_flags_unformatted_file(tmp_path):
 @needs_make
 def test_live_targets_refuse_without_required_variables(tmp_path):
     """v2 slice 5: the two targets that spend money refuse to run without their variables, and pass them through."""
-    for target, needed in (("generate-vm", "set RUN="), ("bigjoin-batch", "set RUN=")):
+    for target, needed in (("generate-vm", "set RUN="), ("bigjoin-batch", "set RUN="), ("gate", "set RUN="),
+                           ("prereg-lock", "set LOCK_ARGS=")):
         result = run_make(target, f"VENV={tmp_path}/novenv")
         assert result.returncode != 0 and needed in result.stderr, target
     no_jdk = run_make("generate-vm", f"VENV={tmp_path}/novenv", "RUN=pilot_20k")
@@ -316,4 +317,9 @@ def test_live_targets_refuse_without_required_variables(tmp_path):
     )
     assert "scripts/submit_big_join_batch.py --run pilot_20k --dry-run" in _dry_run("bigjoin-batch", "RUN=pilot_20k", "BATCH_ARGS=--dry-run")
     assert ".venv/bin/python scripts/build_spark_zip.py" in _dry_run("spark-zip")
+    assert "scripts/run_promotion_gate.py --run main_200k --negative-control" in _dry_run("gate", "RUN=main_200k", "GATE_ARGS=--negative-control")
+    assert "scripts/prereg_append.py lock --challenger-model logistic_regression --experiment-name x" in _dry_run(
+        "prereg-lock", "LOCK_ARGS=--experiment-name x"
+    )
+    assert "scripts/prereg_append.py phase-b" in _dry_run("prereg-phase-b")
 

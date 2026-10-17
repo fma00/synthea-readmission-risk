@@ -23,6 +23,17 @@ _RUN_NAME_RE = re.compile(r"[a-z0-9_]{1,30}")
 _HEX64_RE = re.compile(r"[0-9a-f]{64}")
 _HEX40_RE = re.compile(r"[0-9a-f]{40}")
 _ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_HEX32_RE = re.compile(r"[0-9a-f]{32}")
+# v2 slice 6b: the optional blocks appended after Phase A, in this order (notes/eg-new-feature/v2-slice6b-promotion-gate-frozen-v1-2026-10-16.md,
+# Interfaces > S4). The two tuples below copy models.constants.MODEL_NAMES and models.gate.RULE_NAMES so this module stays
+# stdlib + pyyaml; tests/ops/test_prereg.py ties them together.
+APPENDED_KEYS: tuple[str, ...] = ("analysis_lock", "phase_b")
+PREREG_MODEL_NAMES: tuple[str, ...] = ("logistic_regression", "xgboost_calibrated")
+PREREG_RULE_NAMES: tuple[str, ...] = ("roc_auc_vs_champion", "roc_auc_vs_reason_code_lookup", "brier_noninferior_vs_champion")
+PHASE_B_REPORT_PATHS = {
+    "gate": "notes/eg-new-feature/v2-slice6b-reports/gate_report.json",
+    "negative_control": "notes/eg-new-feature/v2-slice6b-reports/negative_control_report.json",
+}
 
 
 class PreregError(ValueError):
@@ -67,6 +78,30 @@ class Prereg:
     @property
     def label(self) -> dict:
         return self.raw["label"]
+
+    @property
+    def training(self) -> dict:
+        return self.raw["training"]
+
+    @property
+    def bootstrap(self) -> dict:
+        return self.raw["bootstrap"]
+
+    @property
+    def promotion(self) -> dict:
+        return self.raw["promotion"]
+
+    @property
+    def frozen_v1(self) -> dict:
+        return self.raw["frozen_v1"]
+
+    @property
+    def analysis_lock(self) -> dict | None:
+        return self.raw.get("analysis_lock")
+
+    @property
+    def phase_b(self) -> dict | None:
+        return self.raw.get("phase_b")
 
     @property
     def split(self) -> dict:
@@ -132,6 +167,26 @@ def _null(path: str, value: object) -> None:
 def _hex64(path: str, value: object) -> None:
     if not isinstance(value, str) or not _HEX64_RE.fullmatch(value):
         _fail(path, f"must be 64 lowercase hex characters; got {value!r}")
+
+
+def _hex40(path: str, value: object) -> None:
+    if not isinstance(value, str) or not _HEX40_RE.fullmatch(value):
+        _fail(path, f"must be 40 lowercase hex characters; got {value!r}")
+
+
+def _hex32(path: str, value: object) -> None:
+    if not isinstance(value, str) or not _HEX32_RE.fullmatch(value):
+        _fail(path, f"must be 32 lowercase hex characters; got {value!r}")
+
+
+def _bool(path: str, value: object) -> None:
+    if type(value) is not bool:
+        _fail(path, f"must be true or false; got {value!r}")
+
+
+def _number_or_null(path: str, value: object) -> None:
+    if value is not None and type(value) not in (int, float):
+        _fail(path, f"must be a number or null; got {value!r}")
 
 
 def _yyyymmdd(path: str, value: object) -> None:
@@ -264,6 +319,71 @@ SPEC: dict = {
 }
 
 
+ANALYSIS_LOCK_SPEC: dict = {
+    "locked_on": _iso_date,
+    "challenger_model": _one_of(*PREREG_MODEL_NAMES),
+    "experiment_name": _str,
+    "frozen_v1_rows": _literal("modeling_rows"),
+    "negative_control": _literal("constant_train_prevalence"),
+    "code_commit": _hex40,
+}
+PHASE_B_SPEC: dict = {
+    "recorded_on": _iso_date,
+    "reports": {
+        name: {"path": _literal(path), "sha256": _hex64} for name, path in PHASE_B_REPORT_PATHS.items()
+    },
+    "decision": _one_of("PROMOTE", "REFUSE"),
+    "challenger": {"run_id": _hex32, "bundle_id": _hex64, "git_commit": _hex40},
+    "champion": {"run_id": _hex32, "bundle_id": _hex64},
+    "rules": None,  # checked by _check_phase_b
+    "lookup_still_wins": _bool,
+    "negative_control_decision": _literal("REFUSE"),
+    "frozen_v1": None,  # checked by _check_phase_b
+    "power": {"n_test": _int(0), "n_test_positive": _int(0), "min_test_positives": _int(1)},
+}
+_FROZEN_METRICS = ("roc_auc", "brier_score", "observed_expected_ratio")
+
+
+def _check_phase_b(phase_b: dict, frozen_models: list) -> None:
+    rules = phase_b["rules"]
+    if not isinstance(rules, list) or [r.get("name") if isinstance(r, dict) else None for r in rules] != list(PREREG_RULE_NAMES):
+        _fail("phase_b.rules", f"must be exactly the rules {list(PREREG_RULE_NAMES)} in that order; got {rules!r}")
+    for i, rule in enumerate(rules):
+        if set(rule) != {"name", "value", "threshold", "passed"}:
+            _fail(f"phase_b.rules[{i}]", f"must have exactly the keys name, value, threshold, passed; got {sorted(rule)}")
+        _number_or_null(f"phase_b.rules[{i}].value", rule["value"])
+        _number_or_null(f"phase_b.rules[{i}].threshold", rule["threshold"])
+        _bool(f"phase_b.rules[{i}].passed", rule["passed"])
+    frozen = phase_b["frozen_v1"]
+    if not isinstance(frozen, dict) or list(frozen) != list(frozen_models):
+        _fail("phase_b.frozen_v1", f"must have exactly the models {frozen_models} in that order; got {frozen!r}")
+    for model, entry in frozen.items():
+        path = f"phase_b.frozen_v1.{model}"
+        if not isinstance(entry, dict) or set(entry) != {*_FROZEN_METRICS, "accepted"}:
+            _fail(path, f"must have exactly the keys {sorted({*_FROZEN_METRICS, 'accepted'})}; got {entry!r}")
+        for metric in _FROZEN_METRICS:
+            triple = entry[metric]
+            if not isinstance(triple, list) or len(triple) != 3:
+                _fail(f"{path}.{metric}", f"must be [point, lower, upper]; got {triple!r}")
+            for j, v in enumerate(triple):
+                _number_or_null(f"{path}.{metric}[{j}]", v)
+        _bool(f"{path}.accepted", entry["accepted"])
+
+
+def _split_appended(doc: object) -> tuple[object, dict]:
+    """(the Phase A document, {appended key: block}). The appended blocks must come after every Phase A key, the lock before
+    phase_b, and phase_b only together with a lock."""
+    if not isinstance(doc, dict):
+        return doc, {}
+    keys = list(doc)
+    appended = [k for k in keys if k in APPENDED_KEYS]
+    if appended and keys[len(keys) - len(appended):] != appended:
+        _fail("<top>", f"{appended} must come after every Phase A key")
+    if appended not in ([], ["analysis_lock"], ["analysis_lock", "phase_b"]):
+        _fail("<top>", f"appended blocks must be analysis_lock, then optionally phase_b; got {appended}")
+    return {k: v for k, v in doc.items() if k not in APPENDED_KEYS}, {k: doc[k] for k in appended}
+
+
 def _walk(spec: dict, value: object, path: str) -> None:
     if not isinstance(value, dict):
         _fail(path or "<top>", f"must be a mapping; got {type(value).__name__}")
@@ -361,10 +481,16 @@ def parse_prereg(text: str) -> Prereg:
         doc = yaml.load(text, Loader=_UniqueKeySafeLoader)  # noqa: S506 -- a SafeLoader subclass
     except yaml.YAMLError as exc:
         raise PreregError(f"{PREREG_FILENAME}: invalid YAML: {exc}") from exc
-    _walk(SPEC, doc, "")
-    _check_deviations(doc)
-    _check_cross_field(doc)
-    populations = {name: Population(name=name, **values) for name, values in doc["populations"].items()}
+    phase_a, appended = _split_appended(doc)
+    _walk(SPEC, phase_a, "")
+    _check_deviations(phase_a)
+    _check_cross_field(phase_a)
+    if "analysis_lock" in appended:
+        _walk(ANALYSIS_LOCK_SPEC, appended["analysis_lock"], "analysis_lock")
+    if "phase_b" in appended:
+        _walk(PHASE_B_SPEC, appended["phase_b"], "phase_b")
+        _check_phase_b(appended["phase_b"], phase_a["frozen_v1"]["models"])
+    populations = {name: Population(name=name, **values) for name, values in phase_a["populations"].items()}
     return Prereg(raw=doc, populations=populations)
 
 
@@ -402,7 +528,7 @@ def check_prereg_against_code(prereg: Prereg) -> None:
     lr = build_logistic_regression(0).named_steps["model"].get_params()
     metric_names = set(
         evaluate_probabilities(np.array([0, 1, 0, 1]), np.array([0.1, 0.9, 0.2, 0.8]), train_prevalence=0.5).metrics
-    ) | {"observed_expected_ratio"}
+    )
     expected = {
         "label.definition": LABEL_DEFINITION,
         "label.planned_procedure_codes": list(PLANNED_PROCEDURE_CODES),

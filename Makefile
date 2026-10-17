@@ -42,7 +42,7 @@ define fresh_venv
 case "$(1)" in */*|*..*) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; .venv-*) ;; *) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; esac; rm -rf "$(1)" && $(2) -m venv "$(1)"
 endef
 
-.PHONY: help setup hooks lint test pre-commit train export score score-bq m5-check setup-runtime test-runtime lock-main lock-dev lock-runtime tf-validate spark-zip generate-vm bigjoin-batch check-population
+.PHONY: help setup hooks lint test pre-commit train export score score-bq m5-check setup-runtime test-runtime lock-main lock-dev lock-runtime tf-validate spark-zip generate-vm bigjoin-batch check-population gate prereg-lock prereg-phase-b
 .DEFAULT_GOAL := help
 
 help: ## List the targets
@@ -157,3 +157,15 @@ check-population: ## LIVE, read-only: download raw subsets and gold for RUN and 
 	@test -n "$(RUN)" || { echo "ERROR: set RUN=<a population in prereg.yaml, e.g. pilot_20k>" >&2; exit 1; }
 	@echo "READ-ONLY: downloads RUN's raw patients/encounters (main_200k: ~4.5 GB) and gold into data/checks/"
 	$(BIN)/python scripts/check_population.py --run $(RUN) $(CHECK_ARGS)
+
+gate: ## LIVE, read-only: promotion gate + frozen-v1 for RUN (GATE_ARGS: --challenger-experiment, --challenger-bundle, ...)
+	@test -n "$(RUN)" || { echo "ERROR: set RUN=<main_200k, or pilot_20k with GATE_ARGS=--rehearsal ...>" >&2; exit 1; }
+	@echo "READ-ONLY: downloads RUN's gold; exit 0 PROMOTE, 3 REFUSE, 2 could not run (judge the outcome from the report)"
+	$(BIN)/python scripts/run_promotion_gate.py --run $(RUN) $(GATE_ARGS)
+
+prereg-lock: ## Append the slice-6b analysis lock to prereg.yaml before training (LOCK_ARGS: --experiment-name NAME)
+	@test -n "$(LOCK_ARGS)" || { echo "ERROR: set LOCK_ARGS=\"--experiment-name <the experiment the challenger will be trained into>\"" >&2; exit 1; }
+	$(BIN)/python scripts/prereg_append.py lock --challenger-model logistic_regression $(LOCK_ARGS)
+
+prereg-phase-b: ## Append Phase B to prereg.yaml from the two main_200k gate reports (extra flags via PHASE_B_ARGS)
+	$(BIN)/python scripts/prereg_append.py phase-b $(PHASE_B_ARGS)

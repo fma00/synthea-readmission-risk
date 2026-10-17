@@ -18,6 +18,7 @@ BOOTSTRAP_METRICS: tuple[str, ...] = (
     "expected_calibration_error",
     "calibration_gap",
     "abs_calibration_gap",
+    "observed_expected_ratio",  # v2 slice 6b: prereg metrics.definitions, sum(y_true) / sum(y_prob)
 )
 # calibration_gap = mean(y_prob) - mean(y_true)  (SIGNED calibration-in-the-large; abs_calibration_gap = |gap|).
 # WHY BOTH: the signed gap says which DIRECTION a model is miscalibrated (per-model interval, reported for
@@ -109,10 +110,18 @@ def evaluate_probabilities(
         "observed_prevalence": observed,
         "calibration_gap": gap,
         "abs_calibration_gap": abs(gap),
+        "observed_expected_ratio": observed_expected_ratio(y_true, y_prob),
         "n_rows": float(len(y_true)),
         "n_positive": float(y_true.sum()),
     }
     return EvaluationResult(metrics=metrics, calibration_curve=curve)
+
+
+def observed_expected_ratio(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+    """prereg.yaml metrics.definitions.observed_expected_ratio: sum(y_true) / sum(y_prob); NaN when sum(y_prob) == 0 (only a
+    model predicting 0 everywhere)."""
+    expected = float(np.sum(y_prob))
+    return float(np.sum(y_true)) / expected if expected > 0 else float("nan")
 
 
 def cluster_resample_indices(groups: np.ndarray, rng: np.random.Generator) -> np.ndarray:
@@ -150,6 +159,7 @@ def _resample_metrics(y: np.ndarray, p: np.ndarray, n_bins: int) -> dict[str, fl
         "expected_calibration_error": ece,
         "calibration_gap": gap,
         "abs_calibration_gap": abs(gap),
+        "observed_expected_ratio": observed_expected_ratio(y, p),
     }
 
 

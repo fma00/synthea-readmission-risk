@@ -18,7 +18,6 @@ import re
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import cloudpickle
@@ -54,21 +53,17 @@ from readmission_risk.models.data import (
     NUMERIC_OTHER_FEATURES,
     gold_fingerprint,
 )
-from readmission_risk.models.versions import current_python_version
+from readmission_risk.models.versions import (
+    current_python_version,
+    installed_versions,
+    parse_python_major_minor,
+)
 from readmission_risk.pipeline.fingerprint import rowhash_fingerprint
 from readmission_risk.pipeline.gold_metadata import GoldMetadata, parse_yyyymmdd
 
 from .constants import PARTITION_TEST, PARTITION_TRAIN
 
-_PYTHON_VERSION_RE = re.compile(r"([0-9]+)\.([0-9]+)(?:\.([0-9]+))?")  # [0-9], not \d: \d also matches non-ASCII digits
 _RUN_ID_RE = re.compile(r"[0-9a-f]{32}")
-_DISTRIBUTIONS = {
-    "sklearn_version": "scikit-learn",
-    "xgboost_version": "xgboost",
-    "mlflow_version": "mlflow",
-    "pandas_version": "pandas",
-    "numpy_version": "numpy",
-}
 _FINGERPRINT_DEFINITIONS: dict[str, Callable[[pd.DataFrame], str]] = {
     FINGERPRINT_DEFINITION_V1: gold_fingerprint,
     FINGERPRINT_DEFINITION_ROWHASH_V1: rowhash_fingerprint,  # v2 slice 5: bundles trained on version-2 gold
@@ -92,26 +87,6 @@ class ModelBundle:
     partition_of: pd.Series  # encounter_id -> "train" | "test" (object dtype, unique index), from split_assignment.csv
     model_bytes: bytes = field(repr=False)  # the sha256-verified model.pkl bytes; load_bundle_model unpickles THESE
     champion_sha256: str | None = None  # the champion pointer's pin (already proven equal by I2); None for --bundle
-
-
-def installed_versions() -> dict[str, str]:
-    """The five library versions guard 8 checks, read from installed distribution metadata (never imports mlflow)."""
-    result = {}
-    for key, distribution in _DISTRIBUTIONS.items():
-        try:
-            result[key] = version(distribution)
-        except PackageNotFoundError:
-            result[key] = "not installed"
-    return result
-
-
-def parse_python_major_minor(value: object) -> tuple[int, int] | None:
-    """(major, minor) of an 'X.Y' or 'X.Y.Z' string (re.fullmatch, ASCII digits 0-9 only); None for anything else,
-    including non-strings (a hand-edited MLmodel can hold a YAML float such as 3.12)."""
-    if not isinstance(value, str):
-        return None
-    match = _PYTHON_VERSION_RE.fullmatch(value)
-    return (int(match.group(1)), int(match.group(2))) if match else None
 
 
 # --------------------------------------------------------------------------------------------- integrity (I1-I5)
