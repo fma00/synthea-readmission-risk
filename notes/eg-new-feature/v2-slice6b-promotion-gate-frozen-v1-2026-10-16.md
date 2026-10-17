@@ -520,3 +520,65 @@ closed in the same round as readiness. Deviations from the text above:
 - Sanity run on real artifacts (no `main_200k` access): both `readmission-risk-v1` runs pass guard 14 and guard 8's rules; the
   champion bundle verifies and is the v1 LR run; both frozen models reproduce their logged v1 test metrics on
   `data/gold/full_run_2b` (LR 0.8692, XGBoost 0.8225); champion-bundle and frozen-LR predictions are identical.
+
+## Results (live run 2026-10-17)
+
+**6b is accepted:** the main gate run produced a decision with `error` null, the negative control was refused, and Phase B is
+committed (PR #19). **The pre-registered decision is REFUSE: the lookup still wins**; the champion is not replaced and no
+promotion follows. Each step was confirmed by the owner immediately before it; interim log `data/gate/live-checks.md` (gitignored).
+
+### L0-L2
+
+- **L0 PASS** (v2 `1b3b44b`): prereg parses, P1b ok, no lock, no Phase B, `deviations: []`; `readmission-risk-v1` LR `fe9633ca…`
+  and XGBoost `abe9c605…` (Python 3.14.7, library tags = installed); champion copy verifies and is the v1 LR run; v1 gold present;
+  no rehearsal or main experiment; **no run in the store had used `main_200k`'s gold**; ADC ok; CI green.
+- **L1 PASS (rehearsal, pipeline sanity only):** `rehearsal-6b-pilot20k` trained in 14 s (LR `d5afdeb4…`, XGBoost `01f59490…`),
+  bundle `af67e25f…`; gate `--rehearsal` in 44 s with every verification step passing, `error` null, 2,000/2,000 resamples; the
+  negative control refused. No pilot number was used for any choice.
+- **L2 PASS:** `make prereg-lock` appended `analysis_lock` (`code_commit` `1b3b44b`), committed as `84b6f42` (PR #18, merged as
+  `55dce06`). CI on #18 first failed because three new test modules assumed a Phase-A-only repository `prereg.yaml`; fixed in
+  `83b34ee` with a `phase_a_text()` test helper (tests only; the locked code paths unchanged). Re-checked with real git after the
+  merge: lock commit on `origin/v2`, block unchanged since it, no `prereg.yaml` change after it, HEAD code = `code_commit`, HEAD
+  contains the lock commit, no run on `main_200k`'s gold.
+
+### L3-L4
+
+- **L3 PASS:** `make train TRAIN_EXPERIMENT=readmission-risk-v2-main200k` (gold from `gs://…/v2/main_200k`) in 47 s, exit 0. LR
+  `a9f32f4b7c584f4c8fe992748410789f`, XGBoost `17b5c6042a8a41cf9121633acbeaec0f`: active, `git_dirty` clean, commit `55dce06`
+  (contains the lock commit), rowhash `80edd13d…`, seed 42, test start 20230101, versions = installed; exactly these two runs on
+  `main_200k`'s gold.
+- **Process slip, disclosed:** the post-training error check (`grep Error`) also matched `expected_calibration_error` and printed
+  the training log's test-window metric lines into the working session before the gate ran. No choice could depend on them:
+  challenger, rules, FR16 rows, negative control and gate code were locked and merged before training, and the gate refuses any
+  later change. Recorded here and in `docs/results.md`.
+- **L4 PASS:** challenger bundle `569fdab6c17d433542b2cd6b531ed8efc5677fb37b00a792d84f79803c6a0f72` (local).
+
+### L5: the gate on main_200k
+
+Main run 12:58:34Z-13:05:30Z (6 min 56 s), negative control 13:05:44Z-13:12:08Z; both `error` null, every verification step
+passing, 2,000/2,000 resamples, power 616 test positives (floor 400).
+
+| Rule | Value | Threshold | Result |
+|---|---|---|---|
+| roc_auc_vs_champion (lower bound) | +0.0012 | > 0 | PASS |
+| roc_auc_vs_reason_code_lookup (lower bound) | −0.0033 | > 0 | FAIL |
+| brier_noninferior_vs_champion (upper bound) | +0.00027 | ≤ 0.00091 | PASS |
+
+Decision **REFUSE**, `lookup_still_wins` true. Test-window points: challenger ROC-AUC 0.8719 / Brier 0.01824 / O/E 1.006; champion
+0.8625 / 0.01814 / 1.111; lookup 0.8706 / 0.01839 / 0.961; challenger − champion ROC-AUC [0.0012, 0.0172], challenger − lookup
+[−0.0033, 0.0060]. XGBoost (reported only): 0.8805 / 0.0185 / O/E 1.36. Frozen v1 on all 157,827 modeling rows (2,542 positives):
+LR 0.905 [0.899, 0.911], O/E 1.03 [0.99, 1.07], accepted; XGBoost 0.855 [0.849, 0.862], O/E 1.09 [1.05, 1.14], accepted. Negative
+control: REFUSE, all three rules failed (AUC lower bounds −0.376 / −0.385; Brier upper 0.0013 > 0.0009).
+
+### L6-L7
+
+- **L6 PASS:** `make prereg-phase-b` appended `phase_b` and copied both reports to `notes/eg-new-feature/v2-slice6b-reports/`
+  (sha256 `70e046b2…` and `d045bf20…`, verified); commit `185a884`, PR #19, merged.
+- **L7:** this section, the v2 section leading `docs/results.md`, CLAUDE.md.
+
+### Findings and follow-ups
+
+- The pre-registered expectation held: at 200k patients the retrained model catches up with the reason-code lookup but does not
+  pass it; the champion's main weakness on the new population is calibration (O/E 1.11), not ranking.
+- Not pursued (would need its own pre-registration): XGBoost as a challenger; promotion on calibration grounds.
+- Still open: 6c (FR0.3 portable export); slice 7 (monitoring); V-post and L-post after v2 merges into `main`.

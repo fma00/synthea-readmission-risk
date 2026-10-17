@@ -449,18 +449,28 @@ def test_first_screen_shows_status_limits_and_next_steps():
         assert word in head, f"first 40 lines of the README must mention {word!r}"
 
 
-def test_roadmap_names_the_planned_stages_and_marks_them_not_started():
-    roadmap = "\n".join(split_sections(_read(README))["Roadmap"])
-    for word in ("Scale-up", "Cloud", "Dashboard", "BigQuery", "Streamlit"):
-        assert word in roadmap
-    assert roadmap.count("not started") >= 3
+# v2 slice 6b (2026-10-17): cloud and scale-up are built on the unreleased `v2` branch; monitoring and the dashboard are not.
+# Each stage must state its status explicitly, and built v2 work must say it is unreleased (the latest release is v1).
+ROADMAP_STATUS = {"Cloud": "(done on `v2`", "Scale-up": "(done on `v2`", "Monitoring": "(not started)", "Dashboard": "(not started)"}
+STATUS_ROWS = {"**Cloud**": "Done on `v2` (unreleased)", "**Scale-up**": "Done on `v2` (unreleased)",
+               "**Monitoring**": "Planned (not started)", "**Dashboard**": "Planned (not started)"}  # fmt: skip
 
 
-@pytest.mark.parametrize("stage", ["**Cloud**", "**Scale-up**", "**Dashboard**"])
-def test_status_table_marks_planned_stages_as_planned(stage):
+def test_roadmap_names_the_stages_and_their_status():
+    roadmap = split_sections(_read(README))["Roadmap"]
+    text = "\n".join(roadmap)
+    for word in ("BigQuery", "Streamlit"):
+        assert word in text
+    for stage, status in ROADMAP_STATUS.items():
+        items = [line for line in roadmap if line.lstrip("0123456789. ").startswith(f"**{stage}")]
+        assert len(items) == 1 and status in items[0], (stage, items)
+
+
+@pytest.mark.parametrize(("stage", "status"), list(STATUS_ROWS.items()))
+def test_status_table_marks_each_stage_with_its_status(stage, status):
     rows = [line for line in split_sections(_read(README))["Status"] if line.startswith("|") and stage in line]
     assert len(rows) == 1, rows
-    assert "Planned" in rows[0]
+    assert rows[0].rstrip(" |").split("|")[-1].strip().startswith(status), rows[0]
 
 
 def test_readme_avoids_overclaiming_phrases():
