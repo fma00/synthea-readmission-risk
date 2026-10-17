@@ -1,6 +1,6 @@
 # v2 slice 6c: portable (non-pickle) export of the frozen v1 models, manifest schema 2 (2026-10-17)
 
-Status: built 2026-10-17 (revision 7 design); live steps 4 and 5 open (after design-check round 4; owner chose "apply fixes and re-run once more" at the 3-revision cap). Branch: a feature branch off `v2` (at `7b602d7`), merged into
+Status: built 2026-10-17 (revision 7 design); live steps done 2026-10-17/18 (Results 4, 5) (after design-check round 4; owner chose "apply fixes and re-run once more" at the 3-revision cap). Branch: a feature branch off `v2` (at `7b602d7`), merged into
 `v2` by PR.
 
 ## Why
@@ -675,7 +675,7 @@ load gold + metadata → validate the local schema-1 source bundle with the scor
 its test rows → `prepare_features` → extract parameters + UBJ boosters → build probes from the document → pickle outputs
 on test rows and probes → serialize `portable.json` and `portable_reference.csv` → reload both through the predictor →
 `verify_reference` (exact equality) → write the schema-2 bundle (local, idempotent; or GCS, create-only) → print. Later,
-in any environment: `read_portable_bundle` → `verify_reference` re-proves parity without the pickle or the gold. The
+in an environment that reproduces the writer's arithmetic (measured: macOS, not Linux; Results 5): `read_portable_bundle` → `verify_reference` re-proves parity without the pickle or the gold. The
 scorer, given a schema-2 bundle (by `--bundle`), validates it and scores from `model.pkl` exactly as for its source.
 
 ## Data handling
@@ -866,7 +866,10 @@ checked. Two tests, so the portable half keeps running after the v1 pins move:
 
 1. FR16 fallback wiring: a `--portable` frozen-v1 mode in `ops/gate_run.py` using `read_portable_bundle` +
    `verify_reference` first (D4); needed once the v1 pins move; its results are "reference-verified" only (Known risk,
-   caveat on scope).
+   caveat on scope). Blocked on follow-up 7's decision: measured, `verify_reference` refuses on Linux.
+7. Cross-platform reference policy (Results 5): tolerance (via `/eg-prd`), an additional Linux-written reference while the
+   pickles still load, or a macOS-only fallback. Decide before building follow-up 1, and before the v1 pins move if (b)
+   is wanted.
 2. Moving `deploy/champion.json` to the schema-2 LR bundle (D3), as a PR with this note's parity table.
 3. A portable scoring path in the scorer (D2) — only if a champion ever has to be scored after a pin bump.
 4. Portable export for future (200k / retrained) runs, or at training time; a more general model-shape coverage.
@@ -981,8 +984,40 @@ Built 2026-10-17 on branch `v2-slice6c-portable-export` (off `v2` at `7b602d7`).
 3. `score_discharges.py --run-date 20250630` with `--bundle bundles/fb44c38910b4…` and with `--bundle bundles/75a1448729ef…`,
    each into its own scratchpad `--output-dir`: both exit 0, 42 rows, frames equal under `assert_frame_equal(check_exact=True)`
    after dropping `model_bundle_id`.
-4. **Open (owner-confirmed live step):** the GCS upload and its read-back checks.
-5. **Open (owner-confirmed):** the cross-environment measurements (i-a, i-b, ii).
+4. **GCS upload (owner, 2026-10-17, after PR #21 merged as `fa95294`):** both bundles uploaded create-only as
+   `bundle-writer` with `make export-portable … PORTABLE_ARGS="--bundles-dir gs://synthea-readmission-risk-bundles
+   --impersonate-service-account <bundle-writer SA>"`; the re-exports printed the local ids. Read back as the owner:
+   `fb44c38910b4…` lists 5 objects and `bf66d1cb272b…` 10 (manifest included, so no partial upload);
+   `read_portable_bundle("gs://…")` + `verify_reference` → 0.0 for both; `validate_bundle("gs://…", gold=full_run_2b)`
+   passes for both.
+5. **Cross-environment measurements (2026-10-18, owner-approved unpinned installs in scratch venvs outside the repo; the
+   repo's `src/` put on `sys.path`, nothing installed into or written to the repo).** `verify_reference` on both local
+   schema-2 bundles:
+
+   | Run | Environment | LR | XGBoost |
+   |---|---|---|---|
+   | control | repo `.venv`: macOS arm64, Accelerate, numpy 2.4.4, scipy 1.18.1, xgboost 3.4.1, sklearn 1.9.1, pandas 2.3.3 | 0.0 | 0.0 |
+   | i-a | macOS, newest releases: numpy **2.5.4**, pandas **3.0.6** (scipy, xgboost, sklearn already newest = the pins) | 0.0 | 0.0 |
+   | i-b | macOS, numpy 2.5.4, scipy 1.18.1, xgboost 3.4.1, **no scikit-learn, no pandas** (xgboost's soft sklearn import falls back) | 0.0 | 0.0 |
+   | i-c1 | macOS, numpy 2.5.4, **xgboost 3.3.0, scipy 1.17.1**, no sklearn/pandas (added: an older minor, as no newer one exists) | 0.0 | 0.0 |
+   | i-c2 | macOS, numpy 2.5.4, **xgboost 3.0.5, scipy 1.16.3**, no sklearn/pandas | 0.0 | **refused, max abs diff 0.975** |
+   | ii-arm | Docker `python:3.14.7-slim` linux/arm64, hash-locked `requirements.txt` + Linux extras (same pins), scipy-openblas | **refused, 3.9e-16** | **refused, 2.6e-9** |
+   | ii-x86 | the same image as linux/amd64 (emulated), scipy-openblas | **refused, 3.3e-16** | **refused, 2.6e-9** |
+
+   - **i-c2 cause (measured):** xgboost ≥ 3.1 writes `base_score` as a vector (`[1.584507E-2]`); 3.0.5 does not parse it
+     and silently uses its default 0.5, so all 300 trees load but every margin is shifted. An older reader of a newer
+     model file is outside XGBoost's compatibility promise; the point is that `verify_reference` refused instead of
+     returning wrong scores.
+   - **ii (decisive extra check):** in both Linux containers the original pickle (same pins) and the portable form agree
+     **exactly** (0.0, both segments, both models), and the pickle itself differs from the macOS-written reference by the
+     same amounts. The XGBoost difference is identical on arm64 and x86-64, so it comes from the macOS vs Linux builds,
+     not the CPU. So: the portable form is faithful on every platform measured (FR0.3's requirement holds), but the
+     self-contained bit-exact re-check passes only on the writer's platform family.
+   - **Consequence (not decided here):** the FR16 fallback (follow-up 1) cannot run bit-exactly on Linux (CI, a Linux
+     laptop) against this reference. Options for its design: (a) a tolerance, which changes FR0.3's "max abs diff 0" and
+     goes through `/eg-prd`; (b) additionally store a Linux-written reference (produce it now, in a Linux container, while
+     the pickles still load under the pins; needs a manifest/format change); (c) run the fallback on macOS only. Recorded
+     as follow-up 7.
 6. Gate: `ruff check .` clean; `pytest` 1,654 passed, 2 skipped (both pre-existing environment skips); `make lock-main`
    changed only one `# via` comment in `requirements.txt` (scipy is now `-r requirements.in`); `tests/test_lockfiles.py` passes.
 
