@@ -48,5 +48,5 @@ promotion.
 - **Re-running the 6b gate:** `ops/gate_run.py` reads `deploy/champion.json` and assumes the frozen-v1 champion, so it
   refuses after this promotion. Reproduce Phase B from a worktree at the Phase-B commit
   (`git worktree add ../phase-b <commit of PR #19>`).
-- **PR:** pending (filled in by a follow-up commit on the same PR).
+- **PR:** #23 (v2 slice 7).
 - **Design:** `notes/eg-new-feature/v2-slice7-monitoring-tick-ledger-2026-10-18.md` (D2).
