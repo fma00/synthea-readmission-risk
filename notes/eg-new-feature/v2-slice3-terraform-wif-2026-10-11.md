@@ -570,3 +570,10 @@ Recorded under the redaction rule. Implementation 2026-10-11 on branch `v2-slice
 | Gap | Resolution |
 |---|---|
 | Critic 1: without `token_format` the exchange happens in the gcloud step, not in `auth`; the negative proof was not specific | Kept `auth` without `token_format` (no token output). V-post and the failure-mode row now name the gcloud step and the exact error class: STS refusal for the condition, IAM `getAccessToken` denial for a binding mismatch; any other failure does not count as the negative proof. |
+
+## V-post (2026-10-18, after v2 merged into `main` as PR #4)
+
+- **Positive:** [run 39156510316](https://github.com/fma00/synthea-readmission-risk/actions/runs/39156510316), `gh workflow run smoke.yml --ref main`: green; the listing shows five prefixes (the two schema-1 and two schema-2 v1 bundles, and the slice-7 champion `569fdab6…`).
+- **Negative:** [run 39156545023](https://github.com/fma00/synthea-readmission-risk/actions/runs/39156545023), the same dispatch from the throwaway branch `vpost-negative-check` (a copy of `main`, deleted afterwards): refused by STS with `{"error":"unauthorized_client","error_description":"The given credential is rejected by the attribute condition."}`. This is the attribute-condition refusal (not IAM, not network), so the `refs/heads/main` clause is proven live.
+- **Deviation from the expected location:** the refusal surfaced in the `auth` step, not in "List the bundle bucket". `google-github-actions/auth` v3.0.0 performs the STS exchange itself even without `token_format`; Revision 7's Critic-1 resolution assumed otherwise. Only the location changes; the proof is the same. The comments in `smoke.yml` and `score.yml` and the runbook in `docs/setup.md` are corrected.
+

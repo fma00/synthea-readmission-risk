@@ -1019,3 +1019,7 @@ The items under Scope > Out.
   - `<max>` and `…` defined (readiness 5).
 
   Round history: critic 21 → 10 → 6 → 5 → 3 → 5 → 5 gaps; readiness closed once (round 5, on r5) and reopened on later text.
+
+## L-post (2026-10-18, after v2 merged into `main`)
+
+- [Run 39156975790](https://github.com/fma00/synthea-readmission-risk/actions/runs/39156975790): `score.yml` from `main`, `run_date=20250630`: green; scoring run `1e38747afae74b9fabce486713c31097` succeeded, published and recorded with `trigger = workflow_dispatch`, `github_run_url` = this run, `git_commit` = `0e4fe9d` (the v2 merge), window 30, 675 predictions, bundle `569fdab6…`, `gold_fingerprint_definition = spark-rowhash-v1`; `serving.predictions` 2025-06-30 holds exactly these 675 rows (one scoring run, replacing the slice-4 v1 rows of that date). The `scorer` service account's WIF binding to `score.yml` on `main` is now proven live.
