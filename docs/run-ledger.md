@@ -8,26 +8,27 @@ Monitored bundle: `569fdab6c17d…`.
 
 | wall time | cadence | sim date | status | verdict | O/E [95% CI] | observed / expected | n matured | AUC (report only) | immature expected | link |
 |---|---|---|---|---|---|---|---|---|---|---|
-| 2026-10-18 20:20 UTC | dispatch | 2023-08-21 | succeeded | ok | 1.222 [0.904, 1.616] | 49 / 40.1 | 2171 | 0.882 | 14.8 | [run](https://github.com/fma00/synthea-readmission-risk/actions/runs/39162432781) |
-| 2026-10-18 19:55 UTC | dispatch | 2023-08-21 | succeeded | ok | 1.222 [0.904, 1.616] | 49 / 40.1 | 2171 | 0.882 | 14.8 | [run](https://github.com/fma00/synthea-readmission-risk/actions/runs/39160504842) |
-| 2026-10-18 19:41 UTC | catch-up (laptop) | 2023-08-14 | succeeded | ok | 1.262 [0.940, 1.659] | 51 / 40.4 | 2175 | 0.892 | 15.7 | laptop |
-| 2026-10-18 19:40 UTC | catch-up (laptop) | 2023-08-07 | succeeded | incomplete_cohort | 1.128 [0.823, 1.509] | 45 / 39.9 | 2140 | 0.886 | 14.0 | laptop |
-| 2026-10-18 19:39 UTC | catch-up (laptop) | 2023-07-31 | succeeded | incomplete_cohort | 1.084 [0.774, 1.476] | 40 / 36.9 | 1966 | 0.874 | 13.6 | laptop |
-| 2026-10-18 19:38 UTC | catch-up (laptop) | 2023-07-24 | succeeded | incomplete_cohort | 1.104 [0.773, 1.529] | 36 / 32.6 | 1801 | 0.879 | 15.3 | laptop |
-| 2026-10-18 19:37 UTC | catch-up (laptop) | 2023-07-17 | succeeded | incomplete_cohort | 1.087 [0.743, 1.534] | 32 / 29.4 | 1640 | 0.885 | 15.9 | laptop |
-| 2026-10-18 19:36 UTC | catch-up (laptop) | 2023-07-10 | succeeded | incomplete_cohort | 1.093 [0.732, 1.569] | 29 / 26.5 | 1490 | 0.877 | 13.9 | laptop |
-| 2026-10-18 19:35 UTC | catch-up (laptop) | 2023-07-03 | succeeded | incomplete_cohort | 1.088 [0.711, 1.594] | 26 / 23.9 | 1307 | 0.871 | 13.7 | laptop |
-| 2026-10-18 19:34 UTC | catch-up (laptop) | 2023-06-26 | succeeded | incomplete_cohort | 1.061 [0.673, 1.592] | 23 / 21.7 | 1148 | 0.913 | 12.3 | laptop |
-| 2026-10-18 19:33 UTC | catch-up (laptop) | 2023-06-19 | succeeded | incomplete_cohort | 1.004 [0.605, 1.569] | 19 / 18.9 | 962 | 0.906 | 11.2 | laptop |
-| 2026-10-18 19:32 UTC | catch-up (laptop) | 2023-06-12 | succeeded | incomplete_cohort | 0.993 [0.567, 1.612] | 16 / 16.1 | 800 | 0.895 | 11.5 | laptop |
-| 2026-10-18 19:31 UTC | catch-up (laptop) | 2023-06-05 | succeeded | incomplete_cohort | 1.021 [0.528, 1.784] | 12 / 11.8 | 622 | 0.884 | 12.7 | laptop |
-| 2026-10-18 19:30 UTC | catch-up (laptop) | 2023-05-29 | succeeded | incomplete_cohort | 1.069 [0.513, 1.967] | 10 / 9.4 | 459 | 0.891 | 12.8 | laptop |
-| 2026-10-18 19:29 UTC | catch-up (laptop) | 2023-05-22 | succeeded | incomplete_cohort | 0.976 [0.392, 2.011] | 7 / 7.2 | 301 | 0.935 | 12.3 | laptop |
-| 2026-10-18 19:28 UTC | catch-up (laptop) | 2023-05-15 | succeeded | incomplete_cohort | 0.365 [0.009, 2.031] | 1 / 2.7 | 128 | 0.874 | 14.0 | laptop |
-| 2026-10-18 19:27 UTC | catch-up (laptop) | 2023-05-08 | succeeded | incomplete_cohort | - | 0 / 0.0 | 0 | - | - | laptop |
-| 2026-10-18 19:26 UTC | catch-up (laptop) | 2023-05-01 | succeeded | incomplete_cohort | - | 0 / 0.0 | 0 | - | - | laptop |
-| 2026-10-18 19:25 UTC | catch-up (laptop) | 2023-04-24 | succeeded | incomplete_cohort | - | 0 / 0.0 | 0 | - | - | laptop |
-| 2026-10-18 19:24 UTC | catch-up (laptop) | 2023-04-17 | succeeded | incomplete_cohort | - | 0 / 0.0 | 0 | - | - | laptop |
+| 2026-10-18 20:25 UTC | dispatch | - | refused (clock) | - | - | - | - | - | - | [run](https://github.com/fma00/synthea-readmission-risk/actions/runs/39163124023) |
+| 2026-10-18 20:20 UTC | dispatch | 2023-08-21 | succeeded | ok | 1.222 [0.904, 1.616] | 49.0 / 40.1 | 2171.0 | 0.882 | 14.8 | [run](https://github.com/fma00/synthea-readmission-risk/actions/runs/39162432781) |
+| 2026-10-18 19:55 UTC | dispatch | 2023-08-21 | succeeded | ok | 1.222 [0.904, 1.616] | 49.0 / 40.1 | 2171.0 | 0.882 | 14.8 | [run](https://github.com/fma00/synthea-readmission-risk/actions/runs/39160504842) |
+| 2026-10-18 19:41 UTC | catch-up (laptop) | 2023-08-14 | succeeded | ok | 1.262 [0.940, 1.659] | 51.0 / 40.4 | 2175.0 | 0.892 | 15.7 | laptop |
+| 2026-10-18 19:40 UTC | catch-up (laptop) | 2023-08-07 | succeeded | incomplete_cohort | 1.128 [0.823, 1.509] | 45.0 / 39.9 | 2140.0 | 0.886 | 14.0 | laptop |
+| 2026-10-18 19:39 UTC | catch-up (laptop) | 2023-07-31 | succeeded | incomplete_cohort | 1.084 [0.774, 1.476] | 40.0 / 36.9 | 1966.0 | 0.874 | 13.6 | laptop |
+| 2026-10-18 19:38 UTC | catch-up (laptop) | 2023-07-24 | succeeded | incomplete_cohort | 1.104 [0.773, 1.529] | 36.0 / 32.6 | 1801.0 | 0.879 | 15.3 | laptop |
+| 2026-10-18 19:37 UTC | catch-up (laptop) | 2023-07-17 | succeeded | incomplete_cohort | 1.087 [0.743, 1.534] | 32.0 / 29.4 | 1640.0 | 0.885 | 15.9 | laptop |
+| 2026-10-18 19:36 UTC | catch-up (laptop) | 2023-07-10 | succeeded | incomplete_cohort | 1.093 [0.732, 1.569] | 29.0 / 26.5 | 1490.0 | 0.877 | 13.9 | laptop |
+| 2026-10-18 19:35 UTC | catch-up (laptop) | 2023-07-03 | succeeded | incomplete_cohort | 1.088 [0.711, 1.594] | 26.0 / 23.9 | 1307.0 | 0.871 | 13.7 | laptop |
+| 2026-10-18 19:34 UTC | catch-up (laptop) | 2023-06-26 | succeeded | incomplete_cohort | 1.061 [0.673, 1.592] | 23.0 / 21.7 | 1148.0 | 0.913 | 12.3 | laptop |
+| 2026-10-18 19:33 UTC | catch-up (laptop) | 2023-06-19 | succeeded | incomplete_cohort | 1.004 [0.605, 1.569] | 19.0 / 18.9 | 962.0 | 0.906 | 11.2 | laptop |
+| 2026-10-18 19:32 UTC | catch-up (laptop) | 2023-06-12 | succeeded | incomplete_cohort | 0.993 [0.567, 1.612] | 16.0 / 16.1 | 800.0 | 0.895 | 11.5 | laptop |
+| 2026-10-18 19:31 UTC | catch-up (laptop) | 2023-06-05 | succeeded | incomplete_cohort | 1.021 [0.528, 1.784] | 12.0 / 11.8 | 622.0 | 0.884 | 12.7 | laptop |
+| 2026-10-18 19:30 UTC | catch-up (laptop) | 2023-05-29 | succeeded | incomplete_cohort | 1.069 [0.513, 1.967] | 10.0 / 9.4 | 459.0 | 0.891 | 12.8 | laptop |
+| 2026-10-18 19:29 UTC | catch-up (laptop) | 2023-05-22 | succeeded | incomplete_cohort | 0.976 [0.392, 2.011] | 7.0 / 7.2 | 301.0 | 0.935 | 12.3 | laptop |
+| 2026-10-18 19:28 UTC | catch-up (laptop) | 2023-05-15 | succeeded | incomplete_cohort | 0.365 [0.009, 2.031] | 1.0 / 2.7 | 128.0 | 0.874 | 14.0 | laptop |
+| 2026-10-18 19:27 UTC | catch-up (laptop) | 2023-05-08 | succeeded | incomplete_cohort | - | 0.0 / 0.0 | 0.0 | - | - | laptop |
+| 2026-10-18 19:26 UTC | catch-up (laptop) | 2023-05-01 | succeeded | incomplete_cohort | - | 0.0 / 0.0 | 0.0 | - | - | laptop |
+| 2026-10-18 19:25 UTC | catch-up (laptop) | 2023-04-24 | succeeded | incomplete_cohort | - | 0.0 / 0.0 | 0.0 | - | - | laptop |
+| 2026-10-18 19:24 UTC | catch-up (laptop) | 2023-04-17 | succeeded | incomplete_cohort | - | 0.0 / 0.0 | 0.0 | - | - | laptop |
 
 ## Other scoring runs
 
