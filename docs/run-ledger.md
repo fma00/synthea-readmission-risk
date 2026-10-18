@@ -8,6 +8,7 @@ Monitored bundle: `569fdab6c17d…`.
 
 | wall time | cadence | sim date | status | verdict | O/E [95% CI] | observed / expected | n matured | AUC (report only) | immature expected | link |
 |---|---|---|---|---|---|---|---|---|---|---|
+| 2026-10-18 20:20 UTC | dispatch | 2023-08-21 | succeeded | ok | 1.222 [0.904, 1.616] | 49 / 40.1 | 2171 | 0.882 | 14.8 | [run](https://github.com/fma00/synthea-readmission-risk/actions/runs/39162432781) |
 | 2026-10-18 19:55 UTC | dispatch | 2023-08-21 | succeeded | ok | 1.222 [0.904, 1.616] | 49 / 40.1 | 2171 | 0.882 | 14.8 | [run](https://github.com/fma00/synthea-readmission-risk/actions/runs/39160504842) |
 | 2026-10-18 19:41 UTC | catch-up (laptop) | 2023-08-14 | succeeded | ok | 1.262 [0.940, 1.659] | 51 / 40.4 | 2175 | 0.892 | 15.7 | laptop |
 | 2026-10-18 19:40 UTC | catch-up (laptop) | 2023-08-07 | succeeded | incomplete_cohort | 1.128 [0.823, 1.509] | 45 / 39.9 | 2140 | 0.886 | 14.0 | laptop |
