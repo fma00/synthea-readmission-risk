@@ -1,3 +1,36 @@
 # Run ledger
 
-No tick yet (simulated clock). Rendered by monitor.yml from BigQuery.
+**Simulated clock.** Each tick advances a simulated date by one week through the held-out 2023–2026 discharges of a synthetic 200,000-patient population; the wall-clock time is when the tick ran. Ticks labelled catch-up (laptop) were run by the owner to fill the first weeks; ticks labelled burn-in (accelerated cadence) are scheduled every 30 or 60 minutes on a burn-in afternoon; weekly ticks are scheduled on Mondays. This ledger shows repeatability and idempotency, not weeks of unattended operation. The monitored discharges come from a gold table built with hindsight (deaths and later stays shape which discharges are included), so this is a demonstration of the monitoring mechanics, not an estimate of live calibration. The exact Poisson interval treats readmissions as independent events; patients with several stays in a cohort make it somewhat too narrow. Synthetic data, not for clinical use. Source of truth: BigQuery `serving.scoring_runs` and `serving.monitoring`.
+
+Monitored bundle: `569fdab6c17d…`.
+
+## Ticks
+
+| wall time | cadence | sim date | status | verdict | O/E [95% CI] | observed / expected | n matured | AUC (report only) | immature expected | link |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-10-18 19:55 UTC | dispatch | 2023-08-21 | succeeded | ok | 1.222 [0.904, 1.616] | 49 / 40.1 | 2171 | 0.882 | 14.8 | [run](https://github.com/fma00/synthea-readmission-risk/actions/runs/39160504842) |
+| 2026-10-18 19:41 UTC | catch-up (laptop) | 2023-08-14 | succeeded | ok | 1.262 [0.940, 1.659] | 51 / 40.4 | 2175 | 0.892 | 15.7 | laptop |
+| 2026-10-18 19:40 UTC | catch-up (laptop) | 2023-08-07 | succeeded | incomplete_cohort | 1.128 [0.823, 1.509] | 45 / 39.9 | 2140 | 0.886 | 14.0 | laptop |
+| 2026-10-18 19:39 UTC | catch-up (laptop) | 2023-07-31 | succeeded | incomplete_cohort | 1.084 [0.774, 1.476] | 40 / 36.9 | 1966 | 0.874 | 13.6 | laptop |
+| 2026-10-18 19:38 UTC | catch-up (laptop) | 2023-07-24 | succeeded | incomplete_cohort | 1.104 [0.773, 1.529] | 36 / 32.6 | 1801 | 0.879 | 15.3 | laptop |
+| 2026-10-18 19:37 UTC | catch-up (laptop) | 2023-07-17 | succeeded | incomplete_cohort | 1.087 [0.743, 1.534] | 32 / 29.4 | 1640 | 0.885 | 15.9 | laptop |
+| 2026-10-18 19:36 UTC | catch-up (laptop) | 2023-07-10 | succeeded | incomplete_cohort | 1.093 [0.732, 1.569] | 29 / 26.5 | 1490 | 0.877 | 13.9 | laptop |
+| 2026-10-18 19:35 UTC | catch-up (laptop) | 2023-07-03 | succeeded | incomplete_cohort | 1.088 [0.711, 1.594] | 26 / 23.9 | 1307 | 0.871 | 13.7 | laptop |
+| 2026-10-18 19:34 UTC | catch-up (laptop) | 2023-06-26 | succeeded | incomplete_cohort | 1.061 [0.673, 1.592] | 23 / 21.7 | 1148 | 0.913 | 12.3 | laptop |
+| 2026-10-18 19:33 UTC | catch-up (laptop) | 2023-06-19 | succeeded | incomplete_cohort | 1.004 [0.605, 1.569] | 19 / 18.9 | 962 | 0.906 | 11.2 | laptop |
+| 2026-10-18 19:32 UTC | catch-up (laptop) | 2023-06-12 | succeeded | incomplete_cohort | 0.993 [0.567, 1.612] | 16 / 16.1 | 800 | 0.895 | 11.5 | laptop |
+| 2026-10-18 19:31 UTC | catch-up (laptop) | 2023-06-05 | succeeded | incomplete_cohort | 1.021 [0.528, 1.784] | 12 / 11.8 | 622 | 0.884 | 12.7 | laptop |
+| 2026-10-18 19:30 UTC | catch-up (laptop) | 2023-05-29 | succeeded | incomplete_cohort | 1.069 [0.513, 1.967] | 10 / 9.4 | 459 | 0.891 | 12.8 | laptop |
+| 2026-10-18 19:29 UTC | catch-up (laptop) | 2023-05-22 | succeeded | incomplete_cohort | 0.976 [0.392, 2.011] | 7 / 7.2 | 301 | 0.935 | 12.3 | laptop |
+| 2026-10-18 19:28 UTC | catch-up (laptop) | 2023-05-15 | succeeded | incomplete_cohort | 0.365 [0.009, 2.031] | 1 / 2.7 | 128 | 0.874 | 14.0 | laptop |
+| 2026-10-18 19:27 UTC | catch-up (laptop) | 2023-05-08 | succeeded | incomplete_cohort | - | 0 / 0.0 | 0 | - | - | laptop |
+| 2026-10-18 19:26 UTC | catch-up (laptop) | 2023-05-01 | succeeded | incomplete_cohort | - | 0 / 0.0 | 0 | - | - | laptop |
+| 2026-10-18 19:25 UTC | catch-up (laptop) | 2023-04-24 | succeeded | incomplete_cohort | - | 0 / 0.0 | 0 | - | - | laptop |
+| 2026-10-18 19:24 UTC | catch-up (laptop) | 2023-04-17 | succeeded | incomplete_cohort | - | 0 / 0.0 | 0 | - | - | laptop |
+
+## Other scoring runs
+
+| wall time | run date | status | trigger | link |
+|---|---|---|---|---|
+| 2026-10-18 19:04 UTC | 2025-06-30 | succeeded | workflow_dispatch | [run](https://github.com/fma00/synthea-readmission-risk/actions/runs/39156975790) |
+| 2026-10-18 14:30 UTC | 2023-04-17 | succeeded | laptop | laptop |
