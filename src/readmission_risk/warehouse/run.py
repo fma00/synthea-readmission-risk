@@ -176,6 +176,7 @@ def score_to_bigquery(
         champion_sha256=None, model_bundle_id=None, model_name=None, predictions_table=predictions_table_id(),
         top_n=request.top_n, window_days=None, n_predictions=None, n_top_n=None, history_tests_passed=None,
         predictions_tests_passed=None, published=False, data_test_failure=None, error_type=None, error_message=None,
+        gold_fingerprint_definition=None,
     )  # fmt: skip
     client = None
     scoring: ScoringResult | None = None
@@ -187,6 +188,7 @@ def score_to_bigquery(
     def on_validated(bundle, window_days: int) -> None:
         record.gold_fingerprint, record.champion_sha256 = bundle.gold_fingerprint, bundle.champion_sha256
         record.model_bundle_id, record.model_name, record.window_days = bundle.bundle_id, bundle.model_name, window_days
+        record.gold_fingerprint_definition = bundle.gold_fingerprint_definition
 
     try:
         client = (client_factory or gcp.bigquery_client)()
@@ -206,7 +208,7 @@ def score_to_bigquery(
                 window_days=request.window_days,
                 show_observed_outcomes=False,
             )
-            scoring = score(config, writer=make_staging_writer(client, scoring_run_id), on_validated=on_validated)
+            scoring = score(config, writer=make_staging_writer(client, scoring_run_id, lambda: record.gold_fingerprint_definition), on_validated=on_validated)
         record.n_predictions = len(scoring.predictions)
         record.n_top_n = int(scoring.predictions["is_top_n"].sum())
         predictions = run_data_tests(

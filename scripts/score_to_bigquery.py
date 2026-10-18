@@ -106,6 +106,10 @@ def main(
     if summary_path:
         with open(summary_path, "a", encoding="utf-8") as handle:
             handle.write(job_summary(result))
+    output_path = os.environ.get("GITHUB_OUTPUT")  # v2 slice 7: the monitoring tick's evaluate job reads these
+    if output_path:
+        with open(output_path, "a", encoding="utf-8") as handle:
+            handle.write(f"scoring_run_id={record.scoring_run_id}\nstatus={record.status}\n")
 
     if record.status == "failed":
         raise result.error

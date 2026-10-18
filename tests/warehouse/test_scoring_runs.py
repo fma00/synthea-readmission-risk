@@ -1,4 +1,4 @@
-"""The scoring_runs row: a parameterised DML INSERT of all 26 columns (D6: no load jobs into serving)."""
+"""The scoring_runs row: a parameterised DML INSERT of all 27 columns (D6: no load jobs into serving)."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ def test_append_run_is_a_parameterised_insert_of_all_26_columns():
     assert sql == insert_statement()
     assert sql.startswith("INSERT INTO `synthea-readmission-risk.serving.scoring_runs` (")
     assert sql.count("`") == 2 * (len(names) + 1)  # every column and the table back-quoted
-    assert [p.name for p in config.query_parameters] == names and len(names) == 26
+    assert [p.name for p in config.query_parameters] == names and len(names) == 27
     types = {p.name: p.type_ for p in config.query_parameters}
     assert (types["started_at"], types["run_date"], types["published"], types["top_n"]) == ("TIMESTAMP", "DATE", "BOOL", "INT64")
     nulls = {p.name: p.value for p in config.query_parameters}

@@ -71,6 +71,7 @@ def test_valid_bundle_passes(scoring_env, loaded_gold, which):
     assert int((bundle.partition_of == "test").sum()) == scoring_env.n_test
     assert bundle.partition_of.index.is_unique
     assert sha256_hex(bundle.model_bytes) == scoring_env.manifest(uri)["files"]["model.pkl"]["sha256"]
+    assert bundle.gold_fingerprint_definition == "pandas-csv-sha256-v1"
 
 
 def test_champion_sha256_mismatch_is_refused(scoring_env, loaded_gold):
@@ -196,6 +197,19 @@ def test_rowhash_bundle_matches_own_gold(scoring_env, loaded_gold, tmp_path):
     fingerprint = rowhash_fingerprint(gold)
     bundle = validate_bundle(_rowhash_bundle(scoring_env, tmp_path, fingerprint), gold=gold, metadata=_as_v2(metadata, fingerprint))
     assert bundle.gold_fingerprint == fingerprint
+    assert bundle.gold_fingerprint_definition == "spark-rowhash-v1"
+
+
+def test_compute_gold_fingerprint_matches_guard_6_for_both_definitions(loaded_gold):
+    from readmission_risk.pipeline.fingerprint import rowhash_fingerprint
+    from readmission_risk.scoring.bundle_guard import compute_gold_fingerprint
+
+    gold, _ = loaded_gold
+    assert compute_gold_fingerprint("pandas-csv-sha256-v1", gold) == gold_fingerprint(gold)
+    assert compute_gold_fingerprint("spark-rowhash-v1", gold) == rowhash_fingerprint(gold)
+    for bad in ("sha1", None, ""):
+        with pytest.raises(ValueError, match="unknown gold_fingerprint definition"):
+            compute_gold_fingerprint(bad, gold)
 
 
 def test_rowhash_bundle_refuses_edited_gold(scoring_env, loaded_gold, tmp_path):

@@ -137,3 +137,13 @@ def test_seeded_cli_ok(monkeypatch):
     out = CliRunner().invoke(seeded.app, ["--run-date", "20250630"])
     assert out.exit_code == 0 and "M5 OK: all 1 assertions fired" in out.stdout and seen == [date(2025, 6, 30)]
     assert "predictions   PRED-01: fail PRED-01: x" in out.stdout
+
+
+@pytest.mark.parametrize("status", ["succeeded", "refused"])
+def test_github_output_carries_the_run_id_and_status(cli, monkeypatch, tmp_path, status):
+    output = tmp_path / "output.txt"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    extra = {} if status == "succeeded" else {"published": False, "error": ValueError("no"), "error_type": "ValueError", "error_message": "no"}
+    error = extra.pop("error", None)
+    _invoke(cli, monkeypatch, _result(status=status, error=error, **extra), tmp_path)
+    assert output.read_text() == f"scoring_run_id={'r' * 32}\nstatus={status}\n"

@@ -3,8 +3,10 @@ call order, statuses, publish gating and resolution, and that every attempt is r
 
 from __future__ import annotations
 
+import io
 from datetime import timedelta
 
+import pyarrow.parquet as pq
 import pytest
 from google.api_core import exceptions as api
 from google.auth.exceptions import DefaultCredentialsError, RefreshError
@@ -88,6 +90,9 @@ def test_succeeded_records_one_row_in_order(scoring_env):
     assert row["status"] == "succeeded" and row["published"] is True
     assert row["history_tests_passed"] is True and row["predictions_tests_passed"] is True
     assert row["model_bundle_id"] == result.scoring.bundle.bundle_id and row["window_days"] == DEFAULT_WINDOW_DAYS
+    assert row["gold_fingerprint_definition"] == "pandas-csv-sha256-v1"
+    staging_rows = pq.read_table(io.BytesIO(next(iter(fake.loaded.values()))))
+    assert set(staging_rows.column("gold_fingerprint_definition").to_pylist()) == {"pandas-csv-sha256-v1"}
     assert row["n_predictions"] == len(result.scoring.predictions) > 0
     assert row["n_top_n"] == int(result.scoring.predictions["is_top_n"].sum())
     assert row["trigger"] == "laptop" and row["github_run_url"] is None

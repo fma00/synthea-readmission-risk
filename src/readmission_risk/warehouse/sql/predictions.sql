@@ -32,7 +32,9 @@ DECLARE c DEFAULT (
       `discharge_time` >= TIMESTAMP(DATE_SUB(@run_date, INTERVAL `scoring_window_days` - 1 DAY))
       AND `discharge_time` < TIMESTAMP(DATE_ADD(@run_date, INTERVAL 1 DAY))
     ) IS NOT TRUE) AS bad_window,
-    COUNTIF((`scoring_run_id` = @scoring_run_id) IS NOT TRUE) AS bad_run_id
+    COUNTIF((`scoring_run_id` = @scoring_run_id) IS NOT TRUE) AS bad_run_id,
+    COUNT(DISTINCT `gold_fingerprint_definition`) AS n_distinct_fp_definition,
+    COUNTIF((`gold_fingerprint_definition` IN ('pandas-csv-sha256-v1', 'spark-rowhash-v1')) IS NOT TRUE) AS bad_fp_definition
   FROM {table}
   WHERE `as_of_date` = @run_date
 );
@@ -47,3 +49,4 @@ ASSERT c.bad_order = 0 AS 'PRED-07: risk_score increases with rank';
 ASSERT c.bad_partition = 0 AS 'PRED-08: a row is not from the test partition';
 ASSERT c.bad_window = 0 AS 'PRED-09: a discharge_time is outside the scoring window';
 ASSERT c.bad_run_id = 0 AS 'PRED-10: a row belongs to another scoring run';
+ASSERT c.n_distinct_fp_definition = 1 AND c.bad_fp_definition = 0 AS 'PRED-11: gold_fingerprint_definition is missing, unknown or not constant';

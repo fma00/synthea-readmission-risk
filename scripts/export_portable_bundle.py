@@ -47,7 +47,7 @@ def main(
     print(f"status: {'created' if result.created else 'already existed'}")
     print(f"source_bundle_id: {result.source_bundle_id}")
     print(f"parity: max abs diff {result.max_abs_diff} on {result.parity_rows} test rows and {result.probe_rows} probe rows")
-    print(f"not promoted: deploy/champion.json stays on the schema-1 bundle ({DESIGN_NOTE})")
+    print(f"not promoted: deploy/champion.json is not changed ({DESIGN_NOTE})")
 
 
 if __name__ == "__main__":

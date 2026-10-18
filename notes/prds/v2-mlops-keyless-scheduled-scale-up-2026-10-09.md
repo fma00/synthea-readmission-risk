@@ -23,6 +23,12 @@ Facts marked **(verified)** were checked against the repo or a primary source in
 
 ---
 
+**Amendment 2026-10-18 (v2 slice 7, owner decisions at its Step 0; `notes/eg-new-feature/v2-slice7-monitoring-tick-ledger-2026-10-18.md`):**
+- **D1, release scope:** **v2.0 = slices 1-7 + M3.** Slice 8 (FR22 dashboard, FR23 model card and docs overhaul, the FR14 BigQuery gold direct-write + connector MERGE test, and FR21's dashboard half) **moves to a v3.0 scope**; the requirements below that name the dashboard are kept as written and marked "v3.0" where they occur. `v2` merges into `main` during slice 7, before the burn-in (scheduled workflows and the WIF condition need `main`); V-post, L-post, the burn-in and M3 run on `main`; the `v2.0` tag follows M3. This replaces the 2026-10-11/12 plan to merge only at v2.0.
+- **D2, champion:** the 200k logistic regression (`569fdab6…`) is promoted by a disclosed owner override of the pre-registered gate's REFUSE (`deploy/PROMOTIONS.md`), because on the 10k population a 13-week cohort never reaches the 20-positive monitoring floor. `prereg.yaml` is unchanged; the lookup still wins. M4's "real promotion PR with gate table" is this PR, with its override stated.
+- **D3, ledger (OQ3):** the PRD's fallback is taken: job B commits to a dedicated `ledger` branch; ruleset 24876876 keeps no bypass actors.
+- **FR21 in v2:** "stale since" is shown on the README as a "stale after <time>" badge (a static page cannot compare with the current time); the dashboard's live "stale since" is v3.0.
+
 ## Executive summary
 
 v2 turns the v1 local demo into a small system that runs by itself on GCP without any long-lived credential in CI. In order, it delivers:
@@ -273,18 +279,18 @@ Each requirement is testable; slice designs refine them.
   - a README badge with `?event=schedule&branch=main` sits next to a "last tick" date.
 - **FR21** Failure handling (G18):
   - a failed tick opens or updates a single GitHub issue (slice 4 records every failed or refused attempt in `scoring_runs`; the issue is slice 7);
-  - after 2 missed ticks, the dashboard and README show "stale since <date>";
+  - after 2 missed ticks, the dashboard and README show "stale since <date>"; **v2 (amendment 2026-10-18): the README badge shows "stale after <time>"; the dashboard part is v3.0**;
   - a calendar reminder covers the 60-day schedule auto-disable, and `gh workflow enable` is documented.
 
 **Reviewer surface**
-- **FR22** The Streamlit Community Cloud call sheet lives in `src/readmission_risk/dashboard/`, with its own slim hash-locked requirements file next to the entrypoint (the app would otherwise install the repo-root lockfile, pyspark included). It shows:
+- **FR22** (**v3.0**, amendment 2026-10-18) The Streamlit Community Cloud call sheet lives in `src/readmission_risk/dashboard/`, with its own slim hash-locked requirements file next to the entrypoint (the app would otherwise install the repo-root lockfile, pyspark included). It shows:
   - a heartbeat line (last tick, simulated date, tests passed, champion bundle, freshness) below the honesty strip;
   - a provenance footer;
   - a "synthetic data, not for clinical use" notice.
 
   Its Python version is set at deploy time and documented, because changing it requires a redeploy.
-- **FR23** `docs/model-card.md` (generated from the champion's manifest, so it cannot drift), `docs/results.md` (200k results against `prereg.yaml`, the lookup comparison first, frozen-v1 validation), `docs/run-ledger.md`, and a README "60-second tour" with deep links. The single Mermaid diagram is upgraded with clickable nodes. `tests/test_docs.py` is updated deliberately: the docs page count, the status and roadmap wording, and the `streamlit.app` rule.
-- **FR24** Tag `v2.0` when the Definition of done (Success metrics) holds.
+- **FR23** (**v3.0**, amendment 2026-10-18; `docs/run-ledger.md` lives on the `ledger` branch since slice 7) `docs/model-card.md` (generated from the champion's manifest, so it cannot drift), `docs/results.md` (200k results against `prereg.yaml`, the lookup comparison first, frozen-v1 validation), `docs/run-ledger.md`, and a README "60-second tour" with deep links. The single Mermaid diagram is upgraded with clickable nodes. `tests/test_docs.py` is updated deliberately: the docs page count, the status and roadmap wording, and the `streamlit.app` rule.
+- **FR24** Tag `v2.0` when the Definition of done (Success metrics) holds. **Amendment 2026-10-18:** v2.0 is tagged after slice 7's M3; metrics that depend on slice 8 (the dashboard, the model card) move with it to v3.0.
 
 ## Non-functional requirements
 
@@ -372,7 +378,7 @@ Proposed `/eg-new-feature` slices, refined there:
 5. **`gs://` Big Join + fingerprint + pilot** (FR10–FR13): `prereg.yaml` lands here, before generation.
 6. **200k + Dataproc + retrain + gate + frozen-v1** (FR14–FR16, plus the carried FR0.3 portable export).
 7. **Monitoring tick + ledger + issues** (FR19–FR21).
-8. **Dashboard + model card + README** (FR22–FR24).
+8. **Dashboard + model card + README** (FR22–FR24). **Moved to v3.0** (amendment 2026-10-18).
 
 Notes:
 - `id-token` jobs live in separate workflow files from the PR/push CI, so `test_docs.py:432` (top-level `contents: read`) can stay or be adjusted on purpose. zizmor would prefer `permissions: {}` at top level; that decision is made in the closeout.

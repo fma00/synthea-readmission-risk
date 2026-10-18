@@ -19,6 +19,7 @@ notes/eg-new-feature/v2-slice3-terraform-wif-2026-10-11.md, Verification):
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -76,11 +77,11 @@ def _iam_members() -> list[dict[str, str]]:
 
 
 def expected_gold_uri() -> str:
-    """The gold table the scheduled scorer reads: the gold bucket's name plus the 10k table's prefix (tests/test_tooling.py
-    compares the Makefile's GOLD_URI default with it)."""
+    """The gold table the scheduled scorer reads: the gold bucket's name plus the 200k champion's prefix (v2 slice 7;
+    tests/test_tooling.py compares the Makefile's GOLD_URI default with it, test_monitoring_* the monitoring config)."""
     bucket = re.search(r'^  name\s*=\s*"([^"]+)"', _resource("google_storage_bucket", "gold"), flags=re.MULTILINE)
     assert bucket
-    return f"gs://{bucket.group(1)}/full_run_2b"
+    return f"gs://{bucket.group(1)}/v2/main_200k"
 
 
 def _indent(line: str) -> int:
@@ -191,7 +192,8 @@ def test_iam_is_additive_only():
     types = {t for t, _, _ in _resources(_all_tf())}
     assert [t for t in types if t.endswith(("_iam_policy", "_iam_binding"))] == []
     # 12 (slices 3-4) + 14 (slice 5: synthea-generator 6, dataproc-runtime 8; the 2 staging grants removed 2026-10-14)
-    assert len(_iam_members()) == 26
+    # + 14 (slice 7: monitor 8, ledger-reader 5, scorer's monitor.yml binding 1)
+    assert len(_iam_members()) == 40
     assert [(t, n) for t, n, _ in _resources(_all_tf()) if t.endswith("_iam_member_remove")] == [
         ("google_project_iam_member_remove", "default_compute_no_editor")
     ]
@@ -361,6 +363,7 @@ def test_scorer_grants_are_exactly():
     )
     assert on_account == [
         ('"roles/iam.serviceAccountTokenCreator"', "var.operator_member"),
+        ('"roles/iam.workloadIdentityUser"', "local.monitor_principal_set"),  # v2 slice 7: monitor.yml's score job
         ('"roles/iam.workloadIdentityUser"', "local.score_principal_set"),
     ]
     # nothing on the serving dataset itself (no dataset-level grant: D6)
@@ -413,7 +416,7 @@ def test_score_workflow_is_dispatch_only_and_input_reaches_shell_only_via_env():
 
 
 def test_bigquery_tables_partitioned_require_filter_and_deletion_protected():
-    for name, field in (("predictions", "as_of_date"), ("scoring_runs", "started_at")):
+    for name, field in (("predictions", "as_of_date"), ("scoring_runs", "started_at"), ("monitoring", "started_at")):
         body = _collapse(_resource("google_bigquery_table", name))
         assert f'time_partitioning {{ type = "DAY" field = "{field}" }}' in body, name
         assert "require_partition_filter = true" in body and "deletion_protection = true" in body, name
@@ -550,3 +553,149 @@ def test_spark_subnet_has_private_google_access_and_internal_firewall():
     assert 'direction = "INGRESS"' in firewall and 'allow { protocol = "all" }' in firewall
     assert "source_ranges = [google_compute_subnetwork.spark_us_central1.ip_cidr_range]" in firewall
 
+
+
+# ---------------------------------------------------------------- v2 slice 7: the monitoring tick
+MONITOR = WORKFLOWS / "monitor.yml"
+MONITOR_SA = '"serviceAccount:${google_service_account.monitor.email}"'
+LEDGER_SA = '"serviceAccount:${google_service_account.ledger_reader.email}"'
+
+
+def _grants(member: str) -> list[tuple[str, str, str]]:
+    return sorted(
+        (m["_type"], m["role"], m.get("bucket") or m.get("table_id") or m.get("dataset_id") or m.get("project"))
+        for m in _iam_members()
+        if m.get("member") == member
+    )
+
+
+def _on_account(name: str) -> list[tuple[str, str]]:
+    return sorted((m["role"], m["member"]) for m in _iam_members() if m.get("service_account_id") == f"google_service_account.{name}.name")
+
+
+def test_monitor_grants_are_exactly():
+    assert _grants(MONITOR_SA) == sorted([
+        ("google_bigquery_table_iam_member", "google_project_iam_custom_role.scorer_table_writer.id",
+         "google_bigquery_table.monitoring.table_id"),
+        ("google_bigquery_table_iam_member", '"roles/bigquery.dataViewer"', "google_bigquery_table.predictions.table_id"),
+        ("google_bigquery_table_iam_member", '"roles/bigquery.dataViewer"', "google_bigquery_table.scoring_runs.table_id"),
+        ("google_bigquery_dataset_iam_member", '"roles/bigquery.dataEditor"', "google_bigquery_dataset.scratch.dataset_id"),
+        ("google_storage_bucket_iam_member", '"roles/storage.objectViewer"', "google_storage_bucket.gold.name"),
+        ("google_project_iam_member", '"roles/bigquery.jobUser"', "var.project_id"),
+    ])  # fmt: skip
+    assert _on_account("monitor") == [
+        ('"roles/iam.serviceAccountTokenCreator"', "var.operator_member"),
+        ('"roles/iam.workloadIdentityUser"', "local.monitor_principal_set"),
+    ]
+
+
+def test_ledger_reader_grants_are_exactly_read_only():
+    assert _grants(LEDGER_SA) == sorted([
+        ("google_bigquery_table_iam_member", '"roles/bigquery.dataViewer"', "google_bigquery_table.scoring_runs.table_id"),
+        ("google_bigquery_table_iam_member", '"roles/bigquery.dataViewer"', "google_bigquery_table.monitoring.table_id"),
+        ("google_project_iam_member", '"roles/bigquery.jobUser"', "var.project_id"),
+    ])  # fmt: skip
+    assert _on_account("ledger_reader") == [
+        ('"roles/iam.serviceAccountTokenCreator"', "var.operator_member"),
+        ('"roles/iam.workloadIdentityUser"', "local.monitor_principal_set"),
+    ]
+
+
+def test_monitor_bindings_are_keyed_to_the_monitor_workflow_on_main():
+    iam = _collapse(_tf("iam.tf"))
+    assert 'monitor_workflow_ref = "${var.github_repository}/.github/workflows/monitor.yml@refs/heads/main"' in iam
+    assert (
+        'monitor_principal_set = "principalSet://iam.googleapis.com/${local.pool_name}/attribute.workflow_ref/'
+        '${local.monitor_workflow_ref}"'
+    ) in iam
+    bound = sorted(m["service_account_id"] for m in _iam_members() if m.get("member") == "local.monitor_principal_set")
+    assert bound == ["google_service_account.ledger_reader.name", "google_service_account.monitor.name",
+                     "google_service_account.scorer.name"]  # fmt: skip
+
+
+def test_monitoring_table_is_partitioned_clustered_and_protected():
+    body = _collapse(_resource("google_bigquery_table", "monitoring"))
+    assert 'time_partitioning { type = "DAY" field = "started_at" }' in body
+    assert "require_partition_filter = true" in body and "deletion_protection = true" in body
+    assert 'clustering = ["sim_date"]' in body
+    assert 'schema = file("${path.module}/../src/readmission_risk/warehouse/schemas/monitoring.json")' in body
+
+
+def _monitor_jobs() -> dict[str, list[str]]:
+    lines = _read(MONITOR).split("\n")
+    jobs_at = lines.index("jobs:")
+    starts = [i for i in range(jobs_at + 1, len(lines)) if re.fullmatch(r"  [a-z-]+:", lines[i])]
+    return {lines[i].strip().rstrip(":"): _block(lines, i) for i in starts}
+
+
+def _job_value(job: list[str], key: str) -> str | None:
+    line = next((x for x in job if x.startswith(f"    {key}:")), None)
+    return None if line is None else line.split(":", 1)[1].strip()
+
+
+def _job_permissions(job: list[str]) -> set[str]:
+    at = job.index("    permissions:")
+    return {line.strip() for line in _block(job, at)[1:] if line.strip()}
+
+
+def test_monitor_workflow_permissions_and_identities():
+    lines = _read(MONITOR).split("\n")
+    assert "permissions: {}" in lines and _triggers(lines) <= {"workflow_dispatch", "schedule"}
+    jobs = _monitor_jobs()
+    assert list(jobs) == ["clock", "score", "evaluate", "ledger-render", "ledger-commit", "issues"]
+    credentialed = {"clock": "monitor", "score": "scorer", "evaluate": "monitor", "ledger-render": "ledger-reader"}
+    for name, job in jobs.items():
+        text = "\n".join(job)
+        if name in credentialed:
+            assert _job_permissions(job) == {"contents: read", "id-token: write"}, name
+            assert f"service_account: {credentialed[name]}@synthea-readmission-risk.iam.gserviceaccount.com" in text, name
+        else:
+            assert "id-token" not in text and "google-github-actions/auth" not in text, name
+    assert _job_permissions(jobs["ledger-commit"]) == {"contents: write"}
+    assert _job_permissions(jobs["issues"]) == {"contents: read", "issues: write"}
+    for name in ("ledger-commit", "issues"):
+        text = "\n".join(jobs[name])
+        script = "publish_ledger.py" if name == "ledger-commit" else "tick_issues.py"
+        assert f"sparse-checkout: scripts/{script}" in text and "sparse-checkout-cone-mode: false" in text
+        assert f"python3 scripts/{script}" in text and "pip install" not in text
+    assert "cache:" not in _read(MONITOR)
+
+
+def test_monitor_workflow_job_graph():
+    jobs = _monitor_jobs()
+    expected = {
+        "clock": (None, None),
+        "score": ("clock", None),
+        "evaluate": ("[clock, score]", "always() && needs.clock.result == 'success'"),
+        "ledger-render": ("[clock, evaluate]", "always()"),
+        "ledger-commit": ("ledger-render", "always() && needs.ledger-render.result == 'success'"),
+        "issues": ("[clock, score, evaluate, ledger-render, ledger-commit]", "always()"),
+    }
+    for name, (needs, condition) in expected.items():
+        assert (_job_value(jobs[name], "needs"), _job_value(jobs[name], "if")) == (needs, condition), name
+
+
+def test_monitor_workflow_cron_state_and_literals_match_the_config():
+    config = json.loads(_read(ROOT / "deploy" / "monitoring.json"))
+    text = _read(MONITOR)
+    crons = re.findall(r'^\s*- cron: "([^"]+)"\s*$', text, flags=re.MULTILINE)
+    assert crons in ([], [config["crons"]["burn_in"]], [config["crons"]["weekly"]])
+    assert ("schedule:" in text) == bool(crons)
+    assert config["gold_uri"] == expected_gold_uri()
+    assert (
+        f'--gold-dir {config["gold_uri"]} --run-date "$SIM_DATE" --window-days {config["window_days"]} --top-n {config["top_n"]}'
+    ) in text
+    assert re.findall(r"--gold-dir (\S+)", _read(SCORE)) == [config["gold_uri"]]
+    for path in (MONITOR, SCORE):
+        assert re.search(r"^concurrency:\n  group: score\n  cancel-in-progress: false$", _read(path), flags=re.MULTILINE), path.name
+
+
+def test_monitor_workflow_expressions_only_where_allowed():
+    allowed = (
+        re.compile(r"^ {10}[A-Z_]+: (?:\$\{\{ [^}]+ \}\}|[^$])+$"),  # step env (one or more expressions)
+        re.compile(r"^ {6}[a-z_]+: \$\{\{ steps\.[a-z]+\.outputs\.[a-z_]+ \}\}$"),  # job outputs
+        re.compile(r"^ {4}if: "),  # job conditions
+    )
+    for i, line in enumerate(_read(MONITOR).split("\n")):
+        if "${{" in line:
+            assert any(p.match(line) for p in allowed), f"monitor.yml:{i + 1}: {line.strip()}"

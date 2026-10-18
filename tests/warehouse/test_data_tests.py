@@ -21,8 +21,9 @@ from tests.warehouse.fake_bigquery import FakeBigQuery, FakeJob, assertion_error
 TABLE = "synthea-readmission-risk.scratch.predictions_abc"
 RUNS = "synthea-readmission-risk.serving.scoring_runs"
 EXPECTED_IDS = {
-    "predictions": [f"PRED-{i:02d}" for i in range(1, 11)],
+    "predictions": [f"PRED-{i:02d}" for i in range(1, 12)],
     "scoring_runs": [f"RUNS-{i:02d}" for i in range(1, 8)],
+    "monitoring": [f"MON-{i:02d}" for i in range(1, 13)],
 }
 
 
@@ -31,7 +32,7 @@ def _statements(name: str) -> list[str]:
     return [s.strip() for s in text.split(";") if s.strip()]
 
 
-@pytest.mark.parametrize("name", ["predictions", "scoring_runs"])
+@pytest.mark.parametrize("name", ["predictions", "scoring_runs", "monitoring"])
 def test_sql_scripts_follow_the_shape_rule(name):
     statements = _statements(name)
     assert statements[0].startswith("DECLARE c DEFAULT (")
@@ -39,7 +40,7 @@ def test_sql_scripts_follow_the_shape_rule(name):
     asserts = statements[1:]
     assert all(s.startswith("ASSERT ") for s in asserts)
     assert all("FROM" not in s.upper().split(" AS '")[0] for s in asserts)  # assertions read only `c`
-    labels = [re.search(r" AS '((?:PRED|RUNS)-\d{2}): [^']+'$", s) for s in asserts]
+    labels = [re.search(r" AS '((?:PRED|RUNS|MON)-\d{2}): [^']+'$", s) for s in asserts]
     assert all(labels), asserts
     assert [m.group(1) for m in labels] == EXPECTED_IDS[name]
     body = statements[0]
@@ -68,7 +69,7 @@ def test_render_script_backquotes_and_refuses_bad_identifiers():
         with pytest.raises(ValueError, match="data tests run only"):
             render_script("predictions", table=bad)
     with pytest.raises(ValueError, match="unknown data-test script"):
-        render_script("monitoring", table=TABLE)
+        render_script("dashboard", table=TABLE)
 
 
 def test_classify_error_needs_an_exact_assertion_message():

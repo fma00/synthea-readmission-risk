@@ -32,6 +32,7 @@ PREDICTION_MUTATIONS: dict[str, str] = {
     "PRED-09": "UPDATE {t} SET `discharge_time` = TIMESTAMP_ADD(TIMESTAMP(DATE_ADD(@run_date, INTERVAL 1 DAY)), "  # noqa: S608 -- static template; {t} becomes a back-quoted table_id()
     f"INTERVAL 1 HOUR) WHERE `rank` = {_MAX_RANK} {_DAY}",
     "PRED-10": f"UPDATE {{t}} SET `scoring_run_id` = 'm5-other' WHERE `rank` = {_MAX_RANK} {_DAY}",  # noqa: S608 -- static template; {t} becomes a back-quoted table_id()
+    "PRED-11": f"UPDATE {{t}} SET `gold_fingerprint_definition` = NULL WHERE `rank` = {_MAX_RANK} {_DAY}",  # noqa: S608 -- static template; {t} becomes a back-quoted table_id()
 }
 
 _INSERT_N = "INSERT INTO {t} SELECT * REPLACE ({replace}) FROM {t} WHERE `scoring_run_id` = @n_id"
@@ -157,5 +158,107 @@ def seeded_check(client, *, run_date: date) -> dict[str, dict[str, DataTestResul
     finally:
         for name in sorted(live):
             # best effort; the scratch dataset's 1-day expiration is the backstop
+            with contextlib.suppress(Exception):
+                client.delete_table(name, not_found_ok=True)
+
+
+# ---------------------------------------------------------------------------------------------- monitoring (v2 slice 7)
+# serving.monitoring is empty before the first tick, so its M5 copies are seeded with SYNTHETIC rows: a valid base row
+# plus four valid companions (a failed, a refused, a clock-stage and an incomplete tick) that prove every check is
+# NULL-safe on such rows. Each mutation touches only the base row. Run as the monitor service account (make m5-monitoring).
+_MONITORING_BUNDLE = "569fdab6c17d433542b2cd6b531ed8efc5677fb37b00a792d84f79803c6a0f72"
+_SQL_TYPES = {"STRING": "STRING", "INTEGER": "INT64", "FLOAT": "FLOAT64", "BOOLEAN": "BOOL", "TIMESTAMP": "TIMESTAMP", "DATE": "DATE"}
+MONITORING_BASE_ROW: dict[str, str] = {
+    "monitoring_run_id": "'m5base'", "status": "'succeeded'", "started_at": "CURRENT_TIMESTAMP()",
+    "finished_at": "CURRENT_TIMESTAMP()", "sim_date": "DATE '2023-08-14'", "cadence": "'catch_up'", "trigger": "'laptop'",
+    "history_tests_passed": "TRUE", "scoring_run_id": "'m5run'", "model_bundle_id": f"'{_MONITORING_BUNDLE}'",
+    "verdict": "'ok'", "n_matured": "2000", "observed": "40", "expected": "40.0", "oe_ratio": "1.0", "oe_ci_low": "0.7144",
+    "oe_ci_high": "1.3617", "coverage_required": "18", "coverage_found": "18", "min_positives_floor": "20",
+    "band_low": "0.8", "band_high": "1.25",
+}  # fmt: skip
+_METRICS = ("verdict", "n_matured", "observed", "expected", "oe_ratio", "oe_ci_low", "oe_ci_high", "coverage_required", "coverage_found")
+MONITORING_COMPANIONS: dict[str, dict[str, str]] = {
+    "m5failed": {"status": "'failed'", "failed_stage": "'score'", **dict.fromkeys(_METRICS, None)},
+    "m5refused": {"status": "'refused'", "failed_stage": "'evaluate'", **dict.fromkeys(_METRICS, None)},
+    "m5clock": {"status": "'refused'", "failed_stage": "'clock'", "sim_date": None, "cadence": None,
+                "history_tests_passed": None, **dict.fromkeys(_METRICS, None)},
+    "m5incomplete": {"verdict": "'incomplete_cohort'", "n_matured": "0", "observed": "0", "expected": "0.0", "oe_ratio": None,
+                     "oe_ci_low": None, "oe_ci_high": None, "coverage_found": "4", "scoring_run_id": "'m5run2'",
+                     "sim_date": "DATE '2023-04-17'"},
+}  # fmt: skip
+_ONLY_BASE = "WHERE `monitoring_run_id` = 'm5base'"
+MONITORING_MUTATIONS: dict[str, str] = {
+    "MON-01": f"INSERT INTO {{t}} SELECT * FROM {{t}} {_ONLY_BASE}",  # noqa: S608 -- static template; {t} becomes a back-quoted table_id()
+    "MON-02": f"UPDATE {{t}} SET `status` = 'done' {_ONLY_BASE}",  # noqa: S608 -- static template; {t} becomes a back-quoted table_id()
+    "MON-03": f"UPDATE {{t}} SET `finished_at` = TIMESTAMP_SUB(`started_at`, INTERVAL 1 SECOND) {_ONLY_BASE}",  # noqa: S608 -- static template; {t} becomes a back-quoted table_id()
+    "MON-04": f"UPDATE {{t}} SET `verdict` = NULL {_ONLY_BASE}",  # noqa: S608 -- static template; {t} becomes a back-quoted table_id()
+    "MON-05": f"UPDATE {{t}} SET `scoring_run_id` = NULL {_ONLY_BASE}",  # noqa: S608 -- static template; {t} becomes a back-quoted table_id()
+    "MON-06": f"UPDATE {{t}} SET `sim_date` = DATE '2023-08-15' {_ONLY_BASE}",  # noqa: S608 -- static template; {t} becomes a back-quoted table_id()
+    "MON-07": f"UPDATE {{t}} SET `oe_ci_low` = `oe_ratio` + 1 {_ONLY_BASE}",  # noqa: S608 -- static template; {t} becomes a back-quoted table_id()
+    "MON-08": f"UPDATE {{t}} SET `verdict` = 'alert' {_ONLY_BASE}",  # O/E 1.0 is inside its CI: an inconsistent alert  # noqa: S608 -- static template; {t} becomes a back-quoted table_id()
+    "MON-09": f"UPDATE {{t}} SET `verdict` = 'great' {_ONLY_BASE}",  # noqa: S608 -- static template; {t} becomes a back-quoted table_id()
+    "MON-10": f"UPDATE {{t}} SET `sim_date` = DATE '2026-09-14' {_ONLY_BASE}",  # noqa: S608 -- static template; {t} becomes a back-quoted table_id()
+    "MON-11": f"UPDATE {{t}} SET `cadence` = 'hourly' {_ONLY_BASE}",  # noqa: S608 -- static template; {t} becomes a back-quoted table_id()
+    "MON-12": f"UPDATE {{t}} SET `failed_stage` = 'score' {_ONLY_BASE}",  # noqa: S608 -- static template; {t} becomes a back-quoted table_id()
+}
+
+
+def monitoring_struct(monitoring_run_id: str, overrides: dict[str, str | None] | None = None) -> str:
+    """One STRUCT literal in schema order; every NULL is typed (an untyped NULL in a STRUCT would be INT64)."""
+    from .bigquery import load_schema
+
+    values = {**MONITORING_BASE_ROW, **(overrides or {}), "monitoring_run_id": f"'{monitoring_run_id}'"}
+    parts = []
+    for field in load_schema("monitoring"):
+        value = values.get(field["name"])
+        parts.append(f"{value if value is not None else 'CAST(NULL AS ' + _SQL_TYPES[field['type']] + ')'} AS `{field['name']}`")
+    return "STRUCT(" + ", ".join(parts) + ")"
+
+
+def monitoring_clean_rows_sql() -> str:
+    rows = [monitoring_struct("m5base")] + [monitoring_struct(rid, o) for rid, o in MONITORING_COMPANIONS.items()]
+    return "[" + ", ".join(rows) + "]"
+
+
+def seeded_monitoring_check(client) -> dict[str, dict[str, DataTestResult]]:
+    """{"monitoring": {"clean": ..., "MON-01": ...}} (the same nested shape as seeded_check's result)."""
+    from readmission_risk.monitoring.store import monitoring_table_id
+
+    results: dict[str, dict[str, DataTestResult]] = {"monitoring": {}}
+    live: set[str] = set()
+
+    def run(sql: str) -> None:
+        client.query(sql, job_config=query_config()).result()
+
+    def seeded_copy(label: str) -> str:
+        name = copy_name("m", label)
+        live.add(name)
+        run(
+            f"CREATE TABLE {quoted(name)} PARTITION BY DATE(`started_at`) AS SELECT * FROM {quoted(monitoring_table_id())} "  # noqa: S608 -- identifiers validated by table_id() and back-quoted
+            "WHERE `started_at` >= TIMESTAMP '2026-10-18' AND FALSE"
+        )
+        run(f"INSERT INTO {quoted(name)} SELECT * FROM UNNEST({monitoring_clean_rows_sql()})")  # noqa: S608 -- static literals
+        return name
+
+    def expect(name: str, label: str) -> None:
+        result = run_data_tests(client, "monitoring", table=name)
+        results["monitoring"][label] = result
+        client.delete_table(name, not_found_ok=True)
+        live.discard(name)
+        if label == "clean" and not result.passed:
+            raise SeededCheckError(f"the clean monitoring copy failed its data tests: {result.failure}", results)
+        if label != "clean" and (result.passed or not (result.failure or "").startswith(f"{label}: ")):
+            got = "passed" if result.passed else f"failed with {result.failure}"
+            raise SeededCheckError(f"the {label} mutation should fail with {label}; it {got}", results)
+
+    try:
+        expect(seeded_copy("clean"), "clean")
+        for assertion_id in assertion_descriptions("monitoring"):
+            name = seeded_copy(assertion_id)
+            run(MONITORING_MUTATIONS[assertion_id].replace("{t}", quoted(name)))
+            expect(name, assertion_id)
+        return results
+    finally:
+        for name in sorted(live):
             with contextlib.suppress(Exception):
                 client.delete_table(name, not_found_ok=True)

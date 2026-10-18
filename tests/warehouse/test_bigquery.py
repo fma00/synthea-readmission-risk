@@ -24,10 +24,11 @@ _BQ_TYPES = {
 }
 
 
-def test_predictions_schema_json_is_prediction_schema_plus_run_id():
+def test_predictions_schema_json_is_prediction_schema_plus_run_id_and_fingerprint_definition():
     schema = wbq.load_schema("predictions")
     expected = [(f.name, _BQ_TYPES[f.type], "NULLABLE" if f.nullable else "REQUIRED") for f in PREDICTION_SCHEMA]
     expected.append(("scoring_run_id", "STRING", "REQUIRED"))
+    expected.append(("gold_fingerprint_definition", "STRING", "NULLABLE"))  # v2 slice 7, BigQuery only
     assert [(f["name"], f["type"], f["mode"]) for f in schema] == expected
     assert all(isinstance(f["description"], str) and f["description"].strip() for f in schema)
 
@@ -35,13 +36,13 @@ def test_predictions_schema_json_is_prediction_schema_plus_run_id():
 def test_scoring_runs_schema_json_matches_run_record_fields():
     schema = wbq.load_schema("scoring_runs")
     assert [f["name"] for f in schema] == [f.name for f in fields(RunRecord)]
-    assert len(schema) == 26
+    assert len(schema) == 27 and schema[-1]["name"] == "gold_fingerprint_definition"
     assert all(f["mode"] in ("REQUIRED", "NULLABLE") and f["description"].strip() for f in schema)
 
 
 def test_load_schema_refuses_unknown_names():
     with pytest.raises(ValueError, match="unknown table schema"):
-        wbq.load_schema("monitoring")
+        wbq.load_schema("dashboard")
 
 
 def test_query_config_sets_maximum_bytes_billed():

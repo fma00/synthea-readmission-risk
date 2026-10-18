@@ -96,7 +96,7 @@ jobs:
           # Turns on test_runtime_dependencies.py's environment check (Python, Spark, library minors, Java 21), so a
           # green run proves this job ran the intended stack, not merely that some stack passed.
           READMISSION_RISK_EXPECT_DATAPROC_RUNTIME: "3.0"
-        run: pytest -rs tests/pipeline
+        run: pytest -rs tests/pipeline tests/scripts
 
   # Runs zizmor ONLINE: some audits (known-vulnerable-actions, impostor-commit, and in practice ref-version-mismatch)
   # need the GitHub API. So this job can turn red without a commit, e.g. when an advisory is published for a pinned
