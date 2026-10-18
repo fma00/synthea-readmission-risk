@@ -1,4 +1,8 @@
+import importlib.util
 import json
+import os
+import subprocess
+import sys
 import warnings
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -14,7 +18,9 @@ from pyspark.sql.types import (
     TimestampType,
 )
 
+from readmission_risk.pipeline import storage as storage_module
 from readmission_risk.pipeline.big_join import (
+    GOLD_TABLE_COLUMNS,
     BigJoinConfig,
     build_big_join,
     build_index_encounters,
@@ -24,8 +30,11 @@ from readmission_risk.pipeline.big_join import (
     join_dimension_attributes,
     join_patient_demographics,
     load_synthea_tables,
+    spark_rowhash_fingerprint,
 )
+from readmission_risk.pipeline.fingerprint import GOLD_COLUMN_KINDS, rowhash_fingerprint
 from readmission_risk.pipeline.gold_metadata import (
+    FINGERPRINT_DEFINITION_ROWHASH_V1,
     PLANNED_PROCEDURE_CODES,
     read_gold_metadata,
 )
@@ -36,6 +45,8 @@ from readmission_risk.pipeline.schemas import (
     PROVIDERS_SCHEMA,
     TABLE_SCHEMAS,
 )
+from tests.gold_helpers import write_gold_metadata_for_frame
+from tests.pipeline.agreement_fixture import build_agreement_frame
 
 
 def ts(s: str) -> datetime:
@@ -1250,3 +1261,261 @@ def test_build_big_join_rejects_invalid_config_before_any_io(spark, tmp_path, ov
     with pytest.raises(ValueError, match=next(iter(overrides))):  # ValueError, not the FileNotFoundError I/O would give
         build_big_join(spark, BigJoinConfig(**config))
     assert not output_dir.exists()
+
+
+# --- v2 slice 5: gs://-capable I/O, spark-rowhash-v1 fingerprint, metadata v2 (FR11, FR12) ---
+# notes/eg-new-feature/v2-slice5-gs-big-join-fingerprint-pilot-2026-10-12.md
+
+REPO = Path(__file__).resolve().parents[2]
+
+
+def _fixture_input(tmp_path: Path, summary: object = None) -> Path:
+    input_dir = tmp_path / "in"
+    input_dir.mkdir()
+    payload = {"reference_date": "20260916", "seed": 7} if summary is None else summary
+    (input_dir / "generation_summary.json").write_text(json.dumps(payload))
+    _write_all_tables(input_dir / "csv")
+    return input_dir
+
+
+def _quiet_build(spark, **config):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)  # FIXTURE_ROWS has no planned stay: the zero-match warning
+        return build_big_join(spark, BigJoinConfig(reference_date="20260916", **config))
+
+
+@pytest.fixture(scope="module")
+def built_gold(spark, tmp_path_factory):
+    """One local Big Join run on FIXTURE_ROWS, shared by the read-only checks below."""
+    tmp_path = tmp_path_factory.mktemp("built-gold")
+    out = tmp_path / "out"
+    _quiet_build(spark, input_dir=_fixture_input(tmp_path), output_dir=out, provenance={"head_commit": "abc"})
+    return out
+
+
+def test_metadata_v2_written(spark, built_gold):
+    metadata = read_gold_metadata(built_gold)
+    assert metadata.metadata_version == 2
+    assert metadata.gold_fingerprint_definition == FINGERPRINT_DEFINITION_ROWHASH_V1
+    assert len(metadata.gold_fingerprint) == 64
+    assert metadata.spark_version == spark.version
+    assert metadata.generation_summary == {"reference_date": "20260916", "seed": 7}
+    assert metadata.build_provenance == {"head_commit": "abc"}
+
+
+def test_big_join_metadata_fingerprint_matches_loader(built_gold):
+    from readmission_risk.models.data import load_gold_table_with_metadata
+
+    frame, metadata = load_gold_table_with_metadata(built_gold)  # the loader itself also checks the v2 fingerprint
+    assert rowhash_fingerprint(frame) == metadata.gold_fingerprint
+    assert rowhash_fingerprint(pd.read_parquet(built_gold)) == metadata.gold_fingerprint
+
+
+def test_gold_column_kinds_match_spark_gold_schema(spark, built_gold):
+    kinds = {"string": "string", "int": "int", "bigint": "int", "double": "double", "timestamp": "timestamp"}
+    schema = spark.read.parquet(str(built_gold)).schema
+    assert {f.name: kinds.get(f.dataType.simpleString(), f.dataType.simpleString()) for f in schema.fields} == GOLD_COLUMN_KINDS
+
+
+def test_spark_and_python_fingerprints_agree(spark, tmp_path):
+    """FR12: the Spark-side fingerprint (Arrow batches in Python workers) equals the pandas-side one, on a frame with the value
+    shapes where the two paths could differ. Runs in CI's pipeline-dataproc-runtime job too (Python 3.12, Spark 4.0.2, Java 21)."""
+    from readmission_risk.models.data import load_gold_table
+
+    frame = build_agreement_frame(spark)
+    rows = frame.collect()
+    assert any(r["organization_utilization"] is None for r in rows)
+    assert any(r["payer_ownership"] is None for r in rows) and any(r["marital_status"] is None for r in rows)
+    assert any(not float(r["age_at_index_years"]).is_integer() for r in rows)
+    assert any(r["admission_reason_description"] and not r["admission_reason_description"].isascii() for r in rows)
+    assert any(r["index_start"].microsecond for r in rows)
+
+    out = tmp_path / "agreement"
+    frame.write.parquet(str(out))
+    spark_fp, n = spark_rowhash_fingerprint(spark, spark.read.parquet(str(out)))
+    assert n == 6
+    raw = pd.read_parquet(out)
+    assert rowhash_fingerprint(raw) == spark_fp
+    write_gold_metadata_for_frame(out, raw, version=2)
+    assert rowhash_fingerprint(load_gold_table(out)) == spark_fp
+
+
+def test_fingerprint_independent_of_partitioning(spark):
+    frame = build_agreement_frame(spark)
+    one, _ = spark_rowhash_fingerprint(spark, frame.repartition(1))
+    seven, _ = spark_rowhash_fingerprint(spark, frame.repartition(7))
+    assert one == seven
+
+
+def test_spark_fingerprint_requires_utc_session(spark):
+    spark.conf.set("spark.sql.session.timeZone", "Europe/Zurich")
+    try:
+        with pytest.raises(RuntimeError, match="must be UTC"):
+            spark_rowhash_fingerprint(spark, build_agreement_frame(spark))
+    finally:
+        spark.conf.set("spark.sql.session.timeZone", "UTC")
+
+
+def test_fingerprint_agreement_under_non_utc_process_tz(spark, tmp_path):
+    """The same agreement, in a separate process (own JVM, own Python workers) whose TZ is not UTC."""
+    out = tmp_path / "tz-probe"
+    env = {**os.environ, "TZ": "America/New_York", "PYSPARK_PYTHON": sys.executable, "PYTHONPATH": str(REPO)}
+    result = subprocess.run(
+        [sys.executable, str(REPO / "tests" / "pipeline" / "tz_agreement_probe.py"), str(out)],
+        env=env, capture_output=True, text=True, check=False, timeout=300,
+    )
+    assert result.returncode == 0, result.stderr[-3000:]
+    probe = json.loads(result.stdout.strip().splitlines()[-1])
+    assert probe["spark"] == probe["python"]
+    in_process, _ = spark_rowhash_fingerprint(spark, build_agreement_frame(spark))
+    assert probe["spark"] == in_process
+
+
+def test_gs_path_object_rejected(tmp_path):
+    with pytest.raises(ValueError, match="must be passed as str"):
+        BigJoinConfig(input_dir=Path("gs://b/x"), output_dir=tmp_path / "out", reference_date="20260916")
+
+
+def test_big_join_local_str_paths_equal_path_objects(spark, tmp_path, built_gold):
+    out = tmp_path / "out-str"
+    _quiet_build(spark, input_dir=str(_fixture_input(tmp_path)), output_dir=str(out), provenance={"head_commit": "abc"})
+    assert read_gold_metadata(out).gold_fingerprint == read_gold_metadata(built_gold).gold_fingerprint
+
+
+@pytest.mark.parametrize("summary", [["reference_date", "20260916"], "20260916 reference_date"])
+def test_build_big_join_rejects_non_object_summary_before_any_write(spark, tmp_path, summary):
+    out = tmp_path / "out"
+    with pytest.raises(ValueError, match="must hold a JSON object"):
+        _quiet_build(spark, input_dir=_fixture_input(tmp_path, summary=summary), output_dir=out)
+    assert not out.exists()
+
+
+def test_build_big_join_rejects_bad_provenance_before_any_write(spark, tmp_path):
+    out = tmp_path / "out"
+    with pytest.raises(ValueError, match="provenance"):
+        _quiet_build(spark, input_dir=_fixture_input(tmp_path), output_dir=out, provenance={"head_commit": ""})
+    assert not out.exists()
+
+
+def test_big_join_end_to_end_through_hadoop_storage(spark, tmp_path, monkeypatch, built_gold):
+    """The gs:// code path, offline: with "file" added to the Hadoop schemes, file:// URIs take exactly the route a gs:// URI takes
+    (string joins, HadoopStorage checks, summary read, Parquet write/read by URI, metadata via write_text_new)."""
+    monkeypatch.setattr(storage_module, "_HADOOP_SCHEMES", ("gs", "file"))
+    out = tmp_path / "out-hadoop"
+    _quiet_build(spark, input_dir=_fixture_input(tmp_path).as_uri(), output_dir=out.as_uri(), provenance={"head_commit": "abc"})
+    metadata = read_gold_metadata(out)
+    assert metadata.gold_fingerprint == read_gold_metadata(built_gold).gold_fingerprint
+    assert pd.read_parquet(out).equals(pd.read_parquet(built_gold))
+
+
+def _load_script(name: str):
+    spec = importlib.util.spec_from_file_location(f"script_{name}", REPO / "scripts" / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _NoStopSession:
+    """The shared session, with stop() disabled, so the CLI's `finally: spark.stop()` cannot stop the session fixture."""
+
+    def __init__(self, spark):
+        self._spark = spark
+
+    def stop(self):
+        pass
+
+    def __getattr__(self, name):
+        return getattr(self._spark, name)
+
+
+def test_run_big_join_cli_through_hadoop_storage(spark, tmp_path, monkeypatch, capsys, built_gold):
+    cli = _load_script("run_big_join")
+    monkeypatch.setattr(storage_module, "_HADOOP_SCHEMES", ("gs", "file"))
+    monkeypatch.setattr(cli, "make_spark_session", lambda **kwargs: _NoStopSession(spark))
+    out = tmp_path / "out-cli"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        code = cli.main([
+            "--input-dir", _fixture_input(tmp_path).as_uri(), "--output-dir", out.as_uri(),
+            "--reference-date", "20260916", "--spark-master", "external", "--provenance", "head_commit=abc",
+        ])
+    printed = capsys.readouterr()
+    assert code == 0, printed.err
+    expected = read_gold_metadata(built_gold).gold_fingerprint
+    assert f"Fingerprint: {expected} (spark-rowhash-v1)" in printed.out
+    assert read_gold_metadata(out).build_provenance == {"head_commit": "abc"}
+
+
+def test_run_big_join_cli_reports_bad_provenance(capsys):
+    cli = _load_script("run_big_join")
+    with pytest.raises(SystemExit) as excinfo:
+        cli.parse_args(["--input-dir", "x", "--output-dir", "y", "--reference-date", "20260916", "--provenance", "nokey"])
+    assert excinfo.value.code == 2
+    assert "provenance" in capsys.readouterr().err
+
+
+def test_run_big_join_cli_refuses_runtime_provenance_keys(capsys):
+    cli = _load_script("run_big_join")
+    with pytest.raises(SystemExit) as excinfo:
+        cli.parse_args(["--input-dir", "x", "--output-dir", "y", "--reference-date", "20260916", "--provenance", "runtime.x=y"])
+    assert excinfo.value.code == 2
+    assert "reserved for --record-runtime" in capsys.readouterr().err
+
+
+def test_run_big_join_cli_record_runtime_defaults_off():
+    cli = _load_script("run_big_join")
+    assert cli.parse_args(["--input-dir", "x", "--output-dir", "y", "--reference-date", "20260916"]).record_runtime is False
+
+
+def _cli_config(cli, provenance):
+    return cli.BigJoinConfig(input_dir="in", output_dir="out", reference_date="20261012", provenance=provenance)
+
+
+def test_with_runtime_facts_disabled_returns_the_same_config():
+    cli = _load_script("run_big_join")
+    config = _cli_config(cli, {"head_commit": "abc"})
+    assert cli.with_runtime_facts(config, object(), False, collect=lambda *a: pytest.fail("collector called")) is config
+
+
+def test_with_runtime_facts_enabled_merges_facts():
+    cli = _load_script("run_big_join")
+    config = _cli_config(cli, {"head_commit": "abc"})
+    merged = cli.with_runtime_facts(config, object(), True, collect=lambda *a: {"runtime.python_version": "x"})
+    assert merged.provenance == {"head_commit": "abc", "runtime.python_version": "x"}
+    assert config.provenance == {"head_commit": "abc"}  # the original is untouched
+
+
+@pytest.mark.parametrize("record_runtime", [True, False])
+def test_run_big_join_cli_main_wires_record_runtime(monkeypatch, capsys, record_runtime):
+    """Spark-free: main() hands the merged provenance to build_big_join exactly when --record-runtime is given."""
+    cli = _load_script("run_big_join")
+    calls, captured = [], {}
+
+    class _Session:
+        def stop(self):
+            pass
+
+    def fake_collect(spark, environ, jar_dirs):
+        calls.append(jar_dirs)
+        return {"runtime.python_version": "x"}
+
+    def fake_build(spark, config):
+        captured["provenance"] = dict(config.provenance)
+        raise ValueError("stop")
+
+    monkeypatch.setattr(cli, "make_spark_session", lambda **kwargs: _Session())
+    monkeypatch.setattr(cli, "collect_runtime_facts", fake_collect)
+    monkeypatch.setattr(cli, "build_big_join", fake_build)
+    argv = ["--input-dir", "in", "--output-dir", "out", "--reference-date", "20261012", "--provenance", "head_commit=abc"]
+    code = cli.main(argv + (["--record-runtime"] if record_runtime else []))
+    assert code == 1 and "ERROR: stop" in capsys.readouterr().err
+    if record_runtime:
+        assert captured["provenance"] == {"head_commit": "abc", "runtime.python_version": "x"}
+        assert calls == [cli.JAR_DIRS_DEFAULT]
+    else:
+        assert captured["provenance"] == {"head_commit": "abc"}
+        assert calls == []
+
+
+def test_gold_columns_constant_unchanged():
+    assert len(GOLD_TABLE_COLUMNS) == 24

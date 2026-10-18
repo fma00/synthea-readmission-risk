@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from readmission_risk.pipeline.fingerprint import rowhash_fingerprint
 from readmission_risk.pipeline.gold_metadata import (
     GOLD_METADATA_FILENAME,
     LABEL_DEFINITION,
@@ -142,7 +143,9 @@ def load_gold_table_with_metadata(gold_dir: Path) -> tuple[pd.DataFrame, GoldMet
     FileNotFoundError if gold_dir holds no Parquet file or the metadata file is absent, ValueError (naming the offending
     column/count/file) on any schema, data or metadata problem, including a label_definition / planned_procedure_codes that
     differ from this code's constants and row/positive counts that differ from the metadata's (an incomplete copy, or not the
-    table the metadata describes -- edits that preserve both counts are NOT detected)."""
+    table the metadata describes). For version-2 metadata it also recomputes the spark-rowhash-v1 fingerprint and refuses a
+    mismatch, so count-preserving edits are detected too; version-1 metadata (the slice-2b gold) has no fingerprint, and
+    count-preserving edits of such a table are NOT detected."""
     gold_dir = Path(gold_dir)
     if not gold_dir.is_dir() or not any(gold_dir.glob("*.parquet")):
         raise FileNotFoundError(f"No Parquet files found in gold directory: {gold_dir}")
@@ -201,6 +204,18 @@ def load_gold_table_with_metadata(gold_dir: Path) -> tuple[pd.DataFrame, GoldMet
         df[col] = df[col].astype(object)
     for col in ("index_start", "index_stop", LABEL_HORIZON_COLUMN):
         df[col] = pd.to_datetime(df[col], utc=True)
+
+    # v2 slice 5: a version-2 table carries the spark-rowhash-v1 fingerprint the Big Join computed over the written Parquet;
+    # recomputed on the normalized frame (order-independent). An integrity check, not a security control: whoever edits the
+    # Parquet can also rewrite the metadata (e.g. as version 1, which has no fingerprint); bundles exported as spark-rowhash-v1
+    # stay protected regardless, because guard 6 compares against the manifest.
+    if metadata.metadata_version == 2:
+        fingerprint = rowhash_fingerprint(df)
+        if fingerprint != metadata.gold_fingerprint:
+            raise ValueError(
+                f"Gold table in {gold_dir} has spark-rowhash-v1 fingerprint {fingerprint}, but its {GOLD_METADATA_FILENAME} "
+                f"records {metadata.gold_fingerprint}: the table was edited, or is not the one its metadata describes"
+            )
 
     n_dup = int(df["encounter_id"].duplicated().sum())
     if n_dup:

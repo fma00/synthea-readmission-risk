@@ -13,6 +13,8 @@ dist/
 venv/
 env/
 env*/
+# Extra venvs the Makefile creates and recreates (.venv-dataproc, .venv-lock312, .venv-lock314)
+.venv-*/
 
 # Environment variables / secrets
 .env
@@ -51,6 +53,9 @@ tools/synthea/
 /models/
 *.pkl
 *.joblib
+# Model bundles (v2 slice 2): local; slice 3 uploads copies to the bundle bucket, slice 4 reads them from there. Anchored like /data/ and /models/: an unanchored
+# `bundles/` would also ignore src/readmission_risk/bundles/ and tests/bundles/.
+/bundles/
 
 # MLflow local tracking store (SQLite DB + artifacts) -- anchored to the repo root, like /models/ above
 # (an unanchored `models/` also matched src/readmission_risk/models/ and tests/models/).
@@ -63,8 +68,10 @@ tools/synthea/
 # Review-only low-resolution PNG previews of the README figures (scripts/make_readme_assets.py); the SVGs next to them are the
 # published artifacts and stay tracked.
 /docs/img/preview/
+/docs/img/v2/preview/
 # Scratch directory of an interrupted scripts/make_readme_assets.py run.
 /docs/img/.tmp-*/
+/docs/img/v2/.tmp-*/
 
 # Personal / local-only Claude Code state. Only .claude/commands/ (the /eg-* workflow) is tracked on purpose; everything
 # else under .claude/ (settings.local.json, scheduled_tasks.*, worktrees/, agent-memory*, checkpoints/, ...) stays local.
@@ -95,3 +102,26 @@ client_secret*.json
 *.key
 *.p12
 *.pfx
+
+# Terraform (infra/, v2 slice 3). State lives in GCS and never in git; a local state file only exists during
+# infra/bootstrap.sh. terraform.tfvars holds the billing account id and the operator's email, so every tfvars form is
+# ignored except the committed example. bootstrap.sh writes a temporary *_override.tf.
+infra/.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+crash.log
+# v2 slice 5: the Temurin tarball pinned in prereg.yaml (download target of docs/setup.md's recipe); untracked files would
+# make the launchers' clean-tree check (P1) refuse
+tools/jdk/
+
+# CLI scratch directories of the monitoring tick (v2 slice 7)
+/monitor_out/
+/ledger_out/

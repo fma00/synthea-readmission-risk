@@ -5,23 +5,35 @@ holds fixtures only.) See notes/eg-new-feature/model-training-2026-09-19.md (Ver
 
 from __future__ import annotations
 
+import json
+import tempfile
+from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
+import mlflow
+import mlflow.sklearn
 import numpy as np
 import pandas as pd
+import yaml
+from mlflow.models import infer_signature
+from mlflow.tracking import MlflowClient
 
-from readmission_risk.models.data import EXPECTED_GOLD_COLUMNS, LABEL_COLUMN
-from readmission_risk.pipeline.gold_metadata import (
-    LABEL_DEFINITION,
-    PLANNED_PROCEDURE_CODES,
-    GoldMetadata,
-    write_gold_metadata,
+from readmission_risk.models.data import (
+    EXPECTED_GOLD_COLUMNS,
+    FEATURE_COLUMNS,
+    prepare_features,
+)
+from readmission_risk.models.tracking import load_logged_model, mlflow_tracking_uri
+from tests.gold_helpers import (  # noqa: F401 -- REFERENCE_DATE_STR is re-exported to tests/models and tests/scoring
+    REFERENCE_DATE_STR,
+    write_gold_metadata_for_frame,
 )
 
 REFERENCE_DATE = date(2026, 9, 16)
 TEST_START = date(2023, 1, 1)
-REFERENCE_DATE_STR = "20260916"
 TEST_START_STR = "20230101"
 
 
@@ -180,26 +192,128 @@ def pad_rows() -> list[dict]:
     ]
 
 
-def write_test_gold_metadata(directory: Path, df: pd.DataFrame, **overrides) -> Path:
-    """Writes a valid _gold_metadata.json for `df` via the PRODUCTION write_gold_metadata. Defaults: label_definition=LABEL_DEFINITION,
-    reference_date=REFERENCE_DATE_STR, readmission_window_days=30, lookback_years=1, planned_procedure_codes=PLANNED_PROCEDURE_CODES,
-    n_rows=len(df), n_positive=the number of label==1 rows (0 if the frame has no label column), n_planned_stays=0,
-    n_continuation_stays=0, n_nonterminal_stays=0, and n_inpatient_stays = the FINAL n_rows + the FINAL n_planned_stays (both after
-    overrides are applied, so a test planting n_rows=len(df)+1 or a nonzero n_planned_stays still yields metadata that passes
-    validation). Any keyword in `overrides` replaces the matching default (used to plant mismatches). Counts come from the frame
-    actually written, so the malformed-frame cases still reach their intended load_gold_table error."""
-    values = {
-        "label_definition": LABEL_DEFINITION,
-        "reference_date": REFERENCE_DATE_STR,
-        "readmission_window_days": 30,
-        "lookback_years": 1,
-        "planned_procedure_codes": PLANNED_PROCEDURE_CODES,
-        "n_rows": len(df),
-        "n_positive": int((df[LABEL_COLUMN] == 1).sum()) if LABEL_COLUMN in df.columns else 0,
-        "n_planned_stays": 0,
-        "n_continuation_stays": 0,
-        "n_nonterminal_stays": 0,
-    }
-    values.update(overrides)
-    values.setdefault("n_inpatient_stays", values["n_rows"] + values["n_planned_stays"])
-    return write_gold_metadata(Path(directory), GoldMetadata(**values))
+def write_test_gold_metadata(directory: Path, df: pd.DataFrame, *, version: int = 1, **overrides) -> Path:
+    """Kept under its historical name; see tests.gold_helpers.write_gold_metadata_for_frame (mlflow-free) for the defaults and
+    the version=2 behaviour."""
+    return write_gold_metadata_for_frame(directory, df, version=version, **overrides)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Tampered MLflow runs (moved from tests/scoring/helpers.py in v2 slice 2: the scorer reads bundles now; resolve_run_id's
+# and the bundle exporter's tests still need cloned runs).
+# ---------------------------------------------------------------------------------------------------------------
+def clone_run(
+    tracking_dir: Path,
+    source_run_id: str,
+    *,
+    experiment: str,
+    gold_frame: pd.DataFrame,
+    tags: dict[str, str] | None = None,
+    params: dict[str, str | None] | None = None,
+    features_json: dict | str | None = None,
+    split_assignment_csv: str | None = None,
+    signature_columns: Sequence[str] | None = None,
+    no_signature: bool = False,
+    status: str = "FINISHED",
+    drop_tags: Sequence[str] = (),
+    drop_artifacts: Sequence[str] = (),
+    mlmodel_python_version: object = None,
+    drop_mlmodel_python_version: bool = False,
+    mlmodel_python_function_flavor: object = None,
+    mlmodel_sklearn_serialization_format: str | None = None,
+    mlmodel_sklearn_code: str | None = None,
+) -> str:
+    """A tampered copy of a trained run, in `experiment` of the same store (created with an explicit artifact location under
+    the temp tracking dir: a SQLite store otherwise defaults to ./mlruns under the CWD). Copies the source's params and
+    non-mlflow.* tags, re-logs the same fitted model under its own run, sets its OWN model_uri tag, and only THEN applies the
+    caller's `tags` / `params` overrides (so a caller-supplied model_uri wins) and `drop_tags`. Every override is tested
+    with `is not None`, never truthiness. MLflow params cannot be edited after the fact, which is why tampering uses clones;
+    `params={"x": None}` means "do not copy x". The three mlmodel_* keywords (at most one) rewrite the clone's own MLmodel
+    file right after it is logged: set flavors.python_function.python_version to any YAML value, delete it, or replace the
+    whole python_function flavor (guard 14's legacy fallback reads that file); mlmodel_sklearn_serialization_format and
+    mlmodel_sklearn_code rewrite flavors.sklearn.serialization_format / .code (the bundle exporter's refusals)."""
+    edits = [
+        mlmodel_python_version is not None,
+        drop_mlmodel_python_version,
+        mlmodel_python_function_flavor is not None,
+        mlmodel_sklearn_serialization_format is not None,
+        mlmodel_sklearn_code is not None,
+    ]
+    assert sum(edits) <= 1
+    tracking_dir = Path(tracking_dir)
+    original_uri = mlflow.get_tracking_uri()
+    mlflow.set_tracking_uri(mlflow_tracking_uri(tracking_dir))
+    try:
+        client = MlflowClient()
+        source = client.get_run(source_run_id)
+        existing = client.get_experiment_by_name(experiment)
+        experiment_id = (
+            existing.experiment_id
+            if existing is not None
+            else client.create_experiment(experiment, artifact_location=(tracking_dir.resolve() / "artifacts").as_uri())
+        )
+        model = load_logged_model(tracking_dir, source_run_id)
+        with tempfile.TemporaryDirectory() as tmp:
+            source_features = Path(client.download_artifacts(source_run_id, "feature_columns.json", tmp)).read_text()
+            source_assignment = Path(client.download_artifacts(source_run_id, "split_assignment.csv", tmp)).read_text()
+
+        columns = list(FEATURE_COLUMNS) if signature_columns is None else list(signature_columns)
+        signature = None if no_signature else infer_signature(prepare_features(gold_frame)[columns])
+
+        new_params = dict(source.data.params)
+        for key, value in (params or {}).items():
+            if value is None:
+                new_params.pop(key, None)
+            else:
+                new_params[key] = value
+        run = mlflow.start_run(experiment_id=experiment_id)
+        try:
+            mlflow.log_params(new_params)
+            mlflow.set_tags({k: v for k, v in source.data.tags.items() if not k.startswith("mlflow.") and k != "model_uri"})
+            if "feature_columns.json" not in drop_artifacts:
+                text = source_features if features_json is None else (features_json if isinstance(features_json, str) else json.dumps(features_json))
+                mlflow.log_text(text, "feature_columns.json")
+            if "split_assignment.csv" not in drop_artifacts:
+                mlflow.log_text(source_assignment if split_assignment_csv is None else split_assignment_csv, "split_assignment.csv")
+            info = mlflow.sklearn.log_model(
+                model, name="model", signature=signature, serialization_format=mlflow.sklearn.SERIALIZATION_FORMAT_CLOUDPICKLE
+            )
+            if any(edits):
+                _edit_mlmodel(
+                    info.model_id,
+                    mlmodel_python_version,
+                    drop_mlmodel_python_version,
+                    mlmodel_python_function_flavor,
+                    mlmodel_sklearn_serialization_format,
+                    mlmodel_sklearn_code,
+                )
+            mlflow.set_tag("model_uri", info.model_uri)  # the clone's own tag ...
+            for key, value in (tags or {}).items():  # ... which a caller-supplied tag then overrides
+                mlflow.set_tag(key, value)
+            for key in drop_tags:
+                client.delete_tag(run.info.run_id, key)
+        finally:
+            mlflow.end_run(status=status)
+        return run.info.run_id
+    finally:
+        mlflow.set_tracking_uri(original_uri)
+
+
+def _edit_mlmodel(
+    model_id: str, version: object, drop_version: bool, flavor: object, sklearn_format: str | None, sklearn_code: str | None
+) -> None:
+    """Rewrites a logged model's MLmodel YAML in place (url2pathname: the artifact location is a percent-encoded file URI)."""
+    location = MlflowClient().get_logged_model(model_id).artifact_location
+    path = Path(url2pathname(urlparse(location).path)) / "MLmodel"
+    document = yaml.safe_load(path.read_text())
+    if sklearn_format is not None:
+        document["flavors"]["sklearn"]["serialization_format"] = sklearn_format
+    elif sklearn_code is not None:
+        document["flavors"]["sklearn"]["code"] = sklearn_code
+    elif flavor is not None:
+        document["flavors"]["python_function"] = flavor
+    elif drop_version:
+        del document["flavors"]["python_function"]["python_version"]
+    else:
+        document["flavors"]["python_function"]["python_version"] = version
+    path.write_text(yaml.safe_dump(document))

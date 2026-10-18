@@ -103,3 +103,35 @@ def test_cli_refuses_a_gold_table_without_metadata(cli, tmp_path, capsys):
     err = capsys.readouterr().err
     assert "ERROR:" in err and "rebuild" in err
     assert not (tmp_path / "t").exists()
+
+
+@pytest.mark.parametrize("flag", ["--reference-date", "--test-start-date", "--train-start-date"])
+def test_cli_rejects_bad_dates_before_any_gs_download(cli, tmp_path, monkeypatch, capsys, flag):
+    """v2 slice 5: --gold-dir may be gs://; a bad date must be refused before materialized_gold_dir downloads anything."""
+
+    def no_download(uri):
+        raise AssertionError(f"materialized_gold_dir called for {uri}")
+
+    monkeypatch.setattr(cli, "materialized_gold_dir", no_download)
+    argv = ["--gold-dir", "gs://bucket/gold/v2/x", "--reference-date", REFERENCE_DATE_STR,
+            "--test-start-date", TEST_START_STR, "--tracking-dir", str(tmp_path / "t")]  # fmt: skip
+    if flag == "--train-start-date":
+        argv += [flag, "2020-01-01"]
+    else:
+        argv[argv.index(flag) + 1] = "2026-09-16"
+    assert cli.main(argv) == 1
+    assert flag.removeprefix("--").replace("-", "_") in capsys.readouterr().err
+
+
+def test_cli_passes_gold_source_and_local_dir(cli, tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_train(config):
+        seen["config"] = config
+        raise ValueError("stop here")
+
+    monkeypatch.setattr(cli, "train_and_evaluate", fake_train)
+    gold = _write_gold(tmp_path / "gold")
+    assert cli.main(_base_args(gold, tmp_path / "t")) == 1
+    assert seen["config"].gold_dir == gold
+    assert seen["config"].gold_source == str(gold)

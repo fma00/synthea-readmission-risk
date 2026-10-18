@@ -1,15 +1,20 @@
 import json
-from dataclasses import asdict, replace
+from dataclasses import replace
 from datetime import date
 
 import pytest
 
 from readmission_risk.pipeline.gold_metadata import (
     _INT_FIELDS,
+    FINGERPRINT_DEFINITION_ROWHASH_V1,
     GOLD_METADATA_FILENAME,
     LABEL_DEFINITION,
     PLANNED_PROCEDURE_CODES,
+    V2_ONLY_FIELDS,
     GoldMetadata,
+    metadata_to_dict,
+    metadata_to_json,
+    parse_gold_metadata,
     parse_yyyymmdd,
     read_gold_metadata,
     write_gold_metadata,
@@ -17,7 +22,9 @@ from readmission_risk.pipeline.gold_metadata import (
 
 
 def make_metadata(**overrides) -> GoldMetadata:
+    """A valid VERSION-1 object (the v2 writer's default version would require the five v2 fields; see make_v2_metadata)."""
     base = {
+        "metadata_version": 1,
         "label_definition": LABEL_DEFINITION,
         "reference_date": "20260916",
         "readmission_window_days": 30,
@@ -34,8 +41,21 @@ def make_metadata(**overrides) -> GoldMetadata:
     return GoldMetadata(**base)
 
 
+def make_v2_metadata(**overrides) -> GoldMetadata:
+    v2 = {
+        "metadata_version": 2,
+        "gold_fingerprint": "a" * 64,
+        "gold_fingerprint_definition": FINGERPRINT_DEFINITION_ROWHASH_V1,
+        "spark_version": "4.1.3",
+        "generation_summary": {"reference_date": "20260916", "seed": 17},
+        "build_provenance": {"head_commit": "c" * 40},
+    }
+    v2.update(overrides)
+    return make_metadata(**v2)
+
+
 def raw_json(metadata: GoldMetadata) -> dict:
-    return json.loads(json.dumps(asdict(metadata)))  # tuple -> list, like the file on disk
+    return json.loads(metadata_to_json(metadata))  # tuple -> list, like the file on disk; a v1 object has the 12 v1 keys
 
 
 def write_raw(directory, text: str | bytes) -> None:
@@ -62,7 +82,7 @@ def test_round_trip_all_fields(tmp_path):
     path = write_gold_metadata(tmp_path, metadata)
     assert path == tmp_path / GOLD_METADATA_FILENAME
     assert read_gold_metadata(tmp_path) == metadata
-    assert len(asdict(metadata)) == 12
+    assert len(metadata_to_dict(metadata)) == 12
 
 
 def test_file_is_sorted_key_json_ending_with_newline_and_leaves_no_tmp(tmp_path):
@@ -145,7 +165,7 @@ def test_read_unknown_key_names_path_and_key(tmp_path):
 
 # (key, bad value): every case must raise ValueError naming the file and the key
 BAD_VALUES = [
-    ("metadata_version", 2),
+    ("metadata_version", 3),
     ("reference_date", "2026-09-16"),
     ("reference_date", "20261399"),
     ("reference_date", "2026091"),
@@ -202,3 +222,106 @@ def test_parse_yyyymmdd_returns_date_and_documented_messages():
         parse_yyyymmdd("2026-09-16", "reference_date")
     with pytest.raises(ValueError, match=r"test_start_date is not a valid calendar date: '20261399'"):
         parse_yyyymmdd("20261399", "test_start_date")
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Version 2 (v2 slice 5: spark-rowhash-v1 fingerprint, generation summary, build provenance)
+# ---------------------------------------------------------------------------------------------------------------------
+def test_v2_round_trip(tmp_path):
+    metadata = make_v2_metadata()
+    write_gold_metadata(tmp_path, metadata)
+    assert read_gold_metadata(tmp_path) == metadata
+    assert set(raw_json(metadata)) == set(raw_json(make_metadata())) | set(V2_ONLY_FIELDS)
+
+
+def test_v1_file_still_reads_and_reserializes_byte_identical(tmp_path):
+    v1 = make_metadata()
+    text = json.dumps({**raw_json(v1)}, indent=2, sort_keys=True) + "\n"  # exactly what the v1 writer produced
+    write_raw(tmp_path, text)
+    read = read_gold_metadata(tmp_path)
+    assert read.metadata_version == 1
+    assert all(getattr(read, name) is None for name in V2_ONLY_FIELDS)
+    assert metadata_to_json(read) == text
+
+
+def test_parse_matches_read(tmp_path):
+    metadata = make_v2_metadata()
+    write_gold_metadata(tmp_path, metadata)
+    text = (tmp_path / GOLD_METADATA_FILENAME).read_text(encoding="utf-8")
+    assert parse_gold_metadata(text, "gs://bucket/gold/_gold_metadata.json") == read_gold_metadata(tmp_path)
+
+
+@pytest.mark.parametrize("name", V2_ONLY_FIELDS)
+def test_v2_missing_field_refused(tmp_path, name):
+    obj = raw_json(make_v2_metadata())
+    del obj[name]
+    write_raw(tmp_path, json.dumps(obj))
+    with pytest.raises(ValueError, match=rf"{GOLD_METADATA_FILENAME}.*missing.*{name}"):
+        read_gold_metadata(tmp_path)
+
+
+@pytest.mark.parametrize("name", V2_ONLY_FIELDS)
+def test_v1_with_v2_field_refused(tmp_path, name):
+    obj = raw_json(make_metadata())
+    obj[name] = raw_json(make_v2_metadata())[name]
+    write_raw(tmp_path, json.dumps(obj))
+    with pytest.raises(ValueError, match=rf"{GOLD_METADATA_FILENAME}.*unknown.*{name}"):
+        read_gold_metadata(tmp_path)
+
+
+def test_v1_object_with_v2_field_refused_on_write(tmp_path):
+    with pytest.raises(ValueError, match="build_provenance"):
+        write_gold_metadata(tmp_path, make_metadata(build_provenance={}))
+
+
+@pytest.mark.parametrize("version", [0, 3, True, 1.0, "2", None])
+def test_unknown_version_names_supported(tmp_path, version):
+    obj = raw_json(make_v2_metadata())
+    obj["metadata_version"] = version
+    write_raw(tmp_path, json.dumps(obj))
+    with pytest.raises(ValueError, match=r"metadata_version.*this code reads 1, 2"):
+        read_gold_metadata(tmp_path)
+
+
+V2_BAD_VALUES = [
+    ("gold_fingerprint", "A" * 64),
+    ("gold_fingerprint", "a" * 63),
+    ("gold_fingerprint", ""),
+    ("gold_fingerprint_definition", "pandas-csv-sha256-v1"),
+    ("spark_version", ""),
+    ("spark_version", 4),
+    ("generation_summary", ["reference_date"]),
+    ("generation_summary", {"reference_date": "20261012"}),  # differs from the metadata's reference_date
+    ("generation_summary", {}),
+    ("build_provenance", None),
+    ("build_provenance", {"head_commit": ""}),
+    ("build_provenance", {"head_commit": 5}),
+    ("build_provenance", ["x"]),
+]
+
+
+@pytest.mark.parametrize("key, value", V2_BAD_VALUES)
+def test_v2_bad_value_refused_naming_file_and_key(tmp_path, key, value):
+    obj = raw_json(make_v2_metadata())
+    obj[key] = value
+    write_raw(tmp_path, json.dumps(obj))
+    with pytest.raises(ValueError, match=rf"{GOLD_METADATA_FILENAME}.*{key}"):
+        read_gold_metadata(tmp_path)
+
+
+def test_v2_empty_build_provenance_allowed(tmp_path):
+    metadata = make_v2_metadata(build_provenance={})
+    write_gold_metadata(tmp_path, metadata)
+    assert read_gold_metadata(tmp_path).build_provenance == {}
+
+
+def test_nested_duplicate_key_refused(tmp_path):
+    text = metadata_to_json(make_v2_metadata()).replace('"seed": 17', '"seed": 17, "seed": 18')
+    write_raw(tmp_path, text)
+    with pytest.raises(ValueError, match="duplicate key 'seed'"):
+        read_gold_metadata(tmp_path)
+
+
+def test_metadata_with_dicts_is_unhashable_by_design():
+    with pytest.raises(TypeError):
+        hash(make_v2_metadata())

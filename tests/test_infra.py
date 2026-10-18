@@ -1,0 +1,701 @@
+"""Static checks of the Terraform config in infra/ and the keyless smoke workflow (v2 slice 3).
+
+Line/regex based like tests/test_docs.py: no HCL parser, no new dependency. CI's terraform-validate job checks that the
+config is valid; these tests pin the security decisions so that changing one is deliberate (design note
+notes/eg-new-feature/v2-slice3-terraform-wif-2026-10-11.md, Verification):
+- the WIF provider's condition is the conjunction of the numeric repository and owner ids, refs/heads/main and the
+  dispatch/schedule events, and every claim it uses is mapped;
+- gha-smoke is bound to smoke.yml's workflow_ref only, can only list the bundle bucket, and smoke.yml uses exactly the
+  provider, account and bucket that infra/ defines;
+- bundle-writer can only create objects; IAM is additive only, except one pinned removal of the default compute
+  SA's roles/editor; no service-account key exists anywhere;
+- bucket settings, lifecycle and prevent_destroy are as designed;
+- id-token: write appears only at job level in dispatch/schedule workflows, and CI never plans or applies;
+- the Terraform CLI, provider and lock-file versions agree;
+- (v2 slice 4) the scorer has exactly its designed grants, is bound to score.yml on main, and cannot create or drop
+  serving tables; the BigQuery tables are partitioned, filter-required and deletion-protected, and read their schemas
+  from the package; every resource waits for the API set.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+INFRA = ROOT / "infra"
+WORKFLOWS = ROOT / ".github" / "workflows"
+SMOKE = WORKFLOWS / "smoke.yml"
+SCORE = WORKFLOWS / "score.yml"
+CI = WORKFLOWS / "ci.yml"
+_RESOURCE_RE = re.compile(r'^resource "(\w+)" "(\w+)" \{\n(.*?)^\}', flags=re.MULTILINE | re.DOTALL)
+
+
+def _read(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def _collapse(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _tf(name: str) -> str:
+    return _read(INFRA / name)
+
+
+def _all_tf() -> str:
+    return "\n".join(_read(p) for p in sorted(INFRA.glob("*.tf")))
+
+
+def _resources(text: str) -> list[tuple[str, str, str]]:
+    """(type, name, body) of every top-level resource block; blocks close with a `}` in column 0 (terraform fmt)."""
+    return _RESOURCE_RE.findall(text)
+
+
+def _resource(rtype: str, name: str) -> str:
+    found = [body for t, n, body in _resources(_all_tf()) if (t, n) == (rtype, name)]
+    assert len(found) == 1, f"expected exactly one {rtype}.{name} in infra/*.tf, found {len(found)}"
+    return found[0]
+
+
+def _args(body: str) -> dict[str, str]:
+    """Top-level `key = value` arguments of a flat block body (one argument per line, as in iam.tf)."""
+    return dict(re.findall(r"^  (\w+)\s*=\s*(.+?)\s*$", body, flags=re.MULTILINE))
+
+
+def _variable_default(name: str) -> str:
+    m = re.search(rf'^variable "{name}" \{{\n(.*?)^\}}', _tf("variables.tf"), flags=re.MULTILINE | re.DOTALL)
+    assert m, f"variable {name} not found"
+    default = re.search(r'^\s*default\s*=\s*"([^"]*)"', m.group(1), flags=re.MULTILINE)
+    assert default, f"variable {name} has no string default"
+    return default.group(1)
+
+
+def _iam_members() -> list[dict[str, str]]:
+    return [_args(body) | {"_type": t, "_name": n} for t, n, body in _resources(_all_tf()) if t.endswith("_iam_member")]
+
+
+def expected_gold_uri() -> str:
+    """The gold table the scheduled scorer reads: the gold bucket's name plus the 200k champion's prefix (v2 slice 7;
+    tests/test_tooling.py compares the Makefile's GOLD_URI default with it, test_monitoring_* the monitoring config)."""
+    bucket = re.search(r'^  name\s*=\s*"([^"]+)"', _resource("google_storage_bucket", "gold"), flags=re.MULTILINE)
+    assert bucket
+    return f"gs://{bucket.group(1)}/v2/main_200k"
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _block(lines: list[str], start: int) -> list[str]:
+    """Lines from `start` up to (excluding) the next non-blank line indented at most as deep as lines[start]."""
+    column = _indent(lines[start])
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].strip() and _indent(lines[i]) <= column), len(lines))
+    return lines[start:end]
+
+
+def _workflow_files() -> list[Path]:
+    return sorted([*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml")])
+
+
+def _triggers(lines: list[str]) -> set[str]:
+    on = lines.index("on:")
+    return {line.strip().rstrip(":") for line in _block(lines, on)[1:] if line.strip() and _indent(line) == 2}
+
+
+# ---------------------------------------------------------------- WIF
+
+
+def test_wif_condition_pins_numeric_repo_and_owner_ids_main_and_event_names():
+    wif = _tf("wif.tf")
+    assert "||" not in wif, "the WIF condition must be a conjunction"
+    lines = wif.split("\n")
+    start = next(i for i, line in enumerate(lines) if _collapse(line) == 'attribute_condition = join(" && ", [')
+    end = next(i for i in range(start, len(lines)) if lines[i].strip() == "])")
+    fragments = [line.strip().rstrip(",") for line in lines[start + 1 : end] if line.strip()]
+    assert fragments == [
+        "\"assertion.repository_id == '${var.github_repository_id}'\"",
+        "\"assertion.repository_owner_id == '${var.github_repository_owner_id}'\"",
+        "\"assertion.ref == 'refs/heads/main'\"",
+        "\"assertion.event_name in ['workflow_dispatch', 'schedule']\"",
+    ]
+    assert _variable_default("github_repository_id") == "1380503419"
+    assert _variable_default("github_repository_owner_id") == "270004823"
+    provider = _collapse(_resource("google_iam_workload_identity_pool_provider", "github_actions"))
+    assert 'oidc { issuer_uri = "https://token.actions.githubusercontent.com" }' in provider
+    body = _resource("google_iam_workload_identity_pool_provider", "github_actions")
+    assert not re.search(r"^\s*allowed_audiences\s*=", body, flags=re.MULTILINE), "the default audience is the design"
+    collapsed = _collapse(wif)
+    for claim in set(re.findall(r"assertion\.([a-z_]+)", "\n".join(fragments))):
+        assert f'"attribute.{claim}" = "assertion.{claim}"' in collapsed, f"claim {claim} is used but not mapped"
+
+
+def test_smoke_sa_binding_is_keyed_to_the_smoke_workflow_on_main():
+    iam = _collapse(_tf("iam.tf"))
+    assert "pool_name = google_iam_workload_identity_pool.github.name" in iam
+    assert 'smoke_workflow_ref = "${var.github_repository}/.github/workflows/smoke.yml@refs/heads/main"' in iam
+    assert (
+        'smoke_principal_set = "principalSet://iam.googleapis.com/${local.pool_name}/attribute.workflow_ref/'
+        '${local.smoke_workflow_ref}"'
+    ) in iam
+    assert SMOKE.is_file()
+    # A repository-wide binding would let any workflow on main impersonate the account: an owner decision, never an edit.
+    assert [m for m in _iam_members() if "attribute.repository" in m.get("member", "")] == []
+
+
+def test_smoke_workflow_matches_the_terraform_values():
+    smoke = _read(SMOKE)
+    pool_id = re.search(r'workload_identity_pool_id\s*=\s*"([^"]+)"', _resource("google_iam_workload_identity_pool", "github"))
+    provider_id = re.search(
+        r'workload_identity_pool_provider_id\s*=\s*"([^"]+)"',
+        _resource("google_iam_workload_identity_pool_provider", "github_actions"),
+    )
+    account_id = re.search(r'account_id\s*=\s*"([^"]+)"', _resource("google_service_account", "gha_smoke"))
+    bucket = re.search(r'^  name\s*=\s*"([^"]+)"', _resource("google_storage_bucket", "bundles"), flags=re.MULTILINE)
+    assert pool_id and provider_id and account_id and bucket
+    provider = (
+        f"projects/{_variable_default('project_number')}/locations/global/workloadIdentityPools/{pool_id.group(1)}"
+        f"/providers/{provider_id.group(1)}"
+    )
+    assert f"workload_identity_provider: {provider}\n" in smoke
+    assert f"service_account: {account_id.group(1)}@{_variable_default('project_id')}.iam.gserviceaccount.com\n" in smoke
+    assert f"run: gcloud storage ls gs://{bucket.group(1)}/\n" in smoke
+
+
+# ---------------------------------------------------------------- IAM
+
+
+def test_smoke_account_can_only_list():
+    members = _iam_members()
+    on_bucket = [m for m in members if m.get("member") == '"serviceAccount:${google_service_account.gha_smoke.email}"']
+    assert [(m["role"], m.get("bucket")) for m in on_bucket] == [
+        ('"roles/storage.legacyBucketReader"', "google_storage_bucket.bundles.name")
+    ]
+    on_account = [m for m in members if m.get("service_account_id") == "google_service_account.gha_smoke.name"]
+    assert [(m["role"], m["member"]) for m in on_account] == [('"roles/iam.workloadIdentityUser"', "local.smoke_principal_set")]
+
+
+def test_bundle_writer_is_create_only():
+    members = _iam_members()
+    on_bucket = [m for m in members if m.get("member") == '"serviceAccount:${google_service_account.bundle_writer.email}"']
+    assert [(m["role"], m.get("bucket")) for m in on_bucket] == [
+        ('"roles/storage.objectCreator"', "google_storage_bucket.bundles.name")
+    ]
+    on_account = [m for m in members if m.get("service_account_id") == "google_service_account.bundle_writer.name"]
+    assert [(m["role"], m["member"]) for m in on_account] == [
+        ('"roles/iam.serviceAccountTokenCreator"', "var.operator_member")
+    ]
+
+
+def test_iam_is_additive_only():
+    types = {t for t, _, _ in _resources(_all_tf())}
+    assert [t for t in types if t.endswith(("_iam_policy", "_iam_binding"))] == []
+    # 12 (slices 3-4) + 14 (slice 5: synthea-generator 6, dataproc-runtime 8; the 2 staging grants removed 2026-10-14)
+    # + 14 (slice 7: monitor 8, ledger-reader 5, scorer's monitor.yml binding 1)
+    assert len(_iam_members()) == 40
+    assert [(t, n) for t, n, _ in _resources(_all_tf()) if t.endswith("_iam_member_remove")] == [
+        ("google_project_iam_member_remove", "default_compute_no_editor")
+    ]
+
+
+def test_no_service_account_keys_in_infra_or_workflows():
+    assert "google_service_account_key" not in _all_tf()
+    for path in _workflow_files():
+        assert "credentials_json" not in _read(path), f"{path.name} uses a service-account key"
+
+
+# ---------------------------------------------------------------- buckets and budgets
+
+
+def test_buckets_enforce_uniform_access_and_public_access_prevention():
+    buckets = [(n, _collapse(body)) for t, n, body in _resources(_all_tf()) if t == "google_storage_bucket"]
+    assert sorted(n for n, _ in buckets) == ["artifacts", "bundles", "gold", "raw", "tfstate"]
+    for name, body in buckets:
+        assert "uniform_bucket_level_access = true" in body, name
+        assert 'public_access_prevention = "enforced"' in body, name
+        assert "location = upper(var.region)" in body, name
+
+
+def test_raw_bucket_lifecycle_pilot_90_main_365():
+    raw = _collapse(_resource("google_storage_bucket", "raw"))
+    rules = re.findall(r"lifecycle_rule \{ condition \{ (.*?) \} action \{ (.*?) \} \}", raw)
+    assert rules == [
+        ('age = 90 matches_prefix = ["v2/pilot_"]', 'type = "Delete"'),
+        ('age = 365 matches_prefix = ["v2/main_"]', 'type = "Delete"'),
+    ]
+    assert "soft_delete_policy { retention_duration_seconds = 0 }" in raw
+
+
+def test_generation_templates_default_has_pilot_and_main():
+    variables = _collapse(_tf("variables.tf"))
+    assert 'variable "generation_templates" {' in variables
+    assert "default = { pilot = 7200, main = 7200 }" in variables
+
+
+def test_state_and_bundle_buckets_and_monthly_budget_prevent_destroy():
+    guarded = {("google_storage_bucket", "tfstate"), ("google_storage_bucket", "bundles"), ("google_billing_budget", "monthly")}
+    for rtype, name, body in _resources(_all_tf()):
+        has_guard = "lifecycle { prevent_destroy = true }" in _collapse(body)
+        assert has_guard == ((rtype, name) in guarded), f"{rtype}.{name}: prevent_destroy is {has_guard}"
+    for name in ("tfstate", "bundles"):
+        assert "versioning { enabled = true }" in _collapse(_resource("google_storage_bucket", name)), name
+
+
+def test_monthly_budget_is_imported_not_redefined():
+    budgets = _collapse(_tf("budgets.tf"))
+    assert (
+        'import { to = google_billing_budget.monthly id = "billingAccounts/${var.billing_account}/budgets/'
+        '${var.existing_budget_id}" }'
+    ) in budgets
+    amounts = re.findall(r'currency_code = "(\w+)" units = "(\d+)"', budgets)
+    assert amounts == [("CHF", "20"), ("CHF", "5")]
+
+
+# ---------------------------------------------------------------- workflows
+
+
+def test_id_token_write_only_at_job_level_in_dispatch_or_schedule_workflows():
+    for path in _workflow_files():
+        text = _read(path)
+        # write-all grants id-token implicitly; a quoted or differently spelled value would slip past the exact match.
+        assert not re.search(r"permissions:\s*[\"']?write-all", text), f"{path.name}: write-all"
+        assert [v for v in re.findall(r"^\s*id-token:\s*(.*?)\s*$", text, flags=re.MULTILINE) if v != "write"] == []
+        lines = text.split("\n")
+        # Flow style (`permissions: { id-token: write }`) would hide the grant from the line checks below.
+        assert not re.search(r"permissions:\s*\{[^}]*id-token", text), f"{path.name}: use block-style permissions"
+        top = [i for i, line in enumerate(lines) if line.startswith("permissions:")]
+        assert len(top) == 1, f"{path.name}: needs exactly one top-level permissions block"
+        assert not any("id-token" in line for line in _block(lines, top[0])), f"{path.name}: id-token at top level"
+        if any("id-token" in line.split("#", 1)[0] for line in lines):
+            assert _triggers(lines) <= {"workflow_dispatch", "schedule"}, f"{path.name}: id-token on another trigger"
+    lines = _read(SMOKE).split("\n")
+    assert "permissions: {}" in lines
+    assert _triggers(lines) == {"workflow_dispatch"}
+    job_permissions = [i for i, line in enumerate(lines) if line == "    permissions:"]
+    assert len(job_permissions) == 1
+    granted = {line.strip() for line in _block(lines, job_permissions[0])[1:] if line.strip()}
+    assert granted == {"contents: read", "id-token: write"}
+
+
+def test_ci_runs_terraform_validate_without_credentials():
+    lines = _read(CI).split("\n")
+    job = [line.strip() for line in _block(lines, lines.index("  terraform-validate:"))]
+    code = [line for line in job if line and not line.startswith("#")]
+    assert "run: terraform -chdir=infra fmt -check -recursive -diff" in code
+    assert "run: terraform -chdir=infra init -backend=false -input=false -lockfile=readonly" in code
+    assert "run: terraform -chdir=infra validate" in code
+    assert any("sha256sum -c -" in line for line in code)
+    assert [line for line in code if re.search(r"\bterraform\b.*\b(plan|apply)\b", line)] == []
+    assert not any("id-token" in line for line in job)
+    assert not any(line.startswith("permissions:") for line in code), "the job must inherit the top-level contents: read"
+    for forbidden in ("secrets.", "google-github-actions/auth", "credentials_json"):
+        assert not any(forbidden in line for line in code), f"terraform-validate must hold no credentials: {forbidden}"
+
+
+def test_bootstrap_script_never_auto_approves():
+    script = _read(INFRA / "bootstrap.sh")
+    assert "auto-approve" not in script
+    assert "\nset -euo pipefail\n" in script
+    assert (INFRA / "bootstrap.sh").stat().st_mode & 0o111, "bootstrap.sh must be executable"
+
+
+def test_bootstrap_script_keeps_its_state_safety_checks():
+    lines = _read(INFRA / "bootstrap.sh").split("\n")
+    code = [line for line in lines if not line.lstrip().startswith("#")]
+    # The local state is deleted exactly once, and only after the state object in GCS has been read back and verified.
+    deletes = [i for i, line in enumerate(code) if "rm -f terraform.tfstate" in line]
+    verify = [i for i, line in enumerate(code) if 'gcloud storage cat "$STATE_OBJECT"' in line]
+    assert len(deletes) == 1 and len(verify) == 1 and verify[0] < deletes[0]
+    # -force-copy only after the pre-migration probe and the local state check.
+    force = next(i for i, line in enumerate(code) if "-migrate-state -force-copy" in line)
+    probe = next(i for i, line in enumerate(code) if 'object=$(probe objects "$STATE_OBJECT")' in line and i < force)
+    local = next(i for i, line in enumerate(code) if "grep -x 'google_storage_bucket.tfstate'" in line and i < force)
+    assert probe < local < force
+    # Every override file name Terraform honours is refused.
+    text = "\n".join(code)
+    for pattern in ("[ -e override.tf ]", "[ -e override.tf.json ]", "compgen -G '*_override.tf'", "compgen -G '*_override.tf.json'"):
+        assert pattern in text, pattern
+    # grep -q can exit early and SIGPIPE its writer, which pipefail turns into a false failure.
+    assert "grep -q" not in text.replace("grep -qiE '404|not found' <<<", "")
+
+
+# ---------------------------------------------------------------- versions
+
+
+def test_terraform_versions_agree():
+    ci_version = re.search(r'TERRAFORM_VERSION: "([^"]+)"', _read(CI))
+    required = re.search(r'required_version = ">= ([0-9.]+), < ', _tf("versions.tf"))
+    provider = re.search(r'source\s*=\s*"hashicorp/google"\s*\n\s*version\s*=\s*"([0-9.]+)"', _tf("versions.tf"))
+    assert ci_version and required and provider
+    assert ci_version.group(1) == required.group(1)
+    lock = _read(INFRA / ".terraform.lock.hcl")
+    assert re.findall(r'^provider "([^"]+)"', lock, flags=re.MULTILINE) == ["registry.terraform.io/hashicorp/google"]
+    assert re.search(r'^  version\s*=\s*"([^"]+)"', lock, flags=re.MULTILINE).group(1) == provider.group(1)
+    # Platform coverage (linux_amd64 for CI, darwin_arm64 for the laptop) is enforced by CI's -lockfile=readonly init and
+    # the recipe in docs/setup.md; h1: values are opaque, so only their number is checked here.
+    assert len(re.findall(r'"h1:', lock)) >= 2
+
+
+# ---------------------------------------------------------------- scorer and BigQuery (v2 slice 4)
+
+SCORER = '"serviceAccount:${google_service_account.scorer.email}"'
+
+
+def test_scorer_grants_are_exactly():
+    grants = sorted(
+        (m["_type"], m["role"], m.get("bucket") or m.get("table_id") or m.get("dataset_id") or m.get("project"))
+        for m in _iam_members()
+        if m.get("member") == SCORER
+    )
+    assert grants == sorted([
+        ("google_storage_bucket_iam_member", '"roles/storage.objectViewer"', "google_storage_bucket.bundles.name"),
+        ("google_storage_bucket_iam_member", '"roles/storage.objectViewer"', "google_storage_bucket.gold.name"),
+        ("google_bigquery_table_iam_member", "google_project_iam_custom_role.scorer_table_writer.id",
+         "google_bigquery_table.predictions.table_id"),
+        ("google_bigquery_table_iam_member", "google_project_iam_custom_role.scorer_table_writer.id",
+         "google_bigquery_table.scoring_runs.table_id"),
+        ("google_bigquery_dataset_iam_member", '"roles/bigquery.dataEditor"', "google_bigquery_dataset.scratch.dataset_id"),
+        ("google_project_iam_member", '"roles/bigquery.jobUser"', "var.project_id"),
+    ])  # fmt: skip
+    on_account = sorted(
+        (m["role"], m["member"]) for m in _iam_members() if m.get("service_account_id") == "google_service_account.scorer.name"
+    )
+    assert on_account == [
+        ('"roles/iam.serviceAccountTokenCreator"', "var.operator_member"),
+        ('"roles/iam.workloadIdentityUser"', "local.monitor_principal_set"),  # v2 slice 7: monitor.yml's score job
+        ('"roles/iam.workloadIdentityUser"', "local.score_principal_set"),
+    ]
+    # nothing on the serving dataset itself (no dataset-level grant: D6)
+    assert [m for m in _iam_members() if "serving" in m.get("dataset_id", "")] == []
+
+
+def test_custom_role_is_exactly_get_getdata_updatedata():
+    role = _collapse(_resource("google_project_iam_custom_role", "scorer_table_writer"))
+    permissions = re.search(r"permissions = \[ (.*?),? \]", role)
+    assert permissions is not None
+    assert [p.strip().strip('"') for p in permissions.group(1).split(",")] == [
+        "bigquery.tables.get",
+        "bigquery.tables.getData",
+        "bigquery.tables.updateData",
+    ]
+
+
+def test_scorer_sa_binding_is_keyed_to_the_score_workflow_on_main():
+    iam = _collapse(_tf("iam.tf"))
+    assert 'score_workflow_ref = "${var.github_repository}/.github/workflows/score.yml@refs/heads/main"' in iam
+    assert (
+        'score_principal_set = "principalSet://iam.googleapis.com/${local.pool_name}/attribute.workflow_ref/'
+        '${local.score_workflow_ref}"'
+    ) in iam
+    assert SCORE.is_file()
+
+
+def test_score_workflow_matches_the_terraform_values():
+    score, smoke = _read(SCORE), _read(SMOKE)
+    provider = re.search(r"workload_identity_provider: (\S+)\n", smoke)
+    account_id = re.search(r'account_id\s*=\s*"([^"]+)"', _resource("google_service_account", "scorer"))
+    assert provider and account_id
+    assert f"workload_identity_provider: {provider.group(1)}\n" in score
+    assert f"service_account: {account_id.group(1)}@{_variable_default('project_id')}.iam.gserviceaccount.com\n" in score
+    assert f"--gold-dir {expected_gold_uri()} " in score
+
+
+def test_score_workflow_is_dispatch_only_and_input_reaches_shell_only_via_env():
+    text = _read(SCORE)
+    lines = text.split("\n")
+    assert _triggers(lines) == {"workflow_dispatch"} and "permissions: {}" in lines
+    job_permissions = [i for i, line in enumerate(lines) if line == "    permissions:"]
+    granted = {line.strip() for line in _block(lines, job_permissions[0])[1:] if line.strip()}
+    assert granted == {"contents: read", "id-token: write"}
+    for i, line in enumerate(lines):
+        if "${{" in line:
+            assert line.strip() == "RUN_DATE: ${{ inputs.run_date }}", f"score.yml:{i + 1}: expression outside env"
+    assert '--run-date "$RUN_DATE"' in text
+    assert "cache:" not in text  # no pip cache in a job that holds cloud credentials
+
+
+def test_bigquery_tables_partitioned_require_filter_and_deletion_protected():
+    for name, field in (("predictions", "as_of_date"), ("scoring_runs", "started_at"), ("monitoring", "started_at")):
+        body = _collapse(_resource("google_bigquery_table", name))
+        assert f'time_partitioning {{ type = "DAY" field = "{field}" }}' in body, name
+        assert "require_partition_filter = true" in body and "deletion_protection = true" in body, name
+        assert f'schema = file("${{path.module}}/../src/readmission_risk/warehouse/schemas/{name}.json")' in body, name
+        assert (ROOT / "src" / "readmission_risk" / "warehouse" / "schemas" / f"{name}.json").is_file()
+    assert 'location = var.region' in _collapse(_resource("google_bigquery_dataset", "serving"))
+    scratch = _collapse(_resource("google_bigquery_dataset", "scratch"))
+    assert "default_table_expiration_ms = 86400000" in scratch
+
+
+def test_predictions_table_description_is_demo_notice():
+    from readmission_risk.scoring.constants import DEMO_NOTICE
+
+    body = _resource("google_bigquery_table", "predictions")
+    heredoc = re.search(r"chomp\(<<-EOT\n(.*?)\n\s*EOT\n", body, flags=re.DOTALL)
+    assert heredoc is not None and heredoc.group(1).strip() == DEMO_NOTICE
+
+
+def test_every_resource_depends_on_enabled_apis():
+    for rtype, name, body in _resources(_all_tf()):
+        if (rtype, name) == ("google_project_service", "enabled"):
+            continue
+        assert "depends_on = [google_project_service.enabled]" in _collapse(body), f"{rtype}.{name}"
+
+
+def test_bigquery_api_is_enabled():
+    assert '"bigquery.googleapis.com",' in _tf("apis.tf")
+
+
+# ---------------------------------------------------------------- v2 slice 5: generation VM and Dataproc runtime
+
+
+def _members_of(sa: str) -> list[dict[str, str]]:
+    return [m for m in _iam_members() if f"google_service_account.{sa}.email" in m.get("member", "")]
+
+
+def test_generator_cannot_delete_raw():
+    """Create + read + list on raw, never a role with storage.objects.delete (objectAdmin/objectUser/admin)."""
+    raw = [m["role"] for m in _members_of("synthea_generator") if m.get("bucket") == "google_storage_bucket.raw.name"]
+    assert sorted(raw) == ['"roles/storage.legacyBucketReader"', '"roles/storage.objectCreator"', '"roles/storage.objectViewer"']
+    assert len(_members_of("synthea_generator")) == 6
+
+
+def test_gold_object_admin_is_conditioned_on_v2_prefix():
+    body = _collapse(_resource("google_storage_bucket_iam_member", "dataproc_writes_gold_v2"))
+    assert 'role = "roles/storage.objectAdmin"' in body
+    assert "condition { title = \"gold-v2-prefix-only\"" in body
+    assert 'resource.name.startsWith(\\"projects/_/buckets/${google_storage_bucket.gold.name}/objects/v2/\\")' in body
+    unconditioned_admin = [
+        m for m in _members_of("dataproc_runtime")
+        if m["role"] == '"roles/storage.objectAdmin"' and m.get("bucket") == "google_storage_bucket.gold.name"
+        and m["_name"] != "dataproc_writes_gold_v2"
+    ]  # fmt: skip
+    assert unconditioned_admin == []
+    assert len(_members_of("dataproc_runtime")) == 8
+
+
+# roles/dataproc.worker minus its storage.* permissions (read with `gcloud iam roles describe roles/dataproc.worker`,
+# 2026-10-12: 61 permissions, 28 of them storage.*; all 33 are supported in custom roles), plus
+# dataprocrm.nodePools.update, which runtime 3.0's permission validation requires although no predefined role has it.
+DATAPROC_RUNTIME_PERMISSIONS = [
+    "cloudprofiler.profiles.create", "cloudprofiler.profiles.update",
+    "datalineage.locations.processOpenLineageMessage",
+    "dataproc.agents.create", "dataproc.agents.delete", "dataproc.agents.get", "dataproc.agents.list",
+    "dataproc.agents.update", "dataproc.batches.computeTuningConfig", "dataproc.batches.sparkApplicationWrite",
+    "dataproc.sessions.sparkApplicationWrite", "dataproc.tasks.lease", "dataproc.tasks.listInvalidatedLeases",
+    "dataproc.tasks.reportStatus",
+    "dataprocrm.nodePools.create", "dataprocrm.nodePools.delete", "dataprocrm.nodePools.deleteNodes",
+    "dataprocrm.nodePools.get", "dataprocrm.nodePools.list", "dataprocrm.nodePools.resize", "dataprocrm.nodePools.update",
+    "dataprocrm.nodes.get",
+    "dataprocrm.nodes.heartbeat", "dataprocrm.nodes.list", "dataprocrm.nodes.mintOAuthToken",
+    "dataprocrm.operations.get",
+    "logging.logEntries.create", "logging.logEntries.route",
+    "monitoring.metricDescriptors.create", "monitoring.metricDescriptors.get", "monitoring.metricDescriptors.list",
+    "monitoring.monitoredResourceDescriptors.get", "monitoring.monitoredResourceDescriptors.list",
+    "monitoring.timeSeries.create",
+]  # fmt: skip
+
+
+def test_dataproc_runtime_has_no_project_level_storage_access():
+    """5b L2 finding: project roles/dataproc.worker carries storage.objects.* on every bucket (raw, gold incl.
+    full_run_2b, bundles, tfstate), which made the gold v2/ condition moot. Storage comes only from bucket-level grants."""
+    project = [m["role"] for m in _members_of("dataproc_runtime") if m["_type"] == "google_project_iam_member"]
+    assert project == ["google_project_iam_custom_role.dataproc_runtime_worker.id"]
+    role = _collapse(_resource("google_project_iam_custom_role", "dataproc_runtime_worker"))
+    assert 'role_id = "dataprocRuntimeWorker"' in role
+    permissions = re.search(r"permissions = \[ (.*?),? \]", role)
+    assert permissions is not None
+    granted = [p.strip().strip('"') for p in permissions.group(1).split(",")]
+    assert granted == DATAPROC_RUNTIME_PERMISSIONS
+    assert not [p for p in granted if p.startswith("storage.")]
+    assert '"roles/dataproc.worker"' not in _all_tf()
+
+
+def test_default_compute_sa_editor_is_removed():
+    remove = _collapse(_resource("google_project_iam_member_remove", "default_compute_no_editor"))
+    assert 'role = "roles/editor"' in remove
+    assert 'member = "serviceAccount:${data.google_compute_default_service_account.default.email}"' in remove
+    assert 'data "google_compute_default_service_account" "default"' in _all_tf()
+
+
+def test_no_staging_bucket_left():
+    assert "dataproc_staging" not in _all_tf()
+    assert "dataproc-staging" not in _all_tf()
+
+
+def test_no_resource_uses_default_compute_sa():
+    assert "-compute@developer.gserviceaccount.com" not in _all_tf()
+    assert "service_account { email = google_service_account.synthea_generator.email" in _collapse(
+        _resource("google_compute_instance_template", "synthea_generator")
+    )
+
+
+def test_template_has_cost_bounds():
+    body = _collapse(_resource("google_compute_instance_template", "synthea_generator"))
+    for fragment in (
+        'provisioning_model = "SPOT"',
+        'instance_termination_action = "DELETE"',
+        "max_run_duration { seconds = each.value }",
+        "auto_delete = true",
+        'machine_type = "n2-standard-32"',
+        'name = "synthea-generator-${each.key}-${each.value}s"',
+    ):
+        assert fragment in body, fragment
+    assert "access_config" not in body  # no external IP
+    assert "create_before_destroy" not in body  # a same-name replacement created first fails with alreadyExists
+    assert "startup-script" not in body  # passed per instance by the launcher
+
+
+def test_spark_subnet_has_private_google_access_and_internal_firewall():
+    subnet = _collapse(_resource("google_compute_subnetwork", "spark_us_central1"))
+    assert "private_ip_google_access = true" in subnet
+    firewall = _collapse(_resource("google_compute_firewall", "spark_internal"))
+    assert 'direction = "INGRESS"' in firewall and 'allow { protocol = "all" }' in firewall
+    assert "source_ranges = [google_compute_subnetwork.spark_us_central1.ip_cidr_range]" in firewall
+
+
+
+# ---------------------------------------------------------------- v2 slice 7: the monitoring tick
+MONITOR = WORKFLOWS / "monitor.yml"
+MONITOR_SA = '"serviceAccount:${google_service_account.monitor.email}"'
+LEDGER_SA = '"serviceAccount:${google_service_account.ledger_reader.email}"'
+
+
+def _grants(member: str) -> list[tuple[str, str, str]]:
+    return sorted(
+        (m["_type"], m["role"], m.get("bucket") or m.get("table_id") or m.get("dataset_id") or m.get("project"))
+        for m in _iam_members()
+        if m.get("member") == member
+    )
+
+
+def _on_account(name: str) -> list[tuple[str, str]]:
+    return sorted((m["role"], m["member"]) for m in _iam_members() if m.get("service_account_id") == f"google_service_account.{name}.name")
+
+
+def test_monitor_grants_are_exactly():
+    assert _grants(MONITOR_SA) == sorted([
+        ("google_bigquery_table_iam_member", "google_project_iam_custom_role.scorer_table_writer.id",
+         "google_bigquery_table.monitoring.table_id"),
+        ("google_bigquery_table_iam_member", '"roles/bigquery.dataViewer"', "google_bigquery_table.predictions.table_id"),
+        ("google_bigquery_table_iam_member", '"roles/bigquery.dataViewer"', "google_bigquery_table.scoring_runs.table_id"),
+        ("google_bigquery_dataset_iam_member", '"roles/bigquery.dataEditor"', "google_bigquery_dataset.scratch.dataset_id"),
+        ("google_storage_bucket_iam_member", '"roles/storage.objectViewer"', "google_storage_bucket.gold.name"),
+        ("google_project_iam_member", '"roles/bigquery.jobUser"', "var.project_id"),
+    ])  # fmt: skip
+    assert _on_account("monitor") == [
+        ('"roles/iam.serviceAccountTokenCreator"', "var.operator_member"),
+        ('"roles/iam.workloadIdentityUser"', "local.monitor_principal_set"),
+    ]
+
+
+def test_ledger_reader_grants_are_exactly_read_only():
+    assert _grants(LEDGER_SA) == sorted([
+        ("google_bigquery_table_iam_member", '"roles/bigquery.dataViewer"', "google_bigquery_table.scoring_runs.table_id"),
+        ("google_bigquery_table_iam_member", '"roles/bigquery.dataViewer"', "google_bigquery_table.monitoring.table_id"),
+        ("google_project_iam_member", '"roles/bigquery.jobUser"', "var.project_id"),
+    ])  # fmt: skip
+    assert _on_account("ledger_reader") == [
+        ('"roles/iam.serviceAccountTokenCreator"', "var.operator_member"),
+        ('"roles/iam.workloadIdentityUser"', "local.monitor_principal_set"),
+    ]
+
+
+def test_monitor_bindings_are_keyed_to_the_monitor_workflow_on_main():
+    iam = _collapse(_tf("iam.tf"))
+    assert 'monitor_workflow_ref = "${var.github_repository}/.github/workflows/monitor.yml@refs/heads/main"' in iam
+    assert (
+        'monitor_principal_set = "principalSet://iam.googleapis.com/${local.pool_name}/attribute.workflow_ref/'
+        '${local.monitor_workflow_ref}"'
+    ) in iam
+    bound = sorted(m["service_account_id"] for m in _iam_members() if m.get("member") == "local.monitor_principal_set")
+    assert bound == ["google_service_account.ledger_reader.name", "google_service_account.monitor.name",
+                     "google_service_account.scorer.name"]  # fmt: skip
+
+
+def test_monitoring_table_is_partitioned_clustered_and_protected():
+    body = _collapse(_resource("google_bigquery_table", "monitoring"))
+    assert 'time_partitioning { type = "DAY" field = "started_at" }' in body
+    assert "require_partition_filter = true" in body and "deletion_protection = true" in body
+    assert 'clustering = ["sim_date"]' in body
+    assert 'schema = file("${path.module}/../src/readmission_risk/warehouse/schemas/monitoring.json")' in body
+
+
+def _monitor_jobs() -> dict[str, list[str]]:
+    lines = _read(MONITOR).split("\n")
+    jobs_at = lines.index("jobs:")
+    starts = [i for i in range(jobs_at + 1, len(lines)) if re.fullmatch(r"  [a-z-]+:", lines[i])]
+    return {lines[i].strip().rstrip(":"): _block(lines, i) for i in starts}
+
+
+def _job_value(job: list[str], key: str) -> str | None:
+    line = next((x for x in job if x.startswith(f"    {key}:")), None)
+    return None if line is None else line.split(":", 1)[1].strip()
+
+
+def _job_permissions(job: list[str]) -> set[str]:
+    at = job.index("    permissions:")
+    return {line.strip() for line in _block(job, at)[1:] if line.strip()}
+
+
+def test_monitor_workflow_permissions_and_identities():
+    lines = _read(MONITOR).split("\n")
+    assert "permissions: {}" in lines and _triggers(lines) <= {"workflow_dispatch", "schedule"}
+    jobs = _monitor_jobs()
+    assert list(jobs) == ["clock", "score", "evaluate", "ledger-render", "ledger-commit", "issues"]
+    credentialed = {"clock": "monitor", "score": "scorer", "evaluate": "monitor", "ledger-render": "ledger-reader"}
+    for name, job in jobs.items():
+        text = "\n".join(job)
+        if name in credentialed:
+            assert _job_permissions(job) == {"contents: read", "id-token: write"}, name
+            assert f"service_account: {credentialed[name]}@synthea-readmission-risk.iam.gserviceaccount.com" in text, name
+        else:
+            assert "id-token" not in text and "google-github-actions/auth" not in text, name
+    assert _job_permissions(jobs["ledger-commit"]) == {"contents: write"}
+    assert _job_permissions(jobs["issues"]) == {"contents: read", "issues: write"}
+    for name in ("ledger-commit", "issues"):
+        text = "\n".join(jobs[name])
+        script = "publish_ledger.py" if name == "ledger-commit" else "tick_issues.py"
+        assert f"sparse-checkout: scripts/{script}" in text and "sparse-checkout-cone-mode: false" in text
+        assert f"python3 scripts/{script}" in text and "pip install" not in text
+    assert "cache:" not in _read(MONITOR)
+
+
+def test_monitor_workflow_job_graph():
+    jobs = _monitor_jobs()
+    expected = {
+        "clock": (None, None),
+        "score": ("clock", None),
+        "evaluate": ("[clock, score]", "always() && needs.clock.result == 'success'"),
+        "ledger-render": ("[clock, evaluate]", "always()"),
+        "ledger-commit": ("ledger-render", "always() && needs.ledger-render.result == 'success'"),
+        "issues": ("[clock, score, evaluate, ledger-render, ledger-commit]", "always()"),
+    }
+    for name, (needs, condition) in expected.items():
+        assert (_job_value(jobs[name], "needs"), _job_value(jobs[name], "if")) == (needs, condition), name
+
+
+def test_monitor_workflow_cron_state_and_literals_match_the_config():
+    config = json.loads(_read(ROOT / "deploy" / "monitoring.json"))
+    text = _read(MONITOR)
+    crons = re.findall(r'^\s*- cron: "([^"]+)"\s*$', text, flags=re.MULTILINE)
+    assert crons in ([], [config["crons"]["burn_in"]], [config["crons"]["weekly"]])
+    assert ("schedule:" in text) == bool(crons)
+    assert config["gold_uri"] == expected_gold_uri()
+    assert (
+        f'--gold-dir {config["gold_uri"]} --run-date "$SIM_DATE" --window-days {config["window_days"]} --top-n {config["top_n"]}'
+    ) in text
+    assert re.findall(r"--gold-dir (\S+)", _read(SCORE)) == [config["gold_uri"]]
+    for path in (MONITOR, SCORE):
+        assert re.search(r"^concurrency:\n  group: score\n  cancel-in-progress: false$", _read(path), flags=re.MULTILINE), path.name
+
+
+def test_monitor_workflow_expressions_only_where_allowed():
+    allowed = (
+        re.compile(r"^ {10}[A-Z_]+: (?:\$\{\{ [^}]+ \}\}|[^$])+$"),  # step env (one or more expressions)
+        re.compile(r"^ {6}[a-z_]+: \$\{\{ steps\.[a-z]+\.outputs\.[a-z_]+ \}\}$"),  # job outputs
+        re.compile(r"^ {4}if: "),  # job conditions
+    )
+    for i, line in enumerate(_read(MONITOR).split("\n")):
+        if "${{" in line:
+            assert any(p.match(line) for p in allowed), f"monitor.yml:{i + 1}: {line.strip()}"

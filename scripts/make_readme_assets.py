@@ -30,6 +30,7 @@ def main(
     tracking_dir: Annotated[Path, typer.Option(help="Directory holding the MLflow store (mlflow.db).")] = Path("mlflow"),
     out_dir: Annotated[Path, typer.Option(help="Where the SVGs and sample_topn.md go (previews go in <out-dir>/preview).")] = Path("docs/img"),
     top_n_rows: Annotated[int, typer.Option(help="Rows in the sample table.")] = 5,
+    population_label: Annotated[str, typer.Option(help="Names the test window in the title and captions.")] = "development set",
     verbose: Annotated[bool, typer.Option("--verbose", help="Also print the traceback of the errors reported as ERROR.")] = False,
 ) -> None:
     config = AssetConfig(
@@ -38,6 +39,7 @@ def main(
         predictions_path=predictions,
         out_dir=out_dir,
         top_n_rows=top_n_rows,
+        population_label=population_label,
     )
     try:
         written = build_assets(config)

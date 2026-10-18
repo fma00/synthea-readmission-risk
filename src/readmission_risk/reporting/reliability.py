@@ -13,7 +13,14 @@ from matplotlib.figure import Figure
 
 from .style import MODEL_DISPLAY_NAMES, MODEL_NAMES, Theme, new_axes
 
-TITLE = "Reliability, test window (development set)"
+DEFAULT_POPULATION_LABEL = "development set"
+
+
+def title_for(population_label: str = DEFAULT_POPULATION_LABEL) -> str:
+    return f"Reliability, test window ({population_label})"
+
+
+TITLE = title_for()
 _Z = 1.959964
 _K_TOLERANCE = 1e-6
 
@@ -74,7 +81,12 @@ def bin_points(curve: list[dict[str, float]]) -> list[BinPoint]:
 
 
 def build_reliability_figure(
-    curves: Mapping[str, list[dict[str, float]]], theme: Theme, *, size: str = "half", height_cm: float = 7.0
+    curves: Mapping[str, list[dict[str, float]]],
+    theme: Theme,
+    *,
+    size: str = "half",
+    height_cm: float = 7.0,
+    title: str = TITLE,
 ) -> Figure:
     """Must be called inside house_style(theme), and the same block must draw and save the figure."""
     points = {name: bin_points(curves[name]) for name in MODEL_NAMES if name in curves}
@@ -108,6 +120,6 @@ def build_reliability_figure(
     ax.set_ylim(0, limit)
     ax.set_xlabel("Mean predicted probability")
     ax.set_ylabel("Observed fraction positive")
-    ax.set_title(TITLE)
+    ax.set_title(title)
     ax.legend(handles=[*containers, diagonal], loc="lower right", frameon=False)
     return fig

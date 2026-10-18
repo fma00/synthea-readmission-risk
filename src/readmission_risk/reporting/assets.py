@@ -17,9 +17,14 @@ import mlflow
 import pandas as pd
 from mlflow.tracking import MlflowClient
 
-from readmission_risk.scoring.runs import resolve_run_id
+from readmission_risk.models.tracking import resolve_run_id
 
-from .reliability import TITLE, bin_points, build_reliability_figure
+from .reliability import (
+    DEFAULT_POPULATION_LABEL,
+    bin_points,
+    build_reliability_figure,
+    title_for,
+)
 from .style import MODEL_DISPLAY_NAMES, MODEL_NAMES, THEMES, house_style, save_figure
 from .topn_table import format_topn_markdown
 
@@ -42,6 +47,8 @@ class AssetConfig:
     predictions_path: Path
     out_dir: Path
     top_n_rows: int = 5
+    # Names the test window in the figure title and the captions: the v1 default, or e.g. "200k population" (v2 slice 7).
+    population_label: str = DEFAULT_POPULATION_LABEL
 
 
 def _integral_metric(metrics: dict[str, float], key: str, run_id: str) -> int:
@@ -143,7 +150,7 @@ def _captions(
     n = config.top_n_rows
     first = (
         f"Sample Top-{n}: ranks 1-{n} of {len(predictions)} discharges scored in the {window_days}-day window ending "
-        f"{as_of_date:%Y-%m-%d}, {MODEL_DISPLAY_NAMES[model_name]}. Demo over held-out rows (development set), not new-data scoring."
+        f"{as_of_date:%Y-%m-%d}, {MODEL_DISPLAY_NAMES[model_name]}. Demo over held-out rows ({config.population_label}), not new-data scoring."
     )
     reference = facts[MODEL_NAMES[0]]
     prevalence = reference.test_n_positive / reference.test_n_rows
@@ -170,8 +177,14 @@ def _description(config: AssetConfig, curves: dict[str, list[dict[str, float]]],
     return (
         f"Reliability diagram. Source: MLflow experiment {config.experiment_name}, runs {run_ids}; "
         f"{reference.test_n_rows} test rows, {reference.test_n_positive} positives; {bins_text}; 95% Wilson intervals with rows "
-        "treated as independent (indicative only); development-set quality, not a virgin holdout."
+        f"treated as independent (indicative only); {_quality(config.population_label)}"
     )
+
+
+def _quality(population_label: str) -> str:
+    if population_label == DEFAULT_POPULATION_LABEL:
+        return "development-set quality, not a virgin holdout."
+    return f"{population_label}, not a virgin holdout."
 
 
 def build_assets(
@@ -196,12 +209,12 @@ def build_assets(
     try:
         for theme in THEMES.values():
             with house_style(theme):
-                fig = build_reliability_figure(curves, theme)
+                fig = build_reliability_figure(curves, theme, title=title_for(config.population_label))
                 fig.canvas.draw()
                 save_figure(
                     fig,
                     tmp_dir / f"reliability_{theme.name}.svg",
-                    metadata={"Title": TITLE, "Description": description, "Date": None},
+                    metadata={"Title": title_for(config.population_label), "Description": description, "Date": None},
                 )
                 save_figure(
                     fig,

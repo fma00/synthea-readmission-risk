@@ -16,7 +16,7 @@ What is checked, and why:
   short list of overclaiming phrases.
 - CI: the workflow requests read-only token permissions, runs pushes only on main, pins every action to a commit SHA
   with a version comment, does not persist checkout credentials and runs zizmor online with a failing exit code;
-  Dependabot covers github-actions only (weekly, cooldown, grouped).
+  Dependabot covers github-actions (weekly, cooldown, grouped) and the Terraform provider in infra/ (weekly, cooldown).
 - .gitignore: git itself is asked (`git check-ignore`) whether local-state and credential-style paths are ignored BY THE
   REPO's .gitignore (not by a local exclude file), whether shared files stay visible, and that no tracked file matches
   an ignore rule. These rules are the only thing standing between a `git add .` and a public credentials leak.
@@ -54,6 +54,7 @@ EXPECTED_H2 = [
     "License and acknowledgements",
 ]
 MUST_BE_IGNORED = [
+    "bundles/0123/manifest.json",
     ".claude/settings.local.json",
     ".claude/worktrees/x/file",
     ".streamlit/secrets.toml",
@@ -81,8 +82,26 @@ MUST_BE_IGNORED = [
     "docs/img/.tmp-abc123/reliability_light.svg",
     ".env",
     ".env.local",
+    ".venv-dataproc/bin/python",
+    ".venv-lock312/bin/python",
+    "infra/terraform.tfvars",
+    "infra/prod.auto.tfvars",
+    "infra/terraform.tfvars.json",
+    "infra/terraform.tfstate",
+    "infra/terraform.tfstate.backup",
+    "infra/.terraform/providers/x",
+    "infra/bootstrap_override.tf",
+    "infra/override.tf",
+    "infra/override.tf.json",
 ]
 MUST_NOT_BE_IGNORED = [
+    "infra/.terraform.lock.hcl",
+    "infra/terraform.tfvars.example",
+    "infra/storage.tf",
+    "infra/bootstrap.sh",
+    "deploy/champion.json",
+    "src/readmission_risk/bundles/manifest.py",
+    "tests/bundles/test_store.py",
     ".claude/commands/eg-prd.md",
     ".env.example",
     "src/readmission_risk/models/split.py",
@@ -91,6 +110,10 @@ MUST_NOT_BE_IGNORED = [
     "LICENSE",
     "README.md",
     "tests/test_docs.py",
+    "Makefile",
+    ".pre-commit-config.yaml",
+    "requirements-dataproc-3.0.txt",
+    "requirements-dataproc-3.0.in",
 ]
 HAS_GIT_CHECKOUT = (ROOT / ".git").exists() and shutil.which("git") is not None
 FORBIDDEN_README_PHRASES = ["production-ready", "production ready", "state-of-the-art", "leakage-safe", "streamlit.app"]
@@ -426,18 +449,30 @@ def test_first_screen_shows_status_limits_and_next_steps():
         assert word in head, f"first 40 lines of the README must mention {word!r}"
 
 
-def test_roadmap_names_the_planned_stages_and_marks_them_not_started():
-    roadmap = "\n".join(split_sections(_read(README))["Roadmap"])
-    for word in ("Scale-up", "Cloud", "Dashboard", "BigQuery", "Streamlit"):
-        assert word in roadmap
-    assert roadmap.count("not started") >= 3
+# v2 slice 7 (2026-10-18): cloud and scale-up are done in v2, monitoring is built with its scheduled burn-in pending, and
+# the dashboard moved to v3.0 (owner decision). Each stage must state its status explicitly, and v2 work must say v2.0
+# is not yet tagged (the latest release is v1). Update these on purpose when the burn-in and the v2.0 tag happen.
+ROADMAP_STATUS = {"Cloud": "(done in v2", "Scale-up": "(done in v2", "Monitoring": "(built in v2, burn-in pending",
+                  "Dashboard": "(v3.0, not started)"}  # fmt: skip
+STATUS_ROWS = {"**Cloud**": "Done in v2 (v2.0 not yet tagged)", "**Scale-up**": "Done in v2 (v2.0 not yet tagged)",
+               "**Monitoring**": "Built in v2; scheduled burn-in pending", "**Dashboard**": "Planned for v3.0 (not started)"}  # fmt: skip
 
 
-@pytest.mark.parametrize("stage", ["**Cloud**", "**Scale-up**", "**Dashboard**"])
-def test_status_table_marks_planned_stages_as_planned(stage):
+def test_roadmap_names_the_stages_and_their_status():
+    roadmap = split_sections(_read(README))["Roadmap"]
+    text = "\n".join(roadmap)
+    for word in ("BigQuery", "Streamlit"):
+        assert word in text
+    for stage, status in ROADMAP_STATUS.items():
+        items = [line for line in roadmap if line.lstrip("0123456789. ").startswith(f"**{stage}")]
+        assert len(items) == 1 and status in items[0], (stage, items)
+
+
+@pytest.mark.parametrize(("stage", "status"), list(STATUS_ROWS.items()))
+def test_status_table_marks_each_stage_with_its_status(stage, status):
     rows = [line for line in split_sections(_read(README))["Status"] if line.startswith("|") and stage in line]
     assert len(rows) == 1, rows
-    assert "Planned" in rows[0]
+    assert rows[0].rstrip(" |").split("|")[-1].strip().startswith(status), rows[0]
 
 
 def test_readme_avoids_overclaiming_phrases():
@@ -478,6 +513,12 @@ EXPECTED_DEPENDABOT = [
     "      github-actions-minor-and-patch:",
     '        patterns: ["*"]',
     '        update-types: ["minor", "patch"]',
+    '  - package-ecosystem: "terraform"',
+    '    directory: "/infra"',
+    "    schedule:",
+    '      interval: "weekly"',
+    "    cooldown:",
+    "      default-days: 7",
 ]
 
 
@@ -533,7 +574,7 @@ def test_checkout_steps_do_not_persist_credentials():
     assert found, "no checkout step found in .github/workflows/"
 
 
-def test_dependabot_config_is_github_actions_only_weekly_with_cooldown_and_grouping():
+def test_dependabot_config_is_weekly_with_cooldown_for_actions_and_terraform():
     assert DEPENDABOT.is_file(), ".github/dependabot.yml is missing"
     assert _without_comments(_read(DEPENDABOT).split("\n")) == EXPECTED_DEPENDABOT
 
@@ -610,20 +651,23 @@ def test_no_tracked_file_matches_an_ignore_rule():
 def test_readme_figure_files_exist_and_use_both_themes():
     text = _read(README)
     sources = re.findall(r'(?:srcset|src)="(docs/img/[^"]+)"', text)
-    assert sorted(sources) == ["docs/img/reliability_dark.svg", "docs/img/reliability_light.svg"]
+    assert sorted(sources) == [  # v1 (the 10k models) and, since v2 slice 7, the 200k champion's
+        "docs/img/reliability_dark.svg", "docs/img/reliability_light.svg",
+        "docs/img/v2/reliability_dark.svg", "docs/img/v2/reliability_light.svg",
+    ]  # fmt: skip
     assert all(exact_case_exists(ROOT / p, ROOT) for p in sources)
     assert 'media="(prefers-color-scheme: dark)"' in text
     assert 'alt="' in text
 
 
 def test_readme_sample_table_is_verbatim_from_the_generated_file():
-    generated = _read(ROOT / "docs" / "img" / "sample_topn.md").strip("\n")
+    generated = _read(ROOT / "docs" / "img" / "v2" / "sample_topn.md").strip("\n")  # the champion's (v2 slice 7)
     section = "\n".join(split_sections(_read(README))["Example output"])
     assert generated in section, "README 'Example output' must contain docs/img/sample_topn.md verbatim; regenerate or re-paste"
 
 
 def test_sample_table_rank_one_agrees_with_the_scoring_docs():
-    top_row = next(line for line in _read(ROOT / "docs" / "img" / "sample_topn.md").splitlines() if line.startswith("| 1 |"))
+    top_row = next(line for line in _read(ROOT / "docs" / "img" / "v2" / "sample_topn.md").splitlines() if line.startswith("| 1 |"))
     assert top_row.split("|")[2].strip() in _read(ROOT / "docs" / "scoring.md")
 
 
@@ -640,9 +684,23 @@ def test_readme_refusal_example_matches_what_the_code_raises():
     counts = re.search(r"contains (\d+) in-sample .* and (\d+) discharge", line)
     assert counts is not None, line
     n_train, n_dropped = int(counts.group(1)), int(counts.group(2))
-    stops = pd.date_range("2022-06-10", periods=n_train + n_dropped, freq="h", tz="UTC")
+    # spread across the whole 30-day window so any count fits inside it (hourly from 2022-06-10 overflowed beyond ~500 rows)
+    stops = pd.date_range("2022-06-01T00:30", "2022-06-30T23:30", periods=n_train + n_dropped, tz="UTC")
     gold = pd.DataFrame({"encounter_id": [f"e{i}" for i in range(len(stops))], "index_stop": stops})
     partition_of = pd.Series(["train"] * n_train, index=[f"e{i}" for i in range(n_train)])
     with pytest.raises(ValueError) as info:
         select_held_out_window(gold, partition_of, run_date=dt.date(2022, 6, 30), window_days=30)
     assert line == f"ERROR: {info.value}"
+
+
+def test_readme_shows_the_monitoring_badges_and_ledger_honestly():
+    """FR20/FR21 (v2 slice 7): the scheduled-run badge filtered to schedule events on main, the last-tick badge served from
+    the ledger branch, a link to the ledger, and no claim of weeks of unattended operation."""
+    text = _read(README)
+    assert "https://github.com/fma00/synthea-readmission-risk/actions/workflows/monitor.yml/badge.svg?event=schedule&branch=main" in text
+    assert (
+        "https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Ffma00%2Fsynthea-readmission-risk"
+        "%2Fledger%2Fdocs%2Flast-tick.json"
+    ) in text
+    assert "https://github.com/fma00/synthea-readmission-risk/blob/ledger/docs/run-ledger.md" in text
+    assert "not weeks of unattended operation" in text and "simulated clock" in text

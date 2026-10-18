@@ -1,7 +1,9 @@
-# Proposes updates to the SHA-pinned actions in .github/workflows/ as pull requests; nothing updates without a merge.
-# github-actions only: Python dependencies are hash-locked with pip-compile (see docs/setup.md), which Dependabot's pip
-# updater would fight. The cooldown skips releases younger than 7 days, so a compromised release is usually pulled
-# before it is ever proposed. Majors are not in the group and arrive as one PR each.
+# Proposes updates to the SHA-pinned actions in .github/workflows/ and to the Terraform provider in infra/ (its version
+# and .terraform.lock.hcl hashes) as pull requests; nothing updates without a merge. Python dependencies are excluded:
+# they are hash-locked with pip-compile (see docs/setup.md), which Dependabot's pip updater would fight. The cooldown
+# skips releases younger than 7 days, so a compromised release is usually pulled before it is ever proposed. Action
+# majors are not in the group and arrive as one PR each; the Terraform entry has no group (there is one provider). The
+# Terraform CLI itself is pinned in ci.yml with a SHA256 and is bumped by hand.
 version: 2
 updates:
   - package-ecosystem: "github-actions"
@@ -14,3 +16,9 @@ updates:
       github-actions-minor-and-patch:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+  - package-ecosystem: "terraform"
+    directory: "/infra"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7

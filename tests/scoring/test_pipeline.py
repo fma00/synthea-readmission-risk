@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import os
 import re
@@ -22,6 +23,7 @@ from readmission_risk.models.data import (
 from readmission_risk.models.tracking import load_logged_model
 from readmission_risk.pipeline.gold_metadata import LABEL_DEFINITION
 from readmission_risk.scoring import pipeline
+from readmission_risk.scoring.bundle_guard import load_bundle_model
 from readmission_risk.scoring.pipeline import (
     ScoringConfig,
     _validate_config,
@@ -30,12 +32,15 @@ from readmission_risk.scoring.pipeline import (
 from readmission_risk.scoring.ranking import PREDICTION_COLUMNS
 from readmission_risk.scoring.store import read_partition
 from tests.scoring.helpers import (
+    BUNDLE_CASES,
     DEFAULT_RUN_DATE,
     DEFAULT_WINDOW_DAYS,
-    GUARD_CASES,
+    INTEGRITY_CASES,
+    SCHEMA2_INTEGRITY_CASES,
     assert_count_phrase,
-    clone_run,
     forbid_model_loading,
+    tamper_bundle,
+    write_champion,
     write_gold_dir,
 )
 
@@ -47,10 +52,11 @@ def _config(env, out: Path, **overrides) -> ScoringConfig:
         "gold_dir": env.gold_dir,
         "run_date": DEFAULT_RUN_DATE,
         "output_dir": out,
-        "tracking_dir": env.tracking_dir,
-        "experiment_name": env.experiment_name,
+        "bundle_uri": env.lr_bundle_uri,  # always a bundle: no test reads the repository's deploy/champion.json by accident
         "window_days": DEFAULT_WINDOW_DAYS,
     }
+    if "champion_path" in overrides:
+        del fields["bundle_uri"]
     return ScoringConfig(**{**fields, **overrides})
 
 
@@ -69,9 +75,9 @@ class Recorder:
         self.calls.append(("write", *args))
         raise AssertionError("writer must not be called")
 
-    def loader(self, tracking_dir, run_id):
-        self.calls.append(("load", tracking_dir, run_id))
-        return load_logged_model(tracking_dir, run_id)
+    def loader(self, bundle):
+        self.calls.append(("load", bundle))
+        return load_bundle_model(bundle)
 
     def writer(self, predictions, output_dir, run_date):
         from readmission_risk.scoring.store import write_partition
@@ -91,21 +97,49 @@ def _independent_scores(env, run_id: str, run_date: str = DEFAULT_RUN_DATE, wind
     return dict(zip(batch["encounter_id"], scores, strict=True))
 
 
-# --------------------------------------------------------------------------------------------- guards, through the pipeline
-@pytest.mark.parametrize("case", GUARD_CASES, ids=[c.case_id for c in GUARD_CASES])
-def test_each_guard_refuses_exactly_its_defect(scoring_env, tmp_path, monkeypatch, case):
-    run_id, extras = case.build(scoring_env, "guard-cases")
+# --------------------------------------------------------------------------------------------- checks, through the pipeline
+_CASES = BUNDLE_CASES + INTEGRITY_CASES
+
+
+def _assert_case_refuses(env, case, tmp_path, monkeypatch) -> None:
+    overrides, extras = case.build(env, tmp_path)
     recorder, out = Recorder(), tmp_path / "out"
-    forbid_model_loading(monkeypatch)  # only around the scoring call: `build` legitimately loads a model to clone it
+    forbid_model_loading(monkeypatch)  # applied after the fixture is built, around the scoring call only
     with pytest.raises(ValueError) as info:
-        score_run_date(_config(scoring_env, out, run_id=run_id), loader=recorder.strict_loader, writer=recorder.strict_writer)
+        score_run_date(_config(env, out, **overrides), loader=recorder.strict_loader, writer=recorder.strict_writer)
     message = str(info.value)
-    assert case.guard_key in message
+    assert message.startswith(case.key) if case.starts_with else case.key in message, message
     for extra in extras:  # full sentences carrying exact counts; the count must not be the tail of a longer number
         assert re.search(rf"(?<![0-9]){re.escape(extra)}", message), f"{extra!r} not in: {message}"
     for forbidden in case.forbidden:
         assert forbidden not in message
     assert recorder.calls == [] and not out.exists()
+
+
+@pytest.mark.parametrize("case", _CASES, ids=[c.case_id for c in _CASES])
+def test_each_check_refuses_exactly_its_defect(scoring_env, tmp_path, monkeypatch, case):
+    _assert_case_refuses(scoring_env, case, tmp_path, monkeypatch)
+
+
+# v2 slice 6c: the guards are not weakened for schema-2 bundles: every guard case, tampering the schema-2 LR bundle
+@pytest.mark.parametrize("case", BUNDLE_CASES, ids=[c.case_id for c in BUNDLE_CASES])
+def test_guards_refuse_schema2_bundles(scoring_env, portable_env, tmp_path, monkeypatch, case):
+    env = dataclasses.replace(scoring_env, lr_bundle_uri=portable_env.lr_portable_uri)
+    _assert_case_refuses(env, case, tmp_path, monkeypatch)
+
+
+@pytest.mark.parametrize("case", SCHEMA2_INTEGRITY_CASES, ids=[c.case_id for c in SCHEMA2_INTEGRITY_CASES])
+def test_schema2_integrity_cases(scoring_env, portable_env, tmp_path, monkeypatch, case):
+    env = dataclasses.replace(scoring_env, lr_bundle_uri=portable_env.xgb_portable_uri)
+    _assert_case_refuses(env, case, tmp_path, monkeypatch)
+
+
+def test_scoring_a_schema2_bundle_gives_identical_scores(scoring_env, portable_env, tmp_path):
+    source = score_run_date(_config(scoring_env, tmp_path / "a")).predictions
+    schema2 = score_run_date(_config(scoring_env, tmp_path / "b", bundle_uri=portable_env.lr_portable_uri)).predictions
+    assert (schema2["model_bundle_id"] == portable_env.lr_result.bundle_id).all()
+    assert (source["model_bundle_id"] == Path(scoring_env.lr_bundle_uri).name).all()
+    pd.testing.assert_frame_equal(source.drop(columns="model_bundle_id"), schema2.drop(columns="model_bundle_id"), check_exact=True)
 
 
 # --------------------------------------------------------------------------------------------- end to end
@@ -118,6 +152,7 @@ def test_end_to_end_scores_only_the_held_out_batch(scoring_env, tmp_path):
     assert len(expected) >= 20  # fixture precondition (measured: 50)
     assert set(predictions["encounter_id"]) == set(expected["encounter_id"])
     assert (predictions["model_run_id"] == env.lr_run_id).all()
+    assert (predictions["model_bundle_id"] == Path(env.lr_bundle_uri).name).all()
 
     # scores id by id (never positionally) against an independent recomputation
     independent = _independent_scores(env, env.lr_run_id)
@@ -154,52 +189,70 @@ def test_label_does_not_reach_ranking(scoring_env, tmp_path):
     in_window = env.df["encounter_id"].isin(ids)
     assert (env.df.loc[in_window, LABEL_COLUMN].to_numpy() != permuted.loc[in_window, LABEL_COLUMN].to_numpy()).any()
     gold_b = write_gold_dir(tmp_path / "gold-b", permuted)  # same rows and counts, different labels
-    clone = clone_run(
-        env.tracking_dir, env.lr_run_id, experiment="label-test", gold_frame=env.df,
-        tags={"gold_fingerprint": gold_fingerprint(load_gold_table(gold_b))},
-    )  # fmt: skip
+    clone = tamper_bundle(env.lr_bundle_uri, tmp_path / "bundles", set={"gold_fingerprint": gold_fingerprint(load_gold_table(gold_b))})
     a = score_run_date(_config(env, tmp_path / "a")).predictions
-    b = score_run_date(_config(env, tmp_path / "b", gold_dir=gold_b, run_id=clone)).predictions
+    b = score_run_date(_config(env, tmp_path / "b", gold_dir=gold_b, bundle_uri=clone)).predictions
     columns = ["encounter_id", "rank", "is_top_n", "risk_score"]  # the provenance columns differ by construction
     pd.testing.assert_frame_equal(a[columns], b[columns])
 
 
-def test_default_model_and_explicit_run_id(scoring_env, tmp_path):
+def test_default_source_is_the_champion_and_explicit_bundle(scoring_env, tmp_path, monkeypatch):
     env = scoring_env
-    default = score_run_date(_config(env, tmp_path / "default"))
-    assert default.run.run_id == env.lr_run_id
-
+    write_champion(tmp_path / "deploy" / "champion.json", str(Path(env.lr_bundle_uri).resolve()))
+    monkeypatch.chdir(tmp_path)  # the real relative default, deploy/champion.json, is exercised
     recorder = Recorder()
-    by_name = score_run_date(_config(env, tmp_path / "by-name", model_name="xgboost_calibrated"), loader=recorder.loader)
-    by_id = score_run_date(_config(env, tmp_path / "by-id", model_name=None, run_id=env.xgb_run_id))
-    assert by_name.run.run_id == env.xgb_run_id
-    assert recorder.calls[0][2] == by_name.run.run_id  # the loader gets the RESOLVED run (kills resolve-XGB-load-LR)
-    pd.testing.assert_frame_equal(by_name.predictions, by_id.predictions)
+    default_config = ScoringConfig(gold_dir=env.gold_dir, run_date=DEFAULT_RUN_DATE, output_dir=tmp_path / "default", window_days=DEFAULT_WINDOW_DAYS)
+    default = score_run_date(default_config, loader=recorder.loader)
+    assert default.bundle.mlflow_run_id == env.lr_run_id
+    assert recorder.calls[0][1] is default.bundle  # the loader gets the RESOLVED bundle
 
+    by_bundle = score_run_date(_config(env, tmp_path / "by-bundle", bundle_uri=env.xgb_bundle_uri))
+    assert by_bundle.bundle.mlflow_run_id == env.xgb_run_id and by_bundle.bundle.bundle_uri == env.xgb_bundle_uri
     xgb_scores = _independent_scores(env, env.xgb_run_id)
     lr_scores = _independent_scores(env, env.lr_run_id)
-    got = by_name.predictions.set_index("encounter_id")["risk_score"]
+    got = by_bundle.predictions.set_index("encounter_id")["risk_score"]
     np.testing.assert_allclose(got.reindex(list(xgb_scores)).to_numpy(), list(xgb_scores.values()), rtol=1e-12)
     assert not np.allclose(list(xgb_scores.values()), list(lr_scores.values()))  # the two models really differ
 
     with pytest.raises(ValueError, match="mutually exclusive"):
-        score_run_date(_config(env, tmp_path / "x", model_name="xgboost_calibrated", run_id=env.xgb_run_id))
+        score_run_date(_config(env, tmp_path / "x", bundle_uri=env.xgb_bundle_uri, champion_path=Path("deploy/champion.json")))
+
+
+def test_champion_relative_bundle_uri_resolves_against_cwd(scoring_env, tmp_path, monkeypatch):
+    env = scoring_env
+    bundle_id = Path(env.lr_bundle_uri).name
+    tamper_bundle(env.lr_bundle_uri, tmp_path / "bundles")  # an unmodified copy at tmp/bundles/<id>
+    champion = write_champion(tmp_path / "elsewhere" / "champion.json", f"bundles/{bundle_id}",
+                              sha256=_sha(Path(env.lr_bundle_uri) / "manifest.json"))  # fmt: skip
+    monkeypatch.chdir(tmp_path)
+    result = score_run_date(_config(env, tmp_path / "out", champion_path=champion))
+    assert result.bundle.bundle_uri == f"bundles/{bundle_id}" and result.bundle.mlflow_run_id == env.lr_run_id
+
+
+def test_default_champion_failure_paths_refuse_before_load_and_write(scoring_env, tmp_path, monkeypatch):
+    env, recorder = scoring_env, Recorder()
+    monkeypatch.chdir(tmp_path)
+    config = ScoringConfig(gold_dir=env.gold_dir, run_date=DEFAULT_RUN_DATE, output_dir=tmp_path / "out", window_days=DEFAULT_WINDOW_DAYS)
+    with pytest.raises(FileNotFoundError, match="no champion pointer"):
+        score_run_date(config, loader=recorder.strict_loader, writer=recorder.strict_writer)
+    write_champion(tmp_path / "deploy" / "champion.json", str(tmp_path / "bundles" / ("0" * 64)), sha256="0" * 64)
+    with pytest.raises(ValueError, match=r"^bundle not found: "):
+        score_run_date(config, loader=recorder.strict_loader, writer=recorder.strict_writer)
+    assert recorder.calls == [] and not (tmp_path / "out").exists()
 
 
 def test_default_window_days_comes_from_gold_metadata(scoring_env, tmp_path):
     env = scoring_env
     gold_c = write_gold_dir(tmp_path / "gold-c", env.df, readmission_window_days=14)
-    clone = clone_run(
-        env.tracking_dir, env.lr_run_id, experiment="window-test", gold_frame=env.df, params={"readmission_window_days": "14"}
-    )
+    clone = tamper_bundle(env.lr_bundle_uri, tmp_path / "bundles", set={"params.readmission_window_days": "14"})
     run_date = "20251112"
     expected = env.expected_batch(run_date, 14)
     assert len(expected) >= 5  # fixture precondition (measured: 10)
-    result = score_run_date(_config(env, tmp_path / "default", gold_dir=gold_c, run_id=clone, run_date=run_date, window_days=None))
+    result = score_run_date(_config(env, tmp_path / "default", gold_dir=gold_c, bundle_uri=clone, run_date=run_date, window_days=None))
     assert (result.predictions["scoring_window_days"] == 14).all() and result.window_days == 14
     assert result.window_end - result.window_start == pd.Timedelta(days=14)
     assert set(result.predictions["encounter_id"]) == set(expected["encounter_id"])
-    override = score_run_date(_config(env, tmp_path / "override", gold_dir=gold_c, run_id=clone, run_date=run_date, window_days=180))
+    override = score_run_date(_config(env, tmp_path / "override", gold_dir=gold_c, bundle_uri=clone, run_date=run_date, window_days=180))
     assert (override.predictions["scoring_window_days"] == 180).all()  # kills a hard-coded 30 or a metadata-ignoring default
 
 
@@ -216,9 +269,10 @@ _BAD_CONFIGS = [
     {"window_days": 0},
     {"window_days": True},
     {"window_days": 1.5},
-    {"model_name": "random_forest"},
-    {"run_id": ""},
-    {"model_name": "logistic_regression", "run_id": "abc"},
+    {"bundle_uri": ""},
+    {"bundle_uri": 3},
+    {"bundle_uri": "bundles/x", "champion_path": Path("deploy/champion.json")},
+    {"champion_path": "deploy/champion.json"},
 ]
 
 
@@ -234,11 +288,11 @@ def test_invalid_config_is_refused_before_any_io(tmp_path, overrides):
     assert recorder.calls == [] and not (tmp_path / "out").exists()
 
 
-def test_valid_config_parses_and_run_id_may_accompany_an_experiment_name(tmp_path):
-    config = ScoringConfig(gold_dir=tmp_path, run_date="20260630", run_id="abc", experiment_name="anything")
-    assert _validate_config(config) == date(2026, 6, 30)
+def test_valid_config_parses_and_bundle_and_champion_are_exclusive(tmp_path):
+    assert _validate_config(ScoringConfig(gold_dir=tmp_path, run_date="20260630", bundle_uri="bundles/x")) == date(2026, 6, 30)
+    assert _validate_config(ScoringConfig(gold_dir=tmp_path, run_date="20260630", champion_path=Path("c.json"))) == date(2026, 6, 30)
     with pytest.raises(ValueError, match="mutually exclusive"):
-        _validate_config(ScoringConfig(gold_dir=tmp_path, run_date="20260630", run_id="abc", model_name="logistic_regression"))
+        _validate_config(ScoringConfig(gold_dir=tmp_path, run_date="20260630", bundle_uri="b", champion_path=Path("c.json")))
 
 
 def test_refusals_happen_before_load_and_before_write(scoring_env, tmp_path):
@@ -246,7 +300,7 @@ def test_refusals_happen_before_load_and_before_write(scoring_env, tmp_path):
     recorder = Recorder()
     out = tmp_path / "out"
     for overrides in (
-        {"run_id": "0" * 32},  # a guard failure
+        {"bundle_uri": str(tmp_path / "bundles" / ("0" * 64))},  # an absent bundle (a ValueError, as an absent run was)
         {"run_date": "20221130", "window_days": 30},  # an in-sample window
         {"run_date": "20260917"},  # after the gold reference date
     ):
@@ -257,7 +311,7 @@ def test_refusals_happen_before_load_and_before_write(scoring_env, tmp_path):
     passing = Recorder()
     result = score_run_date(_config(env, out), loader=passing.loader, writer=passing.writer)
     assert [c[0] for c in passing.calls] == ["load", "write"]  # exactly once each, the loader first
-    assert passing.calls[0][1:] == (env.tracking_dir, result.run.run_id)
+    assert passing.calls[0][1] is result.bundle and result.bundle.mlflow_run_id == env.lr_run_id
     assert passing.calls[1][1] is result.predictions and passing.calls[1][2] == out
     assert result.partition_path == out / "run_date=20260630" / "predictions.parquet"
 
@@ -266,6 +320,45 @@ def test_refusals_happen_before_load_and_before_write(scoring_env, tmp_path):
     stub_out = tmp_path / "stub-out"
     swapped = score_run_date(_config(env, stub_out), writer=lambda predictions, output_dir, run_date: sentinel)
     assert swapped.partition_path == sentinel and not stub_out.exists()
+
+
+def test_on_validated_called_once_after_validation_and_not_on_earlier_refusals(scoring_env, tmp_path):
+    env = scoring_env
+    calls = []
+    result = score_run_date(_config(env, tmp_path / "ok"), on_validated=lambda b, w: calls.append((b, w)))
+    assert calls == [(result.bundle, DEFAULT_WINDOW_DAYS)]
+
+    # a completeness refusal comes AFTER validation: the callback has already seen the bundle and the window
+    calls.clear()
+    with pytest.raises(ValueError, match="in-sample"):
+        score_run_date(
+            _config(env, tmp_path / "late", run_date="20221130", window_days=30),  # an in-sample window
+            on_validated=lambda b, w: calls.append((b.bundle_id, w)),
+        )
+    assert calls == [(result.bundle.bundle_id, 30)]
+
+    # a refusal before validation (a bad config) never calls it
+    calls.clear()
+    with pytest.raises(ValueError):
+        score_run_date(_config(env, tmp_path / "bad", top_n=0), on_validated=lambda b, w: calls.append(b))
+    assert calls == []
+
+
+def test_validate_bundle_sets_champion_sha256(scoring_env, tmp_path):
+    env = scoring_env
+    by_bundle = score_run_date(_config(env, tmp_path / "a"))
+    assert by_bundle.bundle.champion_sha256 is None
+    champion = write_champion(tmp_path / "champion.json", env.lr_bundle_uri)
+    by_champion = score_run_date(_config(env, tmp_path / "b", champion_path=champion))
+    pin = hashlib.sha256((Path(env.lr_bundle_uri) / "manifest.json").read_bytes()).hexdigest()
+    assert by_champion.bundle.champion_sha256 == pin
+
+
+def test_partition_path_may_be_a_string(scoring_env, tmp_path):
+    result = score_run_date(
+        _config(scoring_env, tmp_path), writer=lambda predictions, output_dir, run_date: f"bigquery://x${run_date:%Y%m%d}"
+    )
+    assert result.partition_path == "bigquery://x$20260630"
 
 
 def test_pipeline_postconditions_raise_runtime_error(scoring_env, tmp_path, monkeypatch):
@@ -290,7 +383,7 @@ def test_idempotent_rerun_and_replacement(scoring_env, tmp_path):
     pd.testing.assert_frame_equal(first.predictions, second.predictions)
     assert _sha(path) == first_hash  # two identical runs give a byte-identical file
 
-    replaced = score_run_date(_config(env, out, model_name="xgboost_calibrated", top_n=3))
+    replaced = score_run_date(_config(env, out, bundle_uri=env.xgb_bundle_uri, top_n=3))
     back = read_partition(out, RUN_DATE)
     pd.testing.assert_frame_equal(back, replaced.predictions)
     assert set(back["model_run_id"]) == {env.xgb_run_id} and set(back["model_name"]) == {"xgboost_calibrated"}
@@ -301,7 +394,7 @@ def test_idempotent_rerun_and_replacement(scoring_env, tmp_path):
 
     before = _sha(path)
     with pytest.raises(ValueError):
-        score_run_date(_config(env, out, run_id="0" * 32))  # a refused rerun leaves the partition untouched
+        score_run_date(_config(env, out, bundle_uri=str(tmp_path / "absent")))  # a refused rerun leaves the partition untouched
     assert _sha(path) == before
 
 
@@ -360,13 +453,51 @@ def test_pipeline_refuses_windows_past_the_observation_horizon(scoring_env, tmp_
     assert recorder.calls == [] and not (tmp_path / "out").exists()
 
 
-def test_scoring_modules_do_not_import_the_big_join():
+_REPO = Path(__file__).resolve().parents[2]
+_SCORER_SOURCES = [
+    *sorted((_REPO / "src/readmission_risk/scoring").rglob("*.py")),
+    *sorted((_REPO / "src/readmission_risk/bundles").rglob("*.py")),
+    _REPO / "scripts" / "score_discharges.py",
+]
+
+
+def test_scoring_modules_never_import_mlflow():
+    """FR5: importing every scoring and bundles module, and loading the CLI script (without running it), pulls in neither
+    mlflow nor pyspark nor the Big Join. Replaces the older Big-Join-only import check."""
     code = (
-        "import importlib, pkgutil, sys\n"
-        "import readmission_risk.scoring as pkg\n"
-        "for m in pkgutil.iter_modules(pkg.__path__):\n"
-        "    importlib.import_module(f'readmission_risk.scoring.{m.name}')\n"
+        "import importlib, importlib.util, pkgutil, sys\n"
+        "import readmission_risk.scoring as scoring, readmission_risk.bundles as bundles\n"
+        "for pkg in (scoring, bundles):\n"
+        "    for m in pkgutil.iter_modules(pkg.__path__):\n"
+        "        importlib.import_module(f'{pkg.__name__}.{m.name}')\n"
+        f"spec = importlib.util.spec_from_file_location('score_discharges_cli', {str(_REPO / 'scripts' / 'score_discharges.py')!r})\n"
+        "spec.loader.exec_module(importlib.util.module_from_spec(spec))\n"
+        "assert 'mlflow' not in sys.modules, 'mlflow was imported'\n"
+        "assert 'pyspark' not in sys.modules, 'pyspark was imported'\n"
         "assert 'readmission_risk.pipeline.big_join' not in sys.modules, 'the Big Join (Spark) was imported'\n"
+        "assert 'google.cloud' not in sys.modules, 'a google.cloud client library was imported'\n"
+        "assert 'readmission_risk.warehouse.run' not in sys.modules, 'the scorer imported the warehouse'\n"
     )
     done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False, env={**os.environ, "MLFLOW_DISABLE_AGENT_HINT": "1"})
     assert done.returncode == 0, done.stderr
+
+
+def test_scoring_source_has_no_mlflow_import():
+    pattern = re.compile(r"^\s*(import|from)\s+mlflow\b", re.MULTILINE)
+    offenders = [str(p) for p in _SCORER_SOURCES if pattern.search(p.read_text())]
+    assert offenders == []
+    assert len(_SCORER_SOURCES) >= 12  # the globs really found both packages
+
+
+def test_score_refuses_edited_v2_gold(scoring_env, tmp_path):
+    """v2 slice 5, end to end: a version-2 gold table edited without changing its counts is refused by the LOADER (before any
+    bundle is read), whatever fingerprint definition the bundle names."""
+    env = scoring_env
+    gold = write_gold_dir(tmp_path / "gold-v2", env.df, n_parts=1, version=2)
+    part = next(gold.glob("part-*.parquet"))
+    edited = pd.read_parquet(part)
+    i, j = edited.index[edited["gender"] == "F"][0], edited.index[edited["gender"] == "M"][0]
+    edited.loc[[i, j], "gender"] = ["M", "F"]
+    edited.to_parquet(part, index=False)
+    with pytest.raises(ValueError, match="the table was edited, or is not the one its metadata describes"):
+        score_run_date(_config(env, tmp_path / "out", gold_dir=gold))

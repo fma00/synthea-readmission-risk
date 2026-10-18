@@ -19,7 +19,10 @@ def test_report_contents_and_order():
     report = format_report(make_result())
     lines = report.splitlines()
     assert lines[0] == DEMO_NOTICE
-    assert "model: logistic_regression run_id=run-abc (trained at commit 0123456, working tree clean)" in lines
+    assert (
+        "model: logistic_regression bundle=bbbbbbbbbbbb mlflow_run_id=run-abc (trained at commit 0123456, working tree clean)"
+        in lines
+    )
     assert (
         "window: 2026-03-08T00:00:00+00:00 to 2026-03-11T00:00:00+00:00 (end exclusive), 5 held-out discharges scored" in lines
     )

@@ -1,0 +1,62 @@
+name: Score to BigQuery
+
+# Keyless batch scoring (v2 slice 4, PRD FR17/FR18/FR20): exchanges this job's GitHub OIDC token for a short-lived token of
+# the scorer service account, scores one run date with the champion bundle (deploy/champion.json on main), loads the rows
+# into a staging table, runs the ASSERT data tests, publishes them onto serving.predictions only if they pass, and
+# records the attempt in serving.scoring_runs. No service-account key exists anywhere. Dispatch only; the WIF provider
+# (infra/wif.tf) accepts only refs/heads/main and workflow_dispatch/schedule events, and the scorer is bound to this
+# file's workflow_ref (infra/iam.tf). The values below must match infra/ (tests/test_infra.py checks them).
+on:
+  workflow_dispatch:
+    inputs:
+      run_date:
+        description: "YYYYMMDD, the last day of the discharge window"
+        required: true
+        type: string
+
+permissions: {}
+
+# At most one run executes; a newer dispatch replaces an older PENDING one. Overlapping runs (incl. laptop runs) are safe
+# anyway: each tests its own staging rows, and the live partition is last-publish-wins.
+concurrency:
+  group: score
+  cancel-in-progress: false
+
+jobs:
+  score:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # id-token only here, at job level, on a dispatch-only workflow (PRD FR0.2).
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      # The auth action writes its credentials file into $GITHUB_WORKSPACE and its README requires checkout first.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No pip cache in a job that holds cloud credentials: a cache restored from another ref must never feed it
+      # (zizmor cache-poisoning). The installs are hash-checked either way.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Install
+        run: |
+          python -m pip install -e .
+          python -m pip install --require-hashes -r requirements.txt -r requirements-linux-extras.txt
+
+      # No token_format: the action only writes an external-account credentials file; the token exchange happens inside
+      # the scorer's first Google call, so a refused exchange fails the Score step.
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093  # v3.0.0
+        with:
+          workload_identity_provider: projects/271458030145/locations/global/workloadIdentityPools/github/providers/github-actions
+          service_account: scorer@synthea-readmission-risk.iam.gserviceaccount.com
+
+      # The input reaches the shell only through env (no template expansion in run:); the scorer validates it and
+      # records a malformed date as a refused run.
+      - name: Score
+        env:
+          RUN_DATE: ${{ inputs.run_date }}
+        run: python scripts/score_to_bigquery.py --gold-dir gs://synthea-readmission-risk-gold/v2/main_200k --run-date "$RUN_DATE"

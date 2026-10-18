@@ -9,6 +9,7 @@ from readmission_risk.models.evaluate import (
     cluster_resample_indices,
     clustered_bootstrap,
     evaluate_probabilities,
+    observed_expected_ratio,
     plot_reliability_diagram,
 )
 
@@ -118,11 +119,25 @@ def test_clustered_bootstrap_deterministic_and_covers_point_estimate():
     r1 = clustered_bootstrap(y, {"a": p_a, "b": p_b}, groups, **kwargs)
     r2 = clustered_bootstrap(y, {"a": p_a, "b": p_b}, groups, **kwargs)
     assert r1 == r2 and isinstance(r1, BootstrapResult)
-    assert set(r1.intervals["a"]) == set(BOOTSTRAP_METRICS) and len(BOOTSTRAP_METRICS) == 5
+    assert set(r1.intervals["a"]) == set(BOOTSTRAP_METRICS) and len(BOOTSTRAP_METRICS) == 6
     point = evaluate_probabilities(y, p_a, train_prevalence=float(y.mean())).metrics
     for metric in ("roc_auc", "brier_score", "calibration_gap"):  # ECE / |gap| excluded: biased under resampling
         lo, hi = r1.intervals["a"][metric]
         assert lo <= point[metric] <= hi, metric
+
+
+def test_observed_expected_ratio_point_value_and_zero_predictions():
+    y = np.array([1, 0, 0, 1])
+    assert evaluate_probabilities(y, np.full(4, 0.5), train_prevalence=0.5).metrics["observed_expected_ratio"] == 1.0
+    assert np.isnan(observed_expected_ratio(y, np.zeros(4)))
+    assert observed_expected_ratio(np.array([1, 0, 0, 0]), np.full(4, 0.5)) == 0.5
+
+
+def test_observed_expected_ratio_is_a_bootstrap_metric():
+    y, groups, p_a, p_b = _well_behaved()
+    result = clustered_bootstrap(y, {"a": p_a, "b": p_b}, groups, n_bootstrap=50, seed=2)
+    lo, hi = result.intervals["a"]["observed_expected_ratio"]
+    assert "observed_expected_ratio" in BOOTSTRAP_METRICS and 0 < lo <= hi
 
 
 def test_clustered_bootstrap_paired_difference_is_within_resample():
