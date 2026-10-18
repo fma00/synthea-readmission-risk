@@ -48,7 +48,7 @@ def test_cli_prints_the_six_lines(cli, scoring_env, portable_env, tmp_path, monk
         "status: created",
         f"source_bundle_id: {Path(scoring_env.lr_bundle_uri).name}",
         f"parity: max abs diff 0.0 on {portable_env.lr_result.parity_rows} test rows and {portable_env.lr_result.probe_rows} probe rows",
-        f"not promoted: deploy/champion.json stays on the schema-1 bundle ({DESIGN_NOTE})",
+        f"not promoted: deploy/champion.json is not changed ({DESIGN_NOTE})",
     ]
     again = _run(cli, "--source-bundle", scoring_env.lr_bundle_uri, "--gold-dir", str(scoring_env.gold_dir), "--bundles-dir", "out")
     assert again.exit_code == 0 and "status: already existed" in again.stdout

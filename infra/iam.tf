@@ -1,5 +1,5 @@
-# Service accounts: gha-smoke and bundle-writer (v2 slice 3), scorer (v2 slice 4). Later slices add one per job (monitor,
-# Big Join submitter, Dataproc runtime, trainer), each bound to its own workflow file like gha-smoke below. Only additive *_iam_member resources:
+# Service accounts: gha-smoke and bundle-writer (v2 slice 3), scorer (v2 slice 4), monitor and ledger-reader (v2 slice 7).
+# Later slices add one per job (Big Join submitter, Dataproc runtime, trainer), each bound to its own workflow file like gha-smoke below. Only additive *_iam_member resources:
 # *_iam_policy or *_iam_binding would replace bindings this config does not own. One deliberate exception:
 # google_project_iam_member_remove.default_compute_no_editor removes Google's project roles/editor grant from the default
 # compute service account (applied 2026-10-14).
@@ -27,11 +27,13 @@ resource "google_service_account" "scorer" {
 
 locals {
   # The exported `name` (projects/<number>/locations/global/workloadIdentityPools/github), not a hand-built string.
-  pool_name           = google_iam_workload_identity_pool.github.name
-  smoke_workflow_ref  = "${var.github_repository}/.github/workflows/smoke.yml@refs/heads/main"
-  smoke_principal_set = "principalSet://iam.googleapis.com/${local.pool_name}/attribute.workflow_ref/${local.smoke_workflow_ref}"
-  score_workflow_ref  = "${var.github_repository}/.github/workflows/score.yml@refs/heads/main"
-  score_principal_set = "principalSet://iam.googleapis.com/${local.pool_name}/attribute.workflow_ref/${local.score_workflow_ref}"
+  pool_name             = google_iam_workload_identity_pool.github.name
+  smoke_workflow_ref    = "${var.github_repository}/.github/workflows/smoke.yml@refs/heads/main"
+  smoke_principal_set   = "principalSet://iam.googleapis.com/${local.pool_name}/attribute.workflow_ref/${local.smoke_workflow_ref}"
+  score_workflow_ref    = "${var.github_repository}/.github/workflows/score.yml@refs/heads/main"
+  score_principal_set   = "principalSet://iam.googleapis.com/${local.pool_name}/attribute.workflow_ref/${local.score_workflow_ref}"
+  monitor_workflow_ref  = "${var.github_repository}/.github/workflows/monitor.yml@refs/heads/main"
+  monitor_principal_set = "principalSet://iam.googleapis.com/${local.pool_name}/attribute.workflow_ref/${local.monitor_workflow_ref}"
 }
 
 # List only: storage.buckets.get + storage.objects.list, no objects.get, so the smoke job cannot download a pickle.
@@ -353,6 +355,146 @@ resource "google_storage_bucket_iam_member" "dataproc_writes_gold_v2" {
     description = "Spark's committer creates and deletes objects; never outside v2/ (full_run_2b/ is the scorer's v1 gold)."
     expression  = "resource.name.startsWith(\"projects/_/buckets/${google_storage_bucket.gold.name}/objects/v2/\")"
   }
+
+  depends_on = [google_project_service.enabled]
+}
+
+# ---------------------------------------------------------------- v2 slice 7: the monitoring tick (monitor.yml)
+# Three SAs are bound to monitor.yml's workflow_ref: scorer (its score job), monitor (clock + evaluate), ledger-reader
+# (job A). GitHub's OIDC token has no per-job claim, so the binding cannot tell the jobs apart: the per-job SAs scope each
+# job's credentials as written, but code in one job could request another job's SA (disclosed in the design note, E6).
+resource "google_service_account_iam_member" "scorer_wif_monitor" {
+  service_account_id = google_service_account.scorer.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = local.monitor_principal_set
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_service_account" "monitor" {
+  account_id   = "monitor"
+  display_name = "Monitoring tick: reads predictions, scoring_runs and gold labels, writes monitoring"
+
+  depends_on = [google_project_service.enabled]
+}
+
+# Read and change DATA of serving.monitoring only (the scorer's no-create/no-delete custom role).
+resource "google_bigquery_table_iam_member" "monitor_writes_monitoring" {
+  dataset_id = google_bigquery_table.monitoring.dataset_id
+  table_id   = google_bigquery_table.monitoring.table_id
+  role       = google_project_iam_custom_role.scorer_table_writer.id
+  member     = "serviceAccount:${google_service_account.monitor.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_bigquery_table_iam_member" "monitor_reads_predictions" {
+  dataset_id = google_bigquery_table.predictions.dataset_id
+  table_id   = google_bigquery_table.predictions.table_id
+  role       = "roles/bigquery.dataViewer"
+  member     = "serviceAccount:${google_service_account.monitor.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_bigquery_table_iam_member" "monitor_reads_scoring_runs" {
+  dataset_id = google_bigquery_table.scoring_runs.dataset_id
+  table_id   = google_bigquery_table.scoring_runs.table_id
+  role       = "roles/bigquery.dataViewer"
+  member     = "serviceAccount:${google_service_account.monitor.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+# make m5-monitoring's seeded copies only (scratch tables expire after 1 day).
+resource "google_bigquery_dataset_iam_member" "monitor_edits_scratch" {
+  dataset_id = google_bigquery_dataset.scratch.dataset_id
+  role       = "roles/bigquery.dataEditor"
+  member     = "serviceAccount:${google_service_account.monitor.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+# Labels come from the gold table (objectViewer: objects.get + list, as the scorer).
+resource "google_storage_bucket_iam_member" "monitor_reads_gold" {
+  bucket = google_storage_bucket.gold.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.monitor.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_project_iam_member" "monitor_runs_jobs" {
+  project = var.project_id
+  role    = "roles/bigquery.jobUser"
+  member  = "serviceAccount:${google_service_account.monitor.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_service_account_iam_member" "monitor_wif" {
+  service_account_id = google_service_account.monitor.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = local.monitor_principal_set
+
+  depends_on = [google_project_service.enabled]
+}
+
+# The laptop catch-up and make m5-monitoring impersonate the monitor.
+resource "google_service_account_iam_member" "operator_impersonates_monitor" {
+  service_account_id = google_service_account.monitor.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = var.operator_member
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_service_account" "ledger_reader" {
+  account_id   = "ledger-reader"
+  display_name = "Run ledger renderer (job A): reads scoring_runs and monitoring"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_bigquery_table_iam_member" "ledger_reads_scoring_runs" {
+  dataset_id = google_bigquery_table.scoring_runs.dataset_id
+  table_id   = google_bigquery_table.scoring_runs.table_id
+  role       = "roles/bigquery.dataViewer"
+  member     = "serviceAccount:${google_service_account.ledger_reader.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_bigquery_table_iam_member" "ledger_reads_monitoring" {
+  dataset_id = google_bigquery_table.monitoring.dataset_id
+  table_id   = google_bigquery_table.monitoring.table_id
+  role       = "roles/bigquery.dataViewer"
+  member     = "serviceAccount:${google_service_account.ledger_reader.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_project_iam_member" "ledger_runs_jobs" {
+  project = var.project_id
+  role    = "roles/bigquery.jobUser"
+  member  = "serviceAccount:${google_service_account.ledger_reader.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_service_account_iam_member" "ledger_wif" {
+  service_account_id = google_service_account.ledger_reader.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = local.monitor_principal_set
+
+  depends_on = [google_project_service.enabled]
+}
+
+# make ledger and make m3-check impersonate the ledger reader.
+resource "google_service_account_iam_member" "operator_impersonates_ledger_reader" {
+  service_account_id = google_service_account.ledger_reader.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = var.operator_member
 
   depends_on = [google_project_service.enabled]
 }

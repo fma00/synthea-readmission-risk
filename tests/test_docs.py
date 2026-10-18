@@ -449,11 +449,13 @@ def test_first_screen_shows_status_limits_and_next_steps():
         assert word in head, f"first 40 lines of the README must mention {word!r}"
 
 
-# v2 slice 6b (2026-10-17): cloud and scale-up are built on the unreleased `v2` branch; monitoring and the dashboard are not.
-# Each stage must state its status explicitly, and built v2 work must say it is unreleased (the latest release is v1).
-ROADMAP_STATUS = {"Cloud": "(done on `v2`", "Scale-up": "(done on `v2`", "Monitoring": "(not started)", "Dashboard": "(not started)"}
-STATUS_ROWS = {"**Cloud**": "Done on `v2` (unreleased)", "**Scale-up**": "Done on `v2` (unreleased)",
-               "**Monitoring**": "Planned (not started)", "**Dashboard**": "Planned (not started)"}  # fmt: skip
+# v2 slice 7 (2026-10-18): cloud and scale-up are done in v2, monitoring is built with its scheduled burn-in pending, and
+# the dashboard moved to v3.0 (owner decision). Each stage must state its status explicitly, and v2 work must say v2.0
+# is not yet tagged (the latest release is v1). Update these on purpose when the burn-in and the v2.0 tag happen.
+ROADMAP_STATUS = {"Cloud": "(done in v2", "Scale-up": "(done in v2", "Monitoring": "(built in v2, burn-in pending",
+                  "Dashboard": "(v3.0, not started)"}  # fmt: skip
+STATUS_ROWS = {"**Cloud**": "Done in v2 (v2.0 not yet tagged)", "**Scale-up**": "Done in v2 (v2.0 not yet tagged)",
+               "**Monitoring**": "Built in v2; scheduled burn-in pending", "**Dashboard**": "Planned for v3.0 (not started)"}  # fmt: skip
 
 
 def test_roadmap_names_the_stages_and_their_status():
@@ -649,20 +651,23 @@ def test_no_tracked_file_matches_an_ignore_rule():
 def test_readme_figure_files_exist_and_use_both_themes():
     text = _read(README)
     sources = re.findall(r'(?:srcset|src)="(docs/img/[^"]+)"', text)
-    assert sorted(sources) == ["docs/img/reliability_dark.svg", "docs/img/reliability_light.svg"]
+    assert sorted(sources) == [  # v1 (the 10k models) and, since v2 slice 7, the 200k champion's
+        "docs/img/reliability_dark.svg", "docs/img/reliability_light.svg",
+        "docs/img/v2/reliability_dark.svg", "docs/img/v2/reliability_light.svg",
+    ]  # fmt: skip
     assert all(exact_case_exists(ROOT / p, ROOT) for p in sources)
     assert 'media="(prefers-color-scheme: dark)"' in text
     assert 'alt="' in text
 
 
 def test_readme_sample_table_is_verbatim_from_the_generated_file():
-    generated = _read(ROOT / "docs" / "img" / "sample_topn.md").strip("\n")
+    generated = _read(ROOT / "docs" / "img" / "v2" / "sample_topn.md").strip("\n")  # the champion's (v2 slice 7)
     section = "\n".join(split_sections(_read(README))["Example output"])
     assert generated in section, "README 'Example output' must contain docs/img/sample_topn.md verbatim; regenerate or re-paste"
 
 
 def test_sample_table_rank_one_agrees_with_the_scoring_docs():
-    top_row = next(line for line in _read(ROOT / "docs" / "img" / "sample_topn.md").splitlines() if line.startswith("| 1 |"))
+    top_row = next(line for line in _read(ROOT / "docs" / "img" / "v2" / "sample_topn.md").splitlines() if line.startswith("| 1 |"))
     assert top_row.split("|")[2].strip() in _read(ROOT / "docs" / "scoring.md")
 
 
@@ -679,9 +684,23 @@ def test_readme_refusal_example_matches_what_the_code_raises():
     counts = re.search(r"contains (\d+) in-sample .* and (\d+) discharge", line)
     assert counts is not None, line
     n_train, n_dropped = int(counts.group(1)), int(counts.group(2))
-    stops = pd.date_range("2022-06-10", periods=n_train + n_dropped, freq="h", tz="UTC")
+    # spread across the whole 30-day window so any count fits inside it (hourly from 2022-06-10 overflowed beyond ~500 rows)
+    stops = pd.date_range("2022-06-01T00:30", "2022-06-30T23:30", periods=n_train + n_dropped, tz="UTC")
     gold = pd.DataFrame({"encounter_id": [f"e{i}" for i in range(len(stops))], "index_stop": stops})
     partition_of = pd.Series(["train"] * n_train, index=[f"e{i}" for i in range(n_train)])
     with pytest.raises(ValueError) as info:
         select_held_out_window(gold, partition_of, run_date=dt.date(2022, 6, 30), window_days=30)
     assert line == f"ERROR: {info.value}"
+
+
+def test_readme_shows_the_monitoring_badges_and_ledger_honestly():
+    """FR20/FR21 (v2 slice 7): the scheduled-run badge filtered to schedule events on main, the last-tick badge served from
+    the ledger branch, a link to the ledger, and no claim of weeks of unattended operation."""
+    text = _read(README)
+    assert "https://github.com/fma00/synthea-readmission-risk/actions/workflows/monitor.yml/badge.svg?event=schedule&branch=main" in text
+    assert (
+        "https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Ffma00%2Fsynthea-readmission-risk"
+        "%2Fledger%2Fdocs%2Flast-tick.json"
+    ) in text
+    assert "https://github.com/fma00/synthea-readmission-risk/blob/ledger/docs/run-ledger.md" in text
+    assert "not weeks of unattended operation" in text and "simulated clock" in text

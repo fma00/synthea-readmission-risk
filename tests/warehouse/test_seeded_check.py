@@ -88,7 +88,7 @@ def test_all_assertions_fire_and_copies_are_dropped(monkeypatch):
     assert all(r.passed for r in (results["predictions"]["clean"], results["scoring_runs"]["clean"]))
     assert set(world.mutated.values()) == {*m5.PREDICTION_MUTATIONS, *m5.RUN_MUTATIONS}
     dropped = {c[1] for c in world.fake.calls if c[0] == "delete_table"}
-    assert dropped == world.created and len(world.created) == 2 + 17  # every copy created was dropped
+    assert dropped == world.created and len(world.created) == 2 + 18  # every copy created was dropped
     assert all(c[2].maximum_bytes_billed == 100 * 1024**2 for c in world.fake.calls if c[0] == "query")
 
 

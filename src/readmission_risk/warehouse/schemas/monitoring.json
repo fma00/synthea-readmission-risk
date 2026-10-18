@@ -1,0 +1,224 @@
+[
+  {
+    "name": "monitoring_run_id",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "uuid4 hex of the attempt."
+  },
+  {
+    "name": "status",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "succeeded, refused or failed."
+  },
+  {
+    "name": "failed_stage",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "clock, score or evaluate when not succeeded."
+  },
+  {
+    "name": "started_at",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "Wall clock (UTC) when the attempt started."
+  },
+  {
+    "name": "finished_at",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "started_at plus the monotonic elapsed time."
+  },
+  {
+    "name": "sim_date",
+    "type": "DATE",
+    "mode": "NULLABLE",
+    "description": "The simulated date; null when the clock failed or the date was invalid."
+  },
+  {
+    "name": "cadence",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "burn_in, weekly, dispatch or catch_up; null when not resolved or invalid."
+  },
+  {
+    "name": "trigger",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "laptop, or the GitHub Actions event name."
+  },
+  {
+    "name": "github_run_url",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "The Actions run, when run in Actions."
+  },
+  {
+    "name": "git_commit",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Commit of the monitoring code."
+  },
+  {
+    "name": "git_dirty",
+    "type": "BOOLEAN",
+    "mode": "NULLABLE",
+    "description": "Uncommitted changes on a laptop run; null in Actions."
+  },
+  {
+    "name": "github_run_attempt",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "GITHUB_RUN_ATTEMPT (1 for a first attempt); null on the laptop."
+  },
+  {
+    "name": "history_tests_passed",
+    "type": "BOOLEAN",
+    "mode": "NULLABLE",
+    "description": "Whether monitoring.sql passed before this row; null when not run (clock-stage rows)."
+  },
+  {
+    "name": "scoring_run_id",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "The score stage's scoring_runs attempt."
+  },
+  {
+    "name": "model_bundle_id",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "The monitored bundle."
+  },
+  {
+    "name": "gold_fingerprint",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Fingerprint of the gold the labels came from."
+  },
+  {
+    "name": "gold_fingerprint_definition",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Its definition."
+  },
+  {
+    "name": "verdict",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "ok, alert, insufficient_data or incomplete_cohort; non-null iff succeeded."
+  },
+  {
+    "name": "cohort_start",
+    "type": "DATE",
+    "mode": "NULLABLE",
+    "description": "First discharge day of the matured cohort."
+  },
+  {
+    "name": "cohort_end",
+    "type": "DATE",
+    "mode": "NULLABLE",
+    "description": "Day after its last discharge day (exclusive)."
+  },
+  {
+    "name": "n_matured",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "Matured cohort rows."
+  },
+  {
+    "name": "observed",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "Observed readmissions in the matured cohort."
+  },
+  {
+    "name": "expected",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "Sum of predicted probabilities in the matured cohort."
+  },
+  {
+    "name": "oe_ratio",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "Observed / expected."
+  },
+  {
+    "name": "oe_ci_low",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "Exact Poisson 95% lower bound of the ratio."
+  },
+  {
+    "name": "oe_ci_high",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "Exact Poisson 95% upper bound of the ratio."
+  },
+  {
+    "name": "auc",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "ROC-AUC of the matured cohort (report only)."
+  },
+  {
+    "name": "n_label_after_sim",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "Matured rows whose label depends on records after the simulated date."
+  },
+  {
+    "name": "n_immature",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "Scored discharges whose labels are not yet mature."
+  },
+  {
+    "name": "expected_immature",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "Label-free expected positives of the immature cohort."
+  },
+  {
+    "name": "coverage_required",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "Ticks the cohorts need (18)."
+  },
+  {
+    "name": "coverage_found",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "Of those, ticks with complete published predictions."
+  },
+  {
+    "name": "min_positives_floor",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "The pre-registered floor applied."
+  },
+  {
+    "name": "band_low",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "The pre-registered band's lower edge."
+  },
+  {
+    "name": "band_high",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "The pre-registered band's upper edge."
+  },
+  {
+    "name": "error_type",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Exception class of a failed or refused attempt."
+  },
+  {
+    "name": "error_message",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Its message (4,000 characters at most)."
+  }
+]

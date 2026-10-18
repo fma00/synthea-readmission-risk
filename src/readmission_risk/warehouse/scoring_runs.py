@@ -42,6 +42,7 @@ class RunRecord:
     data_test_failure: str | None
     error_type: str | None
     error_message: str | None
+    gold_fingerprint_definition: str | None = None  # v2 slice 7: the bundle's gold fingerprint definition
 
 
 def scoring_runs_table_id() -> str:

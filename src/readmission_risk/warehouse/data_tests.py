@@ -14,12 +14,12 @@ from readmission_risk.gcp import PROJECT_ID
 
 from .bigquery import query_config, quoted
 
-SCRIPT_NAMES = ("predictions", "scoring_runs")
+SCRIPT_NAMES = ("predictions", "scoring_runs", "monitoring")
 _TABLE_RE = re.compile(re.escape(PROJECT_ID) + r"\.[A-Za-z_][A-Za-z0-9_]{0,1023}\.[A-Za-z_][A-Za-z0-9_]{0,1023}")
-_DESCRIPTION_RE = re.compile(r"AS '((?:PRED|RUNS)-\d{2}: [^']*)';")
+_DESCRIPTION_RE = re.compile(r"AS '((?:PRED|RUNS|MON)-\d{2}: [^']*)';")
 # A failing ASSERT's message, as BigQuery reports it. Fixed from the live L0 probe (see the design note's Results); a
 # syntax error that merely QUOTES a label literal must not match.
-_ASSERT_MESSAGE_RE = re.compile(r"(?:Query error: )?(?P<description>(?:PRED|RUNS)-\d{2}: [^\n]*?)(?: at \[\d+:\d+\])?")
+_ASSERT_MESSAGE_RE = re.compile(r"(?:Query error: )?(?P<description>(?:PRED|RUNS|MON)-\d{2}: [^\n]*?)(?: at \[\d+:\d+\])?")
 
 
 @dataclass(frozen=True)
@@ -80,9 +80,9 @@ def run_data_tests(
             bigquery.ScalarQueryParameter("run_date", "DATE", run_date),
             bigquery.ScalarQueryParameter("scoring_run_id", "STRING", scoring_run_id),
         ]
-    elif name == "scoring_runs":
+    elif name in ("scoring_runs", "monitoring"):
         if run_date is not None or scoring_run_id is not None:
-            raise ValueError("the scoring_runs data tests take no parameters")
+            raise ValueError(f"the {name} data tests take no parameters")
         parameters = []
     else:
         raise ValueError(f"unknown data-test script {name!r}; expected one of {SCRIPT_NAMES}")

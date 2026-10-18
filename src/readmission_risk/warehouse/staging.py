@@ -50,15 +50,27 @@ def with_run_id(arrow: pa.Table, scoring_run_id: str) -> pa.Table:
     return arrow.append_column(field, pa.array([scoring_run_id] * arrow.num_rows, type=pa.string()))
 
 
-def make_staging_writer(client, scoring_run_id: str) -> Callable[[pd.DataFrame, Path, date], str]:
+def with_fingerprint_definition(arrow: pa.Table, definition: str | None) -> pa.Table:
+    """Appends gold_fingerprint_definition (v2 slice 7; BigQuery only, like scoring_run_id) as a non-nullable column."""
+    if definition is None:
+        raise RuntimeError("the staging writer ran before the bundle's gold_fingerprint_definition was known")
+    field = pa.field("gold_fingerprint_definition", pa.string(), nullable=False)
+    return arrow.append_column(field, pa.array([definition] * arrow.num_rows, type=pa.string()))
+
+
+def make_staging_writer(
+    client, scoring_run_id: str, fingerprint_definition: Callable[[], str | None]
+) -> Callable[[pd.DataFrame, Path, date], str]:
     """A writer with score_run_date's signature (output_dir is ignored): validates exactly like the local writer, before any
-    call, then creates the staging table and loads the rows into its run-date partition. Returns the staging partition."""
+    call, then creates the staging table and loads the rows into its run-date partition. Returns the staging partition.
+    `fingerprint_definition` is read when the writer runs, i.e. after score_run_date's on_validated has recorded it."""
     from google.cloud import bigquery
 
     staging = staging_table_id(scoring_run_id)
 
     def writer(predictions: pd.DataFrame, _output_dir: Path, run_date: date) -> str:
         arrow = with_run_id(predictions_arrow_table(predictions, run_date), scoring_run_id)
+        arrow = with_fingerprint_definition(arrow, fingerprint_definition())
         buffer = io.BytesIO()
         pq.write_table(arrow, buffer, compression="snappy")
         buffer.seek(0)

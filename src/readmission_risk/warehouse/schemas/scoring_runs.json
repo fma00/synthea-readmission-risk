@@ -154,5 +154,11 @@
     "type": "STRING",
     "mode": "NULLABLE",
     "description": "Exception message (4,000 characters at most)."
+  },
+  {
+    "name": "gold_fingerprint_definition",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Fingerprint definition of the gold table (pandas-csv-sha256-v1 or spark-rowhash-v1); null on rows written before v2 slice 7."
   }
 ]

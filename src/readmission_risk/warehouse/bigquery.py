@@ -18,7 +18,7 @@ if TYPE_CHECKING:  # pragma: no cover
 SERVING_DATASET = "serving"
 SCRATCH_DATASET = "scratch"
 MAX_BYTES_BILLED = 100 * 1024**2  # per query job; the on-demand minimum is 10 MB per referenced table
-_SCHEMA_NAMES = ("predictions", "scoring_runs")
+_SCHEMA_NAMES = ("predictions", "scoring_runs", "monitoring")
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,1023}")
 
 

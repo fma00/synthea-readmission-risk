@@ -45,7 +45,7 @@ The [Makefile](../Makefile) wraps the commands on this page. Its recipes call th
 | `make pre-commit` | Runs the hooks over all tracked files |
 | `make train TRAIN_EXPERIMENT=<name>` | Trains both models on `data/gold/full_run_2b`; the name is required and must differ from the export experiment (`EXPERIMENT`, default `readmission-risk-v1`), because training into an experiment that already holds runs makes the exporter's `--model` ambiguous (`make export` reads `EXPERIMENT`). It does not check other existing experiments. Extra flags go in `TRAIN_ARGS` |
 | `make export` | Exports the `EXPORT_MODEL` run (default `logistic_regression`) of `EXPERIMENT` (default `readmission-risk-v1`) as a model bundle under the gitignored `bundles/` and prints the `deploy/champion.json` text that would promote it; extra flags in `EXPORT_ARGS` ([scoring.md](scoring.md#model-bundles)) |
-| `make score` | Scores run date `20250630` with the champion bundle (`deploy/champion.json`); override `RUN_DATE`, `GOLD_DIR`, extra flags in `SCORE_ARGS` (e.g. `--bundle bundles/<id>`) |
+| `make score` | Scores run date `20250630` with the champion bundle (`deploy/champion.json`) on `SCORE_GOLD_DIR` (default `data/gold/main_200k`, downloaded by `make gold-200k`); override `RUN_DATE`, `SCORE_GOLD_DIR`, extra flags in `SCORE_ARGS` (e.g. `--bundle bundles/<id>`) |
 | `make setup-runtime`, `make test-runtime` | The Dataproc runtime environment, next section |
 | `make lock-main`, `make lock-dev` | Recompile `requirements.txt` / `requirements-dev.txt` under Python 3.14, on macOS (keeps existing pins) |
 | `make lock-runtime` | Recompile `requirements-dataproc-3.0.txt` under Python 3.12 (re-resolves to the newest allowed patches) |
@@ -254,7 +254,7 @@ gcloud iam workload-identity-pools providers describe github-actions --workload-
 
 Design and live results: `notes/eg-new-feature/v2-slice4-score-to-bigquery-2026-10-11.md`. Every command below starts from `export CLOUDSDK_CORE_PROJECT=synthea-readmission-risk`; impersonated `gcloud` calls also need `CLOUDSDK_BILLING_QUOTA_PROJECT=LEGACY`. The Python CLIs take `--impersonate-service-account` and handle the quota project themselves.
 
-**The gold table in GCS (once per gold table).** The scorer reads gold from `gs://synthea-readmission-risk-gold/full_run_2b/` (downloaded to a temporary directory, then read by the same loader as a local copy). Upload the Parquet parts and the metadata as yourself (the gold bucket is not create-only), then check the bytes:
+**The gold table in GCS (once per gold table).** The scorer reads gold from GCS: since v2 slice 7 from `gs://synthea-readmission-risk-gold/v2/main_200k/` (written there by the Dataproc Big Join), before that from `gs://synthea-readmission-risk-gold/full_run_2b/` (downloaded to a temporary directory, then read by the same loader as a local copy). Upload the Parquet parts and the metadata as yourself (the gold bucket is not create-only), then check the bytes:
 
 ```sh
 export CLOUDSDK_CORE_PROJECT=synthea-readmission-risk
@@ -266,7 +266,7 @@ for f in data/gold/full_run_2b/part-*.parquet data/gold/full_run_2b/_gold_metada
 done
 ```
 
-**Score and prove the data tests.** `make score-bq RUN_DATE=20250630` and `make m5-check RUN_DATE=20250630` ([scoring.md](scoring.md#scoring-into-bigquery-v2-slice-4)). Read results back as the scorer with a partition filter, for example `bq query --use_legacy_sql=false --maximum_bytes_billed=104857600 "SELECT status, COUNT(*) FROM serving.scoring_runs WHERE started_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY) GROUP BY status"`.
+**Score and prove the data tests.** `make score-bq RUN_DATE=20250630` and `make m5-check M5_RUN_DATE=<a date published by slice-7 code; default 20230417>` (since v2 slice 7, PRED-11 fails the clean copy of any date published before slice 7, whose rows lack `gold_fingerprint_definition`) ([scoring.md](scoring.md#scoring-into-bigquery-v2-slice-4)). Read results back as the scorer with a partition filter, for example `bq query --use_legacy_sql=false --maximum_bytes_billed=104857600 "SELECT status, COUNT(*) FROM serving.scoring_runs WHERE started_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY) GROUP BY status"`.
 
 **Bundles in GCS.** `python scripts/export_bundle.py ... --bundles-dir gs://synthea-readmission-risk-bundles --impersonate-service-account bundle-writer@synthea-readmission-risk.iam.gserviceaccount.com` uploads a new bundle create-only. `bundle-writer` cannot read, so verify an upload as yourself (or the scorer): `gcloud storage ls -l gs://synthea-readmission-risk-bundles/<id>/` lists three objects, and scoring with `--bundle gs://synthea-readmission-risk-bundles/<id>` checks every hash. An interrupted upload leaves objects without `manifest.json` (the scorer refuses that bundle as "no manifest"); a re-run reports "already exists". As the owner, delete the partial prefix with `gcloud storage rm --recursive --all-versions gs://synthea-readmission-risk-bundles/<id>/` and export again.
 
@@ -356,6 +356,65 @@ make prereg-phase-b                                                             
 - **Needs locally:** the `mlflow/` store with `readmission-risk-v1`, the champion copy `bundles/<leaf of deploy/champion.json>` and `data/gold/full_run_2b` (recovery: `gcloud storage cp -r` from the bundle bucket / `gs://synthea-readmission-risk-gold/full_run_2b`), your own ADC, `CLOUDSDK_CORE_PROJECT=synthea-readmission-risk`, and no untracked files.
 - **Phase B:** `scripts/prereg_append.py phase-b` checks both reports, copies them to `notes/eg-new-feature/v2-slice6b-reports/` and appends `phase_b`.
 
+## Monitoring tick (v2 slice 7)
+
+Design, owner decisions and the live runbook (L0-L17): `notes/eg-new-feature/v2-slice7-monitoring-tick-ledger-2026-10-18.md`.
+
+**What it does.** Each tick of [monitor.yml](../.github/workflows/monitor.yml):
+1. advances a **simulated clock** by one week through the champion's held-out 2023-2026 discharges;
+2. scores that week into BigQuery, a 7-day window, through the slice-4 write-audit-publish;
+3. evaluates the 13-week cohort whose labels have matured: observed/expected with an exact Poisson 95% interval, under the pre-registered rule in `prereg.yaml`; AUC is reported only;
+4. records one `serving.monitoring` row;
+5. renders the run ledger (job A, read-only identity) and commits it to the `ledger` branch (job B, no cloud credentials);
+6. opens or comments on ONE GitHub issue per kind: `monitoring-failure` when any job failed or was cancelled, `monitoring-alert` when the verdict is an alert.
+
+The clock moves only on success, so a failed or dropped tick is retried on the same simulated date; replaying a date is idempotent. `deploy/monitoring.json` names the monitored bundle (it must be the champion), the gold, the simulated range (178 Mondays, 2023-04-17 to 2026-09-07) and the two cron strings.
+
+```sh
+export CLOUDSDK_CORE_PROJECT=synthea-readmission-risk
+make gold-200k && make monitor-preflight   # offline: all 178 simulated weeks pass the completeness guard
+make monitor-simulate                      # offline: every week scored + evaluated; the sanity check and L10's oracle
+make m5-monitoring                         # every MON assertion fires on a seeded synthetic row (monitor SA)
+make monitor-catch-up WEEKS=18             # LIVE, laptop: the 18 warm-up weeks (clean checkout of main; no Actions tick running)
+gh workflow run monitor.yml --ref main     # one tick; -f sim_date=YYYYMMDD replays an earlier simulated date
+make ledger                                # render the ledger locally (ledger-reader SA)
+make m3-check                              # metric M3 from the Actions runs + serving.monitoring
+```
+
+- **Cron states.** `monitor.yml` holds no schedule after the v2 merge. A PR adds the burn-in cron (`7,37 13-18 * * *`, every 30 minutes for one afternoon; the fallback `7 13-22 * * *` if one tick takes more than 25 minutes, changed together with `deploy/monitoring.json`). After at least 5 consecutive green scheduled ticks, a second PR replaces it with the weekly cron (`17 6 * * 1`). This is a burn-in, not weeks of unattended operation.
+- **The ledger branch.** It is created once, by hand, **before `v2` merges into `main`** (so the README's badge and ledger links resolve from the start), as an orphan branch (a commit without parents) through the GitHub API, so the working tree is never touched; CI never creates it. The first commit holds a README and the two files job B later replaces: a placeholder ledger and the badge JSON the renderer writes when there is no tick yet.
+  ```sh
+  repo=fma00/synthea-readmission-risk
+  tree=$(python3 - <<'PY' | gh api "repos/$repo/git/trees" --input - --jq .sha
+  import json
+  badge = {"schemaVersion": 1, "label": "last tick (simulated clock)", "message": "none yet", "color": "lightgrey"}
+  files = {
+      "README.md": "# Run ledger\n\nRendered by monitor.yml from BigQuery: docs/run-ledger.md and docs/last-tick.json (simulated clock, synthetic data).\n",
+      "docs/run-ledger.md": "# Run ledger\n\nNo tick yet (simulated clock). Rendered by monitor.yml from BigQuery.\n",
+      "docs/last-tick.json": json.dumps(badge, indent=2) + "\n",
+  }
+  print(json.dumps({"tree": [{"path": p, "mode": "100644", "type": "blob", "content": c} for p, c in files.items()]}))
+  PY
+  )
+  commit=$(gh api "repos/$repo/git/commits" -f message='Start the run ledger branch' -f "tree=$tree" --jq .sha)
+  gh api "repos/$repo/git/refs" -f ref=refs/heads/ledger -f "sha=$commit"
+  gh api "repos/$repo/contents/docs/last-tick.json?ref=ledger" --jq .name   # prints last-tick.json
+  ```
+  It is not covered by ruleset 24876876 (which targets `main` and `v2`), so job B can commit without a bypass.
+- **Staleness.** The README badge reads `docs/last-tick.json` on the `ledger` branch. It shows the last tick's wall time and simulated date, plus "stale after <time>": the last scheduled tick plus two periods of the committed cron. A static page cannot say "stale since"; the v3 dashboard will. In the burn-in cron state the badge reads stale about an hour after the afternoon's last slot, until the weekly-cron PR is merged.
+- **GitHub disables scheduled workflows after 60 days without repository activity** (public repositories). Keep a calendar reminder 50 days after the last commit. To re-enable: `gh workflow enable monitor.yml`, then `gh workflow run monitor.yml --ref main` to catch up the clock.
+- **Repair a failing history test.** If `monitoring.sql` fails, every later tick fails at evaluate. Repair it as follows:
+  1. Read the MON label in the issue or the job summary.
+  2. Find the offending row(s) with a `bq query` as yourself (the operator).
+  3. Remove or correct them with one DML statement **as the operator** (never as the monitor service account), after checking it.
+  4. Record the statement in the slice note's Results.
+
+  BigQuery time travel (7 days, `FOR SYSTEM_TIME AS OF`) can restore deleted rows. A wrong assertion is fixed by a PR instead.
+- **Identities.** `scorer` scores, `monitor` resolves the clock and evaluates (writes only `serving.monitoring`, reads predictions, scoring_runs and gold), and `ledger-reader` renders the ledger (read-only); all three are bound to `monitor.yml` on `main`. GitHub's OIDC token has no per-job claim, so the binding cannot tell the jobs apart (disclosed in the design note).
+
+- **Never overlap** a laptop catch-up with an Actions tick: the catch-up refuses while `gh run list` shows a `monitor.yml` run that is not completed. `score.yml` shares the concurrency group; a `score.yml` run on a simulated date replaces that week's 7-day partition with a 30-day one, so the cohorts that need it report `incomplete_cohort` until the date is replayed.
+- **Cost:** about 10 BigQuery queries (10 MB minimum each) and 40 MB of GCS egress per tick; about CHF 1-2 for the whole slice.
+
 ## Teardown checklist
 
 Order matters: `prevent_destroy` makes `terraform destroy` refuse while the CHF 20 budget, the state bucket or the bundle bucket is still in state, and the bundle bucket's IAM members must go before the bucket. Start with `export CLOUDSDK_CORE_PROJECT=synthea-readmission-risk`.
@@ -373,7 +432,7 @@ Order matters: `prevent_destroy` makes `terraform destroy` refuse while the CHF 
 5. **Destroy the rest:** `terraform -chdir=infra destroy`. Raw and gold are deleted with their contents; the CHF 5 budget, both service accounts, all IAM members, the pool and the provider go (destroying `default_compute_no_editor` does not restore the default compute SA's roles/editor; to delete or disable that SA later, first remove `default_compute_no_editor` and its data source from `infra/`, because every plan and destroy reads it); the APIs stay enabled. The final state is written to the state bucket, which still exists.
 6. **Delete the state bucket last:** `gcloud storage rm --recursive --all-versions "gs://synthea-readmission-risk-tfstate/**"`, then `gcloud storage buckets delete gs://synthea-readmission-risk-tfstate`. `infra/` needs a new bootstrap after this.
 7. **Slice 5 resources:** no generation VM or Dataproc batch may be running (the three commands above print nothing). Raw and gold `v2/` objects go with their buckets in step 5; the artifacts bucket is `force_destroy` and goes there too (the Dataproc staging bucket was removed on 2026-10-14). The `spark` network, subnet and firewall, the instance template and the `synthea-generator` and `dataproc-runtime` service accounts are destroyed by step 5.
-8. **BigQuery (v2 slice 4):** set `deletion_protection = false` on `google_bigquery_table.predictions` and `.scoring_runs` and apply; `serving` does not delete its contents on destroy, so empty it first (`bq rm -r -f -d serving` as the owner, after exporting anything you want to keep); `scratch` deletes its own tables. The custom role `scorerTableWriter` stays soft-deleted for 7-37 days after `destroy`; re-creating it in that window needs `gcloud iam roles undelete scorerTableWriter --project=synthea-readmission-risk`.
+8. **BigQuery (v2 slices 4 and 7):** set `deletion_protection = false` on `google_bigquery_table.predictions`, `.scoring_runs` and `.monitoring` and apply; `serving` does not delete its contents on destroy, so empty it first (`bq rm -r -f -d serving` as the owner, after exporting anything you want to keep); `scratch` deletes its own tables. The custom role `scorerTableWriter` stays soft-deleted for 7-37 days after `destroy`; re-creating it in that window needs `gcloud iam roles undelete scorerTableWriter --project=synthea-readmission-risk`.
 9. **Check for leftovers:** `gcloud storage buckets list --project=synthea-readmission-risk`, `gcloud dataproc batches list --region=us-central1 --project=synthea-readmission-risk`, `gcloud compute instances list --project=synthea-readmission-risk`, `gcloud compute disks list --project=synthea-readmission-risk`, `gcloud compute instance-templates list --project=synthea-readmission-risk`, `bq ls --project_id=synthea-readmission-risk` (later slices), `gcloud iam service-accounts list --project=synthea-readmission-risk`.
 10. The WIF pool stays soft-deleted for 30 days; re-creating `github` in that window needs `gcloud iam workload-identity-pools undelete github --location=global --project=synthea-readmission-risk`.
 11. The final stop: `gcloud billing projects unlink synthea-readmission-risk`, or delete the project.

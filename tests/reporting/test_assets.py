@@ -128,6 +128,17 @@ def test_sample_table_caption_with_the_under_prediction_clause(tmp_path, curves,
     assert lines[2] == "" and lines[3].startswith("| Rank |")
 
 
+def test_population_label_names_the_window_in_title_caption_and_description(tmp_path, curves, facts, predictions):
+    # v2 slice 7: the 200k champion's assets must not call its window a "development set".
+    _build(_config(tmp_path, population_label="200k population"), curves, facts, predictions)
+    out = tmp_path / "out"
+    lines = (out / "sample_topn.md").read_text(encoding="utf-8").splitlines()
+    assert lines[0].endswith("Demo over held-out rows (200k population), not new-data scoring.")
+    svg = (out / "reliability_light.svg").read_text(encoding="utf-8")
+    assert "Reliability, test window (200k population)" in svg and "200k population, not a virgin holdout." in svg
+    assert "development set" not in svg and "development-set" not in svg
+
+
 def test_sample_table_caption_omits_the_clause_when_the_data_do_not_support_it(tmp_path, facts, predictions):
     curves = {"logistic_regression": LOW_CURVE, "xgboost_calibrated": HIGH_CURVE}  # XGBoost's mean prediction exceeds 8%
     _build(_config(tmp_path), curves, facts, predictions)

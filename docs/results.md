@@ -4,14 +4,14 @@
 
 ## v2: the pre-registered promotion gate on a fresh 200,000-patient population (slice 6b)
 
-**The reason-code lookup is at least as good as the models.** On `main_200k`, a 200,000-patient population generated with a new seed specifically for validation, a logistic regression retrained at that scale beats the v1 champion but **does not beat the no-model reason-code lookup**, so under the pre-registered rule the champion is not replaced. This is a reported finding, not a failure (`prereg.yaml`, `outcomes.lookup_still_wins`).
+**The reason-code lookup is at least as good as the models.** On `main_200k`, a 200,000-patient population generated with a new seed specifically for validation, a logistic regression retrained at that scale beats the v1 champion but **does not beat the no-model reason-code lookup**, so under the pre-registered rule the champion is not replaced. This is a reported finding, not a failure (`prereg.yaml`, `outcomes.lookup_still_wins`). The owner overrode that outcome afterwards and promoted the challenger; see [the champion after the gate](#the-champion-after-the-gate-a-disclosed-override-slice-7).
 
 Every analysis choice was fixed before any model saw this population: the rules and their thresholds in `prereg.yaml` Phase A (committed before the population was generated), and the challenger (logistic regression), the rows for the external validation and the code in the `analysis_lock` block (committed before training). The gate refuses to run if any of them changed. Training set: 126,168 rows / 1,926 positives (1.53%); test window (2023-01-01 onward, patient-disjoint): 31,659 rows / **616 positives** (1.95%), above the pre-registered floor of 400. Intervals are 95% patient-clustered paired percentile bootstrap intervals (2,000 resamples, seed 20261012). The results are recorded line by line in `prereg.yaml` Phase B and in the committed gate reports ([notes/eg-new-feature/v2-slice6b-reports/](../notes/eg-new-feature/v2-slice6b-reports/)); design and runbook: [notes/eg-new-feature/v2-slice6b-promotion-gate-frozen-v1-2026-10-16.md](../notes/eg-new-feature/v2-slice6b-promotion-gate-frozen-v1-2026-10-16.md).
 
 | Test window (31,659 rows, 616 positives) | ROC-AUC | Brier score | Observed / expected |
 |---|---|---|---|
-| Challenger: logistic regression trained on `main_200k` | 0.872 | 0.0182 | 1.01 |
-| Champion: v1 logistic regression (trained on the 10,000-patient v1 population) | 0.863 | 0.0181 | 1.11 |
+| Challenger (the champion since slice 7, by override): logistic regression trained on `main_200k` | 0.872 | 0.0182 | 1.01 |
+| Champion at the gate: v1 logistic regression (trained on the 10,000-patient v1 population) | 0.863 | 0.0181 | 1.11 |
 | Reason-code lookup (no model, fitted on the same training rows) | 0.871 | 0.0184 | 0.96 |
 
 | Pre-registered rule | Paired 95% interval of the difference | Threshold | Result |
@@ -36,6 +36,18 @@ These rows span all years, not only the test window, so these figures are not co
 
 - **Process note.** After the lock and before the gate ran, the training log's test-window metrics were printed into the working session by mistake. Nothing that could have been influenced by them was still open: the challenger, rules, rows and code were locked and merged before training, and the gate refuses any later change.
 - Like v1, this is synthetic data: a demonstration of the pipeline and the evaluation method, not a clinically validated result (see the README's "About the data").
+
+### The champion after the gate: a disclosed override (slice 7)
+
+The finding above stands: the lookup is at least as good as the models, and the pre-registered decision was REFUSE. On 2026-10-18 the owner nevertheless promoted the 200k-trained logistic regression to champion. That is a post-hoc decision against the pre-registered rule, which says verbatim: "If the challenger does not beat the reason-code lookup on ROC-AUC under the rule above, the champion is not replaced". It is recorded with its reasons in [deploy/PROMOTIONS.md](../deploy/PROMOTIONS.md). The reasons:
+
+- the 10,000-patient population was a technical feasibility run (the stance is on record since slice 3, before the 200k data existed);
+- on 10,000 patients a 13-week monitoring cohort never reaches the pre-registered 20-positive floor, so it cannot be monitored;
+- the challenger beats the champion it replaces, and the v1 champion does not satisfy the lookup criterion either.
+
+`prereg.yaml` is unchanged. Two consequences:
+- **No untouched validation population is left.** The 200k test window has now been used by the gate, by this decision and by the monitoring tick, which replays it on a simulated clock.
+- **Monitoring is not a validation.** The monitoring tick's observed/expected figures on that window are a demonstration of the monitoring mechanics, not a fresh measurement.
 
 ### Portable export parity (FR0.3, slice 6c)
 
@@ -84,7 +96,16 @@ Measured on `data/gold/full_run_2b` (10,000-patient Synthea population; **unplan
 
 ## Reliability figure
 
-The README's reliability diagram plots both models' calibration curves on the held-out test window (10 quantile bins; 1,539 rows, 41 positives) with 95% Wilson intervals. The curves are the `calibration_curve.json` artifacts already logged by `train_models.py`; nothing is retrained. The intervals treat rows as independent, whereas patients contribute several stays, so they understate the uncertainty (the bootstrap intervals above are patient-clustered). Eight of the ten logistic-regression bins and nine of the ten XGBoost bins have mean predicted probability at or below 1.5%, so on linear axes they crowd the lower-left corner. The figure is a development-set result, like the rest of this page.
+**v2 (the 200k champion, slice 7).** The README's v2 reliability diagram plots the two models trained on `main_200k` on their test window (31,659 rows, 616 positives; 10 quantile bins of about 3,166 rows), with the same method and the same caveats as the v1 figure below. The logistic regression (the champion) tracks the diagonal; its top bin predicts 0.141 against an observed 0.119, and its ninth bin 0.028 against 0.043. Calibrated XGBoost under-predicts its two highest bins (0.068 against 0.120, and 0.014 against 0.044).
+
+```sh
+python scripts/score_discharges.py --gold-dir data/gold/main_200k --run-date 20250630 --output-dir data/predictions/champion_200k
+python scripts/make_readme_assets.py --experiment-name readmission-risk-v2-main200k --predictions data/predictions/champion_200k/run_date=20250630/predictions.parquet --out-dir docs/img/v2 --population-label "200k population"
+```
+
+This writes `docs/img/v2/reliability_{light,dark}.svg` and `docs/img/v2/sample_topn.md` (the README's Example output). `--population-label` names the window in the title and captions; the default, "development set", reproduces the v1 assets byte for byte.
+
+**v1.** The README's reliability diagram plots both models' calibration curves on the held-out test window (10 quantile bins; 1,539 rows, 41 positives) with 95% Wilson intervals. The curves are the `calibration_curve.json` artifacts already logged by `train_models.py`; nothing is retrained. The intervals treat rows as independent, whereas patients contribute several stays, so they understate the uncertainty (the bootstrap intervals above are patient-clustered). Eight of the ten logistic-regression bins and nine of the ten XGBoost bins have mean predicted probability at or below 1.5%, so on linear axes they crowd the lower-left corner. The figure is a development-set result, like the rest of this page.
 
 ```sh
 python scripts/make_readme_assets.py --experiment-name readmission-risk-v1 --predictions data/predictions/run_date=20250630/predictions.parquet

@@ -1,0 +1,11 @@
+{
+  "model_bundle_id": "569fdab6c17d433542b2cd6b531ed8efc5677fb37b00a792d84f79803c6a0f72",
+  "gold_uri": "gs://synthea-readmission-risk-gold/v2/main_200k",
+  "first_sim_date": "20230417",
+  "last_sim_date": "20260907",
+  "step_days": 7,
+  "window_days": 7,
+  "top_n": 10,
+  "crons": {"burn_in": "7,37 13-18 * * *", "weekly": "17 6 * * 1"},
+  "epoch": "20261018"
+}

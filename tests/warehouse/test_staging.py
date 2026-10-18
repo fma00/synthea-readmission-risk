@@ -23,7 +23,7 @@ RUN_DATE = date(2026, 6, 30)
 
 def test_staging_writer_validates_before_any_call():
     fake = FakeBigQuery()
-    writer = staging.make_staging_writer(fake, RUN_ID)
+    writer = staging.make_staging_writer(fake, RUN_ID, lambda: "spark-rowhash-v1")
     bad = make_predictions().drop(columns=["risk_score"])
     with pytest.raises(ValueError, match="exactly the columns"):
         writer(bad, None, RUN_DATE)
@@ -35,7 +35,7 @@ def test_staging_writer_validates_before_any_call():
 def test_staging_writer_creates_partitioned_table_then_loads_decorator_write_truncate():
     fake = FakeBigQuery()
     predictions = make_predictions()
-    result = staging.make_staging_writer(fake, RUN_ID)(predictions, None, RUN_DATE)
+    result = staging.make_staging_writer(fake, RUN_ID, lambda: "spark-rowhash-v1")(predictions, None, RUN_DATE)
     staging_id = f"synthea-readmission-risk.scratch.predictions_{RUN_ID}"
     assert result == f"bigquery://{staging_id}$20260630"
     assert fake.kinds() == ["create_table", "load"]
@@ -53,12 +53,21 @@ def test_staging_writer_creates_partitioned_table_then_loads_decorator_write_tru
     assert loaded.schema.field("scoring_run_id").nullable is False  # Parquet REQUIRED, matching the table
     assert set(loaded.column("scoring_run_id").to_pylist()) == {RUN_ID}
     assert loaded.drop(["scoring_run_id"]).to_pandas()["encounter_id"].tolist() == predictions["encounter_id"].tolist()
+    assert loaded.schema.field("gold_fingerprint_definition").nullable is False
+    assert set(loaded.column("gold_fingerprint_definition").to_pylist()) == {"spark-rowhash-v1"}
+
+
+def test_staging_writer_refuses_an_unknown_fingerprint_definition_before_any_call():
+    fake = FakeBigQuery()
+    with pytest.raises(RuntimeError, match="gold_fingerprint_definition was known"):
+        staging.make_staging_writer(fake, RUN_ID, lambda: None)(make_predictions(), None, RUN_DATE)
+    assert fake.calls == []
 
 
 def test_staging_writer_row_count_postcondition():
     fake = FakeBigQuery(load_output_rows=1)
     with pytest.raises(RuntimeError, match="staging load wrote 1 rows"):
-        staging.make_staging_writer(fake, RUN_ID)(make_predictions(), None, RUN_DATE)
+        staging.make_staging_writer(fake, RUN_ID, lambda: "spark-rowhash-v1")(make_predictions(), None, RUN_DATE)
 
 
 def test_publish_is_one_transaction_delete_then_insert_with_explicit_columns():
@@ -75,7 +84,7 @@ def test_publish_is_one_transaction_delete_then_insert_with_explicit_columns():
         f"INSERT INTO {live} ({columns})\n  SELECT {columns} FROM "  # noqa: S608 -- the expected SQL text, not a query
         f"`synthea-readmission-risk.scratch.predictions_{RUN_ID}` WHERE `as_of_date` = @run_date"
     )
-    assert "`partition`" in columns and len(column_names("predictions")) == 19
+    assert "`partition`" in columns and len(column_names("predictions")) == 20
     assert config.maximum_bytes_billed == 100 * 1024**2
     assert [(p.name, p.type_, p.value) for p in config.query_parameters] == [("run_date", "DATE", RUN_DATE)]
 

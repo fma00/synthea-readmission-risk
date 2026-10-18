@@ -111,6 +111,10 @@ class Prereg:
     def power(self) -> dict:
         return self.raw["power"]
 
+    @property
+    def monitoring(self) -> dict:
+        return self.raw["monitoring"]
+
 
 # --- schema -------------------------------------------------------------------------------------------------------------
 # A spec is a dict (exact key set, recursed) or a leaf checker (path, value) -> None that raises PreregError.

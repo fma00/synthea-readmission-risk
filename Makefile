@@ -15,6 +15,8 @@ REFERENCE_DATE   ?= 20260916
 TEST_START_DATE  ?= 20230101
 EXPERIMENT       ?= readmission-risk-v1
 RUN_DATE         ?= 20250630
+M5_RUN_DATE      ?= 20230417
+SCORE_GOLD_DIR   ?= data/gold/main_200k
 TRAIN_EXPERIMENT ?=
 TRAIN_ARGS       ?=
 SCORE_ARGS       ?=
@@ -23,8 +25,13 @@ EXPORT_ARGS      ?=
 SOURCE_BUNDLE    ?=
 PORTABLE_ARGS    ?=
 TERRAFORM        ?= terraform
-GOLD_URI         ?= gs://synthea-readmission-risk-gold/full_run_2b
+GOLD_URI         ?= gs://synthea-readmission-risk-gold/v2/main_200k
 SCORER_SA        ?= scorer@synthea-readmission-risk.iam.gserviceaccount.com
+MONITOR_SA       ?= monitor@synthea-readmission-risk.iam.gserviceaccount.com
+LEDGER_SA        ?= ledger-reader@synthea-readmission-risk.iam.gserviceaccount.com
+WEEKS            ?= 1
+CHAMPION_BUNDLE_DIR ?= bundles/569fdab6c17d433542b2cd6b531ed8efc5677fb37b00a792d84f79803c6a0f72
+LEDGER_OUT       ?= data/monitoring/ledger
 RUN              ?=
 JDK_TARBALL      ?=
 GEN_ARGS         ?=
@@ -44,7 +51,7 @@ define fresh_venv
 case "$(1)" in */*|*..*) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; .venv-*) ;; *) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; esac; rm -rf "$(1)" && $(2) -m venv "$(1)"
 endef
 
-.PHONY: help setup hooks lint test pre-commit train export export-portable score score-bq m5-check setup-runtime test-runtime lock-main lock-dev lock-runtime tf-validate spark-zip generate-vm bigjoin-batch check-population gate prereg-lock prereg-phase-b
+.PHONY: help setup hooks lint test pre-commit train export export-portable score score-bq m5-check setup-runtime test-runtime lock-main lock-dev lock-runtime tf-validate spark-zip generate-vm bigjoin-batch check-population gate prereg-lock prereg-phase-b m5-monitoring gold-200k monitor-preflight monitor-simulate monitor-catch-up ledger m3-check
 .DEFAULT_GOAL := help
 
 help: ## List the targets
@@ -85,14 +92,35 @@ export-portable: ## Export the local schema-1 bundle SOURCE_BUNDLE (required) on
 	@test -n "$(SOURCE_BUNDLE)" || { echo "ERROR: set SOURCE_BUNDLE=<a local schema-1 bundle directory>" >&2; exit 1; }
 	$(BIN)/python scripts/export_portable_bundle.py --source-bundle $(SOURCE_BUNDLE) --gold-dir $(GOLD_DIR) $(PORTABLE_ARGS)
 
-score: ## Score the Top-N triage list for RUN_DATE with the champion bundle (deploy/champion.json); extra flags via SCORE_ARGS
-	$(BIN)/python scripts/score_discharges.py --gold-dir $(GOLD_DIR) --run-date $(RUN_DATE) $(SCORE_ARGS)
+score: ## Score the Top-N triage list for RUN_DATE with the champion bundle (deploy/champion.json) on SCORE_GOLD_DIR (make gold-200k); extra flags via SCORE_ARGS
+	$(BIN)/python scripts/score_discharges.py --gold-dir $(SCORE_GOLD_DIR) --run-date $(RUN_DATE) $(SCORE_ARGS)
 
 score-bq: ## Score RUN_DATE into BigQuery as the scorer SA (laptop; needs ADC); extra flags via SCORE_ARGS
 	$(BIN)/python scripts/score_to_bigquery.py --gold-dir $(GOLD_URI) --run-date $(RUN_DATE) --impersonate-service-account $(SCORER_SA) $(SCORE_ARGS)
 
-m5-check: ## Prove every BigQuery data test fires on a seeded bad row (M5), as the scorer SA
-	$(BIN)/python scripts/seeded_data_test_check.py --run-date $(RUN_DATE) --impersonate-service-account $(SCORER_SA)
+m5-check: ## Prove every predictions/scoring_runs data test fires on a seeded bad row (M5) for M5_RUN_DATE (published by slice-7 code), as the scorer SA
+	$(BIN)/python scripts/seeded_data_test_check.py --run-date $(M5_RUN_DATE) --impersonate-service-account $(SCORER_SA)
+
+m5-monitoring: ## Prove every serving.monitoring data test fires on a seeded synthetic row (M5), as the monitor SA
+	$(BIN)/python scripts/seeded_data_test_check.py --monitoring --impersonate-service-account $(MONITOR_SA)
+
+gold-200k: ## Download the monitored gold (GOLD_URI) to SCORE_GOLD_DIR (LIVE, read-only; needs gcloud)
+	mkdir -p $(SCORE_GOLD_DIR) && gcloud storage cp "$(GOLD_URI)/*" $(SCORE_GOLD_DIR)/
+
+monitor-preflight: ## Offline: check the completeness guard accepts every simulated week (needs make gold-200k and the local champion bundle)
+	$(BIN)/python scripts/monitor_tick.py preflight --gold-dir $(SCORE_GOLD_DIR) --bundle $(CHAMPION_BUNDLE_DIR)
+
+monitor-simulate: ## Offline: score every simulated week and evaluate each cohort (the sanity check; L10's oracle)
+	$(BIN)/python scripts/monitor_tick.py simulate --gold-dir $(SCORE_GOLD_DIR) --bundle $(CHAMPION_BUNDLE_DIR) --out data/monitoring/simulation.csv
+
+monitor-catch-up: ## LIVE: run WEEKS monitoring ticks from the laptop (clean main only; no Actions tick may run)
+	$(BIN)/python scripts/monitor_tick.py catch-up --weeks $(WEEKS) --scorer-sa $(SCORER_SA) --monitor-sa $(MONITOR_SA)
+
+ledger: ## Render the run ledger and badge from BigQuery into LEDGER_OUT, as the ledger-reader SA
+	$(BIN)/python scripts/render_ledger.py --out-dir $(LEDGER_OUT) --impersonate-service-account $(LEDGER_SA)
+
+m3-check: ## Check metric M3 (>= 5 consecutive green burn-in ticks, then a weekly one), as the ledger-reader SA; needs gh
+	$(BIN)/python scripts/m3_check.py --impersonate-service-account $(LEDGER_SA)
 
 setup-runtime: ## Recreate .venv-dataproc: Python 3.12 + the Dataproc runtime 3.0 mirror (requirements-dataproc-3.0.txt)
 	@$(call fresh_venv,$(RUNTIME_VENV),$(PYTHON312),RUNTIME_VENV)
@@ -102,10 +130,10 @@ setup-runtime: ## Recreate .venv-dataproc: Python 3.12 + the Dataproc runtime 3.
 	$(RUNTIME_VENV)/bin/pip check
 
 # Does not set READMISSION_RISK_EXPECT_DATAPROC_RUNTIME: a laptop's JDK need not be 21, so the exact stack is asserted in CI only.
-test-runtime: ## Run tests/pipeline in .venv-dataproc (needs JDK 17 or 21)
+test-runtime: ## Run tests/pipeline and tests/scripts in .venv-dataproc (needs JDK 17 or 21)
 	@test -x $(RUNTIME_VENV)/bin/pytest || { echo "ERROR: run 'make setup-runtime' first" >&2; exit 1; }
 	@echo "PySpark uses JAVA_HOME=$${JAVA_HOME:-<unset: the java on PATH>}; Spark 4.0 supports JDK 17 or 21 only."
-	$(RUNTIME_VENV)/bin/pytest tests/pipeline
+	$(RUNTIME_VENV)/bin/pytest tests/pipeline tests/scripts
 
 # requirements.txt and requirements-dev.txt are compiled under Python 3.14, the interpreter that installs them (since
 # 2026-10-12), and on macOS: pip-compile resolves environment markers for the host only, and requirements-linux-extras.txt

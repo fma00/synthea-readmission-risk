@@ -33,7 +33,7 @@ resource "google_bigquery_table" "predictions" {
   table_id   = "predictions"
   # The scorer's DEMO_NOTICE (src/readmission_risk/scoring/constants.py); tests/test_infra.py keeps the two equal.
   description = chomp(<<-EOT
-    DEMO, not clinical guidance. Scores come from a weak model trained on synthetic Synthea data, and the ranking mostly reflects the admission reason (a reason-code-only lookup does as well). The rows are held-out development-set discharges: the test window was used while designing the models and the label, so it is not a virgin holdout. Not clinically validated.
+    DEMO, not clinical guidance. Scores come from a weak model trained on synthetic Synthea data, and the ranking mostly reflects the admission reason (a reason-code-only lookup does as well). The rows are held-out discharges from the model's own test partition; that window was already used to select models, so it is not a virgin holdout. Not clinically validated.
     EOT
   )
   schema                   = file("${path.module}/../src/readmission_risk/warehouse/schemas/predictions.json")
@@ -59,6 +59,23 @@ resource "google_bigquery_table" "scoring_runs" {
   schema                   = file("${path.module}/../src/readmission_risk/warehouse/schemas/scoring_runs.json")
   require_partition_filter = true
   clustering               = ["status"]
+  deletion_protection      = true
+
+  time_partitioning {
+    type  = "DAY"
+    field = "started_at"
+  }
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_bigquery_table" "monitoring" {
+  dataset_id               = google_bigquery_dataset.serving.dataset_id
+  table_id                 = "monitoring"
+  description              = "Monitoring ticks on a simulated clock (synthetic Synthea data, not for clinical use): one row per clock-failure or evaluate attempt."
+  schema                   = file("${path.module}/../src/readmission_risk/warehouse/schemas/monitoring.json")
+  require_partition_filter = true
+  clustering               = ["sim_date"]
   deletion_protection      = true
 
   time_partitioning {

@@ -59,4 +59,4 @@ jobs:
       - name: Score
         env:
           RUN_DATE: ${{ inputs.run_date }}
-        run: python scripts/score_to_bigquery.py --gold-dir gs://synthea-readmission-risk-gold/full_run_2b --run-date "$RUN_DATE"
+        run: python scripts/score_to_bigquery.py --gold-dir gs://synthea-readmission-risk-gold/v2/main_200k --run-date "$RUN_DATE"

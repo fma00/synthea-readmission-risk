@@ -9,6 +9,7 @@ Design: notes/eg-new-feature/v2-slice1-tooling-and-dataproc-runtime-leg-2026-10-
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import shlex
@@ -27,13 +28,15 @@ EXPECTED_TARGETS = {
     "help", "setup", "hooks", "lint", "test", "pre-commit", "train", "export", "export-portable", "score", "score-bq", "m5-check",
     "setup-runtime", "test-runtime", "lock-main", "lock-dev", "lock-runtime", "tf-validate", "spark-zip", "generate-vm", "bigjoin-batch",
     "check-population", "gate", "prereg-lock", "prereg-phase-b",
+    "m5-monitoring", "gold-200k", "monitor-preflight", "monitor-simulate", "monitor-catch-up", "ledger", "m3-check",
 }
 # Every variable the Makefile reads, plus make's own propagation variables: a pytest started by `make test X=y` (or a
 # shell exporting VENV=...) must not change what these tests see.
 MAKEFILE_VARIABLES = ("PYTHON", "PYTHON312", "VENV", "RUNTIME_VENV", "LOCK_VENV", "LOCK314_VENV", "GOLD_DIR",
                       "REFERENCE_DATE", "TEST_START_DATE", "EXPERIMENT", "RUN_DATE", "TRAIN_EXPERIMENT", "TRAIN_ARGS", "SCORE_ARGS",
                       "EXPORT_MODEL", "EXPORT_ARGS", "SOURCE_BUNDLE", "PORTABLE_ARGS", "TERRAFORM", "GOLD_URI", "SCORER_SA", "RUN", "JDK_TARBALL", "GEN_ARGS", "CHECK_ARGS", "GATE_ARGS", "LOCK_ARGS", "PHASE_B_ARGS",
-                      "BATCH_ARGS")
+                      "BATCH_ARGS", "M5_RUN_DATE", "SCORE_GOLD_DIR", "MONITOR_SA", "LEDGER_SA", "WEEKS", "CHAMPION_BUNDLE_DIR",
+                      "LEDGER_OUT")
 SCRUBBED_ENV = ("MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "GNUMAKEFLAGS", "MAKEFILES", *MAKEFILE_VARIABLES)
 EXPECTED_PRE_COMMIT = [
     "repos:",
@@ -119,7 +122,7 @@ def test_make_lint_runs_ruff_and_offline_zizmor_from_the_venv():
 @needs_make
 def test_make_score_passes_the_reference_defaults():
     assert (
-        ".venv/bin/python scripts/score_discharges.py --gold-dir data/gold/full_run_2b --run-date 20250630"
+        ".venv/bin/python scripts/score_discharges.py --gold-dir data/gold/main_200k --run-date 20250630"
     ) in _dry_run("score")
     assert "--experiment-name" not in _dry_run("score")  # the scorer reads the champion bundle, not MLflow
     assert "--run-date 20240115 --show-observed-outcomes" in _dry_run("score", "RUN_DATE=20240115", "SCORE_ARGS=--show-observed-outcomes")
@@ -129,11 +132,31 @@ def test_make_score_passes_the_reference_defaults():
 def test_make_score_bq_and_m5_check_run_as_the_scorer_sa():
     sa = "--impersonate-service-account scorer@synthea-readmission-risk.iam.gserviceaccount.com"
     assert (
-        ".venv/bin/python scripts/score_to_bigquery.py --gold-dir gs://synthea-readmission-risk-gold/full_run_2b "
+        ".venv/bin/python scripts/score_to_bigquery.py --gold-dir gs://synthea-readmission-risk-gold/v2/main_200k "
         f"--run-date 20250630 {sa}"
     ) in _dry_run("score-bq")
     assert "--bundle bundles/x" in _dry_run("score-bq", "SCORE_ARGS=--bundle bundles/x")
-    assert f".venv/bin/python scripts/seeded_data_test_check.py --run-date 20250630 {sa}" in _dry_run("m5-check")
+    assert f".venv/bin/python scripts/seeded_data_test_check.py --run-date 20230417 {sa}" in _dry_run("m5-check")
+
+
+@needs_make
+def test_monitoring_targets_use_their_own_service_accounts():
+    monitor = "--impersonate-service-account monitor@synthea-readmission-risk.iam.gserviceaccount.com"
+    ledger = "--impersonate-service-account ledger-reader@synthea-readmission-risk.iam.gserviceaccount.com"
+    assert f"scripts/seeded_data_test_check.py --monitoring {monitor}" in _dry_run("m5-monitoring")
+    assert f"scripts/render_ledger.py --out-dir data/monitoring/ledger {ledger}" in _dry_run("ledger")
+    assert f"scripts/m3_check.py {ledger}" in _dry_run("m3-check")
+    catch_up = _dry_run("monitor-catch-up", "WEEKS=18")
+    assert "catch-up --weeks 18 --scorer-sa scorer@synthea-readmission-risk.iam.gserviceaccount.com --monitor-sa monitor@" in catch_up
+    bundle = "bundles/569fdab6c17d433542b2cd6b531ed8efc5677fb37b00a792d84f79803c6a0f72"
+    assert f"preflight --gold-dir data/gold/main_200k --bundle {bundle}" in _dry_run("monitor-preflight")
+    assert f"simulate --gold-dir data/gold/main_200k --bundle {bundle}" in _dry_run("monitor-simulate")
+
+
+def test_champion_bundle_dir_default_is_the_champion():
+    champion = json.loads((ROOT / "deploy" / "champion.json").read_text())
+    match = re.search(r"^CHAMPION_BUNDLE_DIR\s+\?=\s+bundles/(\S+)$", MAKEFILE.read_text(), re.MULTILINE)
+    assert match is not None and champion["bundle_uri"].endswith("/" + match.group(1))
 
 
 def test_gold_uri_default_matches_infra():

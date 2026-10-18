@@ -93,6 +93,7 @@ class ModelBundle:
     partition_of: pd.Series  # encounter_id -> "train" | "test" (object dtype, unique index), from split_assignment.csv
     model_bytes: bytes = field(repr=False)  # the sha256-verified model.pkl bytes; load_bundle_model unpickles THESE
     champion_sha256: str | None = None  # the champion pointer's pin (already proven equal by I2); None for --bundle
+    gold_fingerprint_definition: str | None = None  # manifest gold_fingerprint_definition (set by validate_bundle; v2 slice 7)
 
 
 # --------------------------------------------------------------------------------------------- integrity (I1-I5)
@@ -471,7 +472,17 @@ def validate_bundle(
         partition_of=partition_of,
         model_bytes=contents[MODEL_FILENAME],
         champion_sha256=expected_manifest_sha256,
+        gold_fingerprint_definition=definition,
     )
+
+
+def compute_gold_fingerprint(definition: str, gold: pd.DataFrame) -> str:
+    """The gold table's fingerprint under `definition` (pandas-csv-sha256-v1 or spark-rowhash-v1), computed exactly as
+    guard 6 does. ValueError for an unknown definition. Used by the monitoring tick (v2 slice 7) to check the predictions'
+    recorded fingerprint against the gold it reads labels from."""
+    if type(definition) is not str or definition not in _FINGERPRINT_DEFINITIONS:
+        raise ValueError(f"unknown gold_fingerprint definition {definition!r} (known: {sorted(_FINGERPRINT_DEFINITIONS)})")
+    return _FINGERPRINT_DEFINITIONS[definition](gold)
 
 
 def load_bundle_model(bundle: ModelBundle):
