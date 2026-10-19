@@ -82,6 +82,12 @@ jobs:
         with:
           workload_identity_provider: projects/271458030145/locations/global/workloadIdentityPools/github/providers/github-actions
           service_account: scorer@synthea-readmission-risk.iam.gserviceaccount.com
+      # Diagnostics for the L11 idempotency check (slice 7): hosted runners differ in CPU, and OpenBLAS picks its kernel
+      # and thread count per machine, which can change the last bits of a score. Read-only; prints to the log only.
+      - name: Record the runner's CPU and BLAS
+        run: |
+          lscpu | grep -E '^(Model name|CPU\(s\)|Flags)' | cut -c1-200
+          python -c "import json, numpy, threadpoolctl; print(json.dumps(threadpoolctl.threadpool_info(), indent=1)); numpy.show_runtime()"
       - name: Score
         id: score
         env:
