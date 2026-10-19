@@ -26,6 +26,10 @@ jobs:
   score:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    # One OpenBLAS kernel on every hosted runner (slice 7, L11): runners differ in CPU (measured: AMD EPYC 7763 -> Haswell,
+    # EPYC 9V74 -> SkylakeX), and the kernel choice changed the last bits of 3 of 156 scores. Haswell (AVX2) runs on both.
+    env:
+      OPENBLAS_CORETYPE: Haswell
     # id-token only here, at job level, on a dispatch-only workflow (PRD FR0.2).
     permissions:
       contents: read
