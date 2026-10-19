@@ -414,7 +414,7 @@ make m3-check                              # metric M3 from the Actions runs + s
 
 - **Never overlap** a laptop catch-up with an Actions tick: the catch-up refuses while `gh run list` shows a `monitor.yml` run that is not completed. `score.yml` shares the concurrency group; a `score.yml` run on a simulated date replaces that week's 7-day partition with a 30-day one, so the cohorts that need it report `incomplete_cohort` until the date is replayed.
 - **Cost:** about 10 BigQuery queries (10 MB minimum each) and 40 MB of GCS egress per tick; about CHF 1-2 for the whole slice.
-- **Reproducibility across runners:** hosted runners differ in CPU, and OpenBLAS picks its kernel per CPU, which changed the last bits of a few scores (slice 7, L11). The score jobs therefore set `OPENBLAS_CORETYPE=Haswell`, so every hosted tick is bit-identical. A laptop tick (macOS Accelerate) can still differ from a runner tick in the last bits; such replays are compared with a 1e-15 relative tolerance.
+- **Reproducibility across runners:** hosted runners differ in CPU, and on CPUs with AVX-512 numpy takes other SIMD code paths, which changed the last bits of 3 of 156 scores (slice 7, L11; max relative difference 9.3e-16). A replay on the same CPU class is bit-identical; across CPU classes, and between the laptop (macOS) and a runner, the same encounters, ranks, Top-N flags and monitoring metrics come back, and scores agree within 1e-15 relative. That is the idempotency criterion (owner decision 2026-10-19). Each score job logs its CPU and numpy's SIMD support.
 
 ## Teardown checklist
 
