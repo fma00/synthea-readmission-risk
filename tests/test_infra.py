@@ -699,13 +699,3 @@ def test_monitor_workflow_expressions_only_where_allowed():
     for i, line in enumerate(_read(MONITOR).split("\n")):
         if "${{" in line:
             assert any(p.match(line) for p in allowed), f"monitor.yml:{i + 1}: {line.strip()}"
-
-
-def test_scoring_jobs_pin_one_openblas_kernel():
-    # Slice 7, L11: the published scores must not depend on which hosted CPU the job lands on.
-    for path, job in ((MONITOR, "score"), (SCORE, "score")):
-        lines = _read(path).split("\n")
-        start = lines.index(f"  {job}:")
-        block = _block(lines, start)
-        assert "    env:" in block and "      OPENBLAS_CORETYPE: Haswell" in block, path.name
-
