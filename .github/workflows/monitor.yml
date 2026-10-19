@@ -16,6 +16,11 @@ on:
         description: "Optional YYYYMMDD on the simulated grid, at or before the clock head (replay); empty = the head"
         required: false
         type: string
+  schedule:
+    # Burn-in (accelerated cadence, PRD FR19/OQ1): every 30 minutes for one afternoon (UTC). Each run advances the
+    # simulated clock by one week; the ledger labels these ticks "burn-in (accelerated cadence)". A second PR replaces
+    # this line with the weekly cron once >= 5 consecutive scheduled ticks are green.
+    - cron: "7,37 13-18 * * *"
 
 permissions: {}
 
