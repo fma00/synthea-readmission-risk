@@ -20,6 +20,8 @@ on:
     # Burn-in (accelerated cadence, PRD FR19/OQ1): every 30 minutes for one afternoon (UTC). Each run advances the
     # simulated clock by one week; the ledger labels these ticks "burn-in (accelerated cadence)". A second PR replaces
     # this line with the weekly cron once >= 5 consecutive scheduled ticks are green.
+    # Registration note (2026-10-19): after the merge that added this cron, GitHub started no scheduled run for five
+    # slots, and a workflow disable/enable did not help; this commit re-pushes the file so the schedule is re-read.
     - cron: "7,37 13-18 * * *"
 
 permissions: {}
