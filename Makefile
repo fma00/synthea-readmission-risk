@@ -116,7 +116,7 @@ monitor-preflight: ## Offline: check the completeness guard accepts every simula
 monitor-simulate: ## Offline: score every simulated week and evaluate each cohort (the sanity check; L10's oracle)
 	$(BIN)/python scripts/monitor_tick.py simulate --gold-dir $(SCORE_GOLD_DIR) --bundle $(CHAMPION_BUNDLE_DIR) --out data/monitoring/simulation.csv
 
-monitor-catch-up: ## LIVE: run WEEKS monitoring ticks from the laptop (clean main only; no Actions tick may run)
+monitor-catch-up: ## LIVE: run WEEKS monitoring ticks from the laptop (clean main only; no Actions tick may run); refused Mon 00:00-Thu 06:00 UTC (weekly retry slots)
 	$(BIN)/python scripts/monitor_tick.py catch-up --weeks $(WEEKS) --scorer-sa $(SCORER_SA) --monitor-sa $(MONITOR_SA)
 
 ledger: ## Render the run ledger and badge from BigQuery into LEDGER_OUT, as the ledger-reader SA
@@ -125,7 +125,7 @@ ledger: ## Render the run ledger and badge from BigQuery into LEDGER_OUT, as the
 m3-check: ## Check metric M3 (>= 5 consecutive green timer-dispatched burn-in ticks, then a scheduled weekly one), as the ledger-reader SA; needs gh
 	$(BIN)/python scripts/m3_check.py --impersonate-service-account $(LEDGER_SA)
 
-burn-in-timer: ## LIVE: dispatch BURN_IN_TICKS burn-in ticks of monitor.yml, one every BURN_IN_INTERVAL minutes (laptop; needs gh)
+burn-in-timer: ## LIVE: dispatch BURN_IN_TICKS burn-in ticks of monitor.yml, one every BURN_IN_INTERVAL minutes (laptop; needs gh); refuses Mon-Wed UTC (weekly retry slots)
 	$(CAFFEINATE) $(BIN)/python scripts/burn_in_timer.py --ticks $(BURN_IN_TICKS) --interval-minutes $(BURN_IN_INTERVAL)
 
 setup-runtime: ## Recreate .venv-dataproc: Python 3.12 + the Dataproc runtime 3.0 mirror (requirements-dataproc-3.0.txt)

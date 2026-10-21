@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -36,6 +37,8 @@ app = typer.Typer(add_completion=False, rich_markup_mode=None, pretty_exceptions
 
 EXIT_REFUSED, EXIT_FAILED, EXIT_NOT_RECORDED = 1, 2, 4
 MAX_CATCH_UP_WEEKS = 20
+REPO = "fma00/synthea-readmission-risk"
+GROUP_WORKFLOWS = ("monitor.yml", "score.yml")  # they share the concurrency group "score"
 
 
 def _in_actions() -> bool:
@@ -81,19 +84,26 @@ def require_clean_main(run=None) -> None:
 
 def require_no_running_workflow(run=None) -> None:
     run = run or subprocess.run
-    done = run(["gh", "run", "list", "--workflow", "monitor.yml", "--json", "status", "--limit", "20"],
-               capture_output=True, text=True, check=False)  # fmt: skip
-    if done.returncode != 0:
-        raise ValueError(f"gh run list failed (needed to rule out an overlapping Actions tick): {done.stderr.strip()}")
-    busy = [r["status"] for r in json.loads(done.stdout or "[]") if r.get("status") != "completed"]
-    if busy:
-        raise ValueError(f"a monitor.yml run is {busy[0]}; never catch up while an Actions tick may run")
+    for workflow in GROUP_WORKFLOWS:
+        done = run(["gh", "run", "list", "-R", REPO, "--workflow", workflow, "--json", "status", "--limit", "20"],
+                   capture_output=True, text=True, check=False)  # fmt: skip
+        if done.returncode != 0:
+            raise ValueError(f"gh run list failed (needed to rule out an overlapping Actions tick): {done.stderr.strip()}")
+        busy = [r["status"] for r in json.loads(done.stdout or "[]") if r.get("status") != "completed"]
+        if busy:
+            raise ValueError(f"a {workflow} run is {busy[0]}; never catch up while an Actions tick may run")
 
 
 def _report_clock(result: ClockResult) -> int:
+    if result.error is None and result.skip_reason:
+        print(f"skip: {result.skip_reason}")
+        _append("GITHUB_OUTPUT", "skip=true\n")
+        _append("GITHUB_STEP_SUMMARY", "## Monitoring clock (simulated)\n\n" + _table(
+            [("event", "schedule"), ("status", "skipped"), ("reason", result.skip_reason)]))  # fmt: skip
+        return 0
     if result.error is None:
         print(f"sim_date {result.sim_date:%Y%m%d} cadence {result.cadence}")
-        _append("GITHUB_OUTPUT", f"sim_date={result.sim_date:%Y%m%d}\ncadence={result.cadence}\n")
+        _append("GITHUB_OUTPUT", f"sim_date={result.sim_date:%Y%m%d}\ncadence={result.cadence}\nskip=false\n")
         _append("GITHUB_STEP_SUMMARY", "## Monitoring clock (simulated)\n\n" + _table(
             [("sim date", result.sim_date.isoformat()), ("cadence", result.cadence), ("status", "resolved")]))  # fmt: skip
         return 0
@@ -180,6 +190,15 @@ def _check_catch_up_args(weeks: int) -> None:
         raise ValueError("catch-up runs on the laptop only")
     if type(weeks) is not int or not 1 <= weeks <= MAX_CATCH_UP_WEEKS:
         raise ValueError(f"--weeks must be in [1, {MAX_CATCH_UP_WEEKS}]; got {weeks}")
+    _check_catch_up_window()
+
+
+def _check_catch_up_window() -> None:
+    """The weekly retry slots fire Monday-Wednesday; six Thursday hours cover a delayed Wednesday 23:17 slot."""
+    now = datetime.now(UTC)
+    if now.weekday() in (0, 1, 2) or (now.weekday() == 3 and now.hour < 6):
+        raise ValueError("catch-up does not run from Monday 00:00 to Thursday 06:00 (UTC): the weekly retry slots (and "
+                         "their delayed runs) may be active")  # fmt: skip
 
 
 @app.command("catch-up")
@@ -189,7 +208,7 @@ def catch_up(
     monitor_sa: Annotated[str, typer.Option(help="The monitor service account.")],
     config: Annotated[Path, typer.Option(help="The monitoring config.")] = DEFAULT_CONFIG_PATH,
 ) -> None:
-    """Laptop only: run N ticks (clock as monitor, score as scorer, evaluate as monitor), cadence catch_up."""
+    """Laptop only: run N ticks (clock as monitor, score as scorer, evaluate as monitor), cadence catch_up. Refused from Monday 00:00 to Thursday 06:00 UTC (the weekly retry slots)."""
     from readmission_risk.warehouse.run import BigQueryRunRequest, score_to_bigquery
 
     try:
@@ -201,6 +220,12 @@ def catch_up(
         print(f"ERROR: {exc}", file=sys.stderr)
         raise typer.Exit(code=EXIT_REFUSED) from None
     for _ in range(weeks):
+        try:  # again before every week: a long catch-up must not run into a retry slot or an Actions tick
+            _check_catch_up_window()
+            require_no_running_workflow()
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            raise typer.Exit(code=EXIT_REFUSED) from None
         gcp.configure(impersonate_service_account=monitor_sa)
         clock_result = prepare_tick(ClockRequest("laptop", None, None, config_path=config))
         if clock_result.error is not None:

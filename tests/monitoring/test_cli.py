@@ -6,7 +6,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -45,6 +45,29 @@ def _env(monkeypatch, tmp_path):
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
 
 
+THURSDAY = datetime(2026, 10, 22, 10, 0, tzinfo=UTC)
+
+
+@pytest.fixture(scope="module")
+def timer():
+    return _load("burn_in_timer")
+
+
+@pytest.fixture(autouse=True)
+def wall_clock(cli, timer, monkeypatch):
+    """Part 2's Monday-Wednesday guards read the wall clock; every test runs on a Thursday unless it moves `state["now"]`."""
+    state = {"now": THURSDAY}
+
+    class Fixed(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return state["now"] if tz is None else state["now"].astimezone(tz)
+
+    monkeypatch.setattr(cli, "datetime", Fixed)
+    monkeypatch.setattr(timer, "_now", lambda: state["now"])
+    return state
+
+
 def _record(**changes):
     record = new_record("m" * 32, pd.Timestamp("2026-10-20", tz="UTC").to_pydatetime(), "schedule")
     for key, value in {"status": "succeeded", "sim_date": date(2023, 8, 14), "cadence": "burn_in", "verdict": "ok",
@@ -66,7 +89,7 @@ def test_clock_resolved_writes_outputs(cli, monkeypatch, tmp_path):
     assert out.exit_code == 0, out.output
     request = seen[0]
     assert (request.event_name, request.schedule, request.requested, request.requested_cadence) == ("workflow_dispatch", None, None, "burn_in")
-    assert (tmp_path / "output.txt").read_text() == "sim_date=20230821\ncadence=burn_in\n"
+    assert (tmp_path / "output.txt").read_text() == "sim_date=20230821\ncadence=burn_in\nskip=false\n"
     assert "Monitoring clock (simulated)" in (tmp_path / "summary.md").read_text()
 
 
@@ -137,6 +160,7 @@ def test_catch_up_refuses_in_actions_out_of_range_and_running_workflow(cli, monk
         class Done:
             returncode, stderr = 0, ""
             stdout = json.dumps([{"status": "in_progress"}]) if argv[0] == "gh" else ""
+            assert argv[0] != "gh" or argv[3:7] == ["-R", "fma00/synthea-readmission-risk", "--workflow", "monitor.yml"]
 
         if argv[:2] == ["git", "rev-parse"]:
             Done.stdout = "abc\n"
@@ -149,8 +173,9 @@ def test_catch_up_refuses_in_actions_out_of_range_and_running_workflow(cli, monk
 
 def test_catch_up_switches_identities_monitor_scorer_monitor(cli, monkeypatch):
     calls = []
+    running_checks = []
     monkeypatch.setattr(cli, "require_clean_main", lambda: None)
-    monkeypatch.setattr(cli, "require_no_running_workflow", lambda: None)
+    monkeypatch.setattr(cli, "require_no_running_workflow", lambda: running_checks.append(1))
     monkeypatch.setattr(cli.gcp, "configure", lambda impersonate_service_account: calls.append(impersonate_service_account))
     monkeypatch.setattr(cli, "prepare_tick", lambda request: calls.append(("clock", request.event_name)) or ClockResult(date(2023, 4, 17), "catch_up", None, None, None, True))
 
@@ -163,10 +188,83 @@ def test_catch_up_switches_identities_monitor_scorer_monitor(cli, monkeypatch):
     monkeypatch.setattr(run_module, "score_to_bigquery", lambda request: calls.append(("score", request.window_days, request.top_n)) or Scored())
     monkeypatch.setattr(cli, "evaluate_tick", lambda request: calls.append(("evaluate", request.cadence, request.score_result))
                         or EvaluateResult(_record(cadence="catch_up"), None, None, True))  # fmt: skip
-    out = CliRunner().invoke(cli.app, ["catch-up", "--weeks", "1", "--scorer-sa", "s@x.iam.gserviceaccount.com", "--monitor-sa", "m@x.iam.gserviceaccount.com"])
+    out = CliRunner().invoke(cli.app, ["catch-up", "--weeks", "2", "--scorer-sa", "s@x.iam.gserviceaccount.com", "--monitor-sa", "m@x.iam.gserviceaccount.com"])
     assert out.exit_code == 0, out.output
     assert calls == ["m@x.iam.gserviceaccount.com", ("clock", "laptop"), "s@x.iam.gserviceaccount.com", ("score", 7, 10),
-                     "m@x.iam.gserviceaccount.com", ("evaluate", "catch_up", "success")]  # fmt: skip
+                     "m@x.iam.gserviceaccount.com", ("evaluate", "catch_up", "success")] * 2  # fmt: skip
+    assert len(running_checks) == 3  # once at start, then before every week
+
+
+def test_require_no_running_workflow_checks_both_workflows_with_repo(cli):
+    seen = []
+
+    def run(argv, **kwargs):
+        seen.append(argv)
+
+        class Done:
+            returncode, stderr = 0, ""
+            stdout = json.dumps([{"status": "in_progress" if "score.yml" in argv else "completed"}])
+
+        return Done()
+
+    with pytest.raises(ValueError, match=r"a score\.yml run is in_progress"):
+        cli.require_no_running_workflow(run)
+    assert [a[3:7] for a in seen] == [["-R", "fma00/synthea-readmission-risk", "--workflow", "monitor.yml"],
+                                       ["-R", "fma00/synthea-readmission-risk", "--workflow", "score.yml"]]  # fmt: skip
+
+
+def test_catch_up_refuses_mon_wed(cli, monkeypatch, wall_clock):
+    wall_clock["now"] = datetime(2026, 10, 27, 10, 0, tzinfo=UTC)  # Tuesday
+    monkeypatch.setattr(cli, "require_clean_main", lambda: pytest.fail("the window refuses before the git checks"))
+    monkeypatch.setattr(cli, "prepare_tick", lambda request: pytest.fail("no tick on a blocked day"))
+    out = CliRunner().invoke(cli.app, ["catch-up", "--weeks", "1", "--scorer-sa", "s@x.iam.gserviceaccount.com", "--monitor-sa", "m@x.iam.gserviceaccount.com"])
+    assert out.exit_code == 1 and "Monday 00:00 to Thursday 06:00" in out.stderr
+
+
+def test_catch_up_window_boundaries(cli, wall_clock):
+    for when, refused in ((datetime(2026, 10, 26, 0, 0, tzinfo=UTC), True), (datetime(2026, 10, 28, 23, 59, tzinfo=UTC), True),
+                          (datetime(2026, 10, 29, 5, 59, tzinfo=UTC), True), (datetime(2026, 10, 29, 6, 0, tzinfo=UTC), False),
+                          (datetime(2026, 11, 1, 23, 59, tzinfo=UTC), False)):  # fmt: skip
+        wall_clock["now"] = when
+        if refused:
+            with pytest.raises(ValueError, match="Monday 00:00 to Thursday 06:00"):
+                cli._check_catch_up_window()
+        else:
+            cli._check_catch_up_window()
+
+
+def test_catch_up_rechecks_the_window_each_week(cli, monkeypatch, wall_clock):
+    wall_clock["now"] = datetime(2026, 10, 25, 23, 50, tzinfo=UTC)  # Sunday evening
+    clocks = []
+    monkeypatch.setattr(cli, "require_clean_main", lambda: None)
+    monkeypatch.setattr(cli, "require_no_running_workflow", lambda: None)
+    monkeypatch.setattr(cli.gcp, "configure", lambda impersonate_service_account: None)
+    monkeypatch.setattr(cli, "prepare_tick", lambda request: clocks.append(1) or ClockResult(date(2023, 4, 17), "catch_up", None, None, None, True))
+
+    class Scored:
+        error = None
+        record = type("R", (), {"scoring_run_id": "r1", "status": "succeeded"})()
+
+    import readmission_risk.warehouse.run as run_module
+
+    def evaluate(request):
+        wall_clock["now"] = datetime(2026, 10, 26, 0, 5, tzinfo=UTC)  # the first tick ran into Monday
+        return EvaluateResult(_record(cadence="catch_up"), None, None, True)
+
+    monkeypatch.setattr(run_module, "score_to_bigquery", lambda request: Scored())
+    monkeypatch.setattr(cli, "evaluate_tick", evaluate)
+    out = CliRunner().invoke(cli.app, ["catch-up", "--weeks", "3", "--scorer-sa", "s@x.iam.gserviceaccount.com", "--monitor-sa", "m@x.iam.gserviceaccount.com"])
+    assert out.exit_code == 1 and "Monday 00:00 to Thursday 06:00" in out.stderr and clocks == [1]
+
+
+def test_clock_skip_writes_skip_output(cli, monkeypatch, tmp_path):
+    result = ClockResult(None, None, None, None, None, True, skip_reason="this week's weekly tick already succeeded (u1)")
+    monkeypatch.setattr(cli, "prepare_tick", lambda request: result)
+    out = CliRunner().invoke(cli.app, ["clock"])
+    assert out.exit_code == 0 and "skip: this week's weekly tick already succeeded (u1)" in out.stdout
+    assert (tmp_path / "output.txt").read_text() == "skip=true\n"
+    summary = (tmp_path / "summary.md").read_text()
+    assert "| status | skipped |" in summary and "| reason | this week's weekly tick already succeeded (u1) |" in summary
 
 
 # ---------------------------------------------------------------------------------------------------------- M3
@@ -254,7 +352,10 @@ def test_m3_collect_lists_events_separately_and_bounds_the_views(m3):
         assert args[:2] == ["-R", REPO]
         if args[2:4] == ["run", "list"]:
             assert args[args.index("--limit") + 1] == "1000"
-            return dispatch if args[args.index("--event") + 1] == "workflow_dispatch" else schedule
+            if args[args.index("--event") + 1] == "workflow_dispatch":
+                return dispatch
+            assert args[args.index("--created") + 1] == ">=2026-10-20"  # the streak end's date
+            return schedule
         return {"attempt": 1, "jobs": _STARTED}
 
     burn_in, scheduled, streak, weekly = m3.collect(rows, 1000, gh_json)
@@ -266,11 +367,6 @@ def test_m3_collect_lists_events_separately_and_bounds_the_views(m3):
 
 
 # ---------------------------------------------------------------------------------------------------- burn-in timer
-@pytest.fixture(scope="module")
-def timer():
-    return _load("burn_in_timer")
-
-
 def _outcome(kind, n=1):
     from readmission_risk.monitoring.burn_in import TickOutcome
 
@@ -369,3 +465,21 @@ def test_timer_wraps_gh_with_retries(timer, monkeypatch):
     monkeypatch.setattr(timer.time, "sleep", lambda s: None)
     out = CliRunner().invoke(timer.app, [])
     assert out.exit_code == 0 and seen["reply"] == "ok" and failures["left"] == 0
+
+
+def test_m3_skip_runs_are_neutral(m3):
+    rows = _rows({**{i: "burn_in" for i in range(1, 6)}, 7: "weekly"})
+    skipped_jobs = [{"name": "clock", "startedAt": "2026-10-26T00:20Z"}, {"name": "score", "conclusion": "skipped"}]
+    for attempt in (1, 2):
+        assert m3.classify(_run(6), skipped_jobs, attempt, rows).kind == "skipped"
+    skip = m3.classify(_run(6), skipped_jobs, 1, rows)
+    met, evidence = _met(m3, _verdicts(m3, rows, range(1, 6)), [skip, *_verdicts(m3, rows, [7])])
+    assert met and evidence[-1].run["url"] == "u7"
+    assert m3.classify(_run(8), [{"name": "score", "conclusion": "success"}], 1, rows).kind == "red"  # success without a row, not skipped
+
+
+def test_timer_refuses_mon_wed_at_start(timer, monkeypatch, wall_clock):
+    wall_clock["now"] = datetime(2026, 10, 27, 10, 0, tzinfo=UTC)  # Tuesday
+    monkeypatch.setattr(timer, "_gh", lambda args: pytest.fail("no gh call on a blocked weekday"))
+    out = CliRunner().invoke(timer.app, [])
+    assert out.exit_code == 2 and "resume on Thursday" in out.stderr

@@ -17,7 +17,8 @@ HEADER = (
     "synthetic 200,000-patient population; the wall-clock time is when the tick ran. Ticks labelled catch-up (laptop) "
     "were run by the owner to fill the first weeks; ticks labelled burn-in ran at an accelerated cadence, either fired "
     "by GitHub's scheduler (scheduled) or, because that scheduler dropped most slots, dispatched by a timer on the "
-    "owner's laptop (dispatched); after the burn-in, weekly ticks are scheduled once a week. This ledger shows "
+    "owner's laptop (dispatched); weekly ticks are scheduled, with retry slots that normally stop once the week's tick "
+    "has succeeded. This ledger shows "
     "repeatability and "
     "idempotency, not weeks of unattended operation. The monitored discharges come from a gold table built with hindsight "
     "(deaths and later stays shape which discharges are included), so this is a demonstration of the monitoring "
@@ -123,7 +124,9 @@ def last_tick_badge(monitoring: pd.DataFrame, *, cron: str | None) -> dict:
     if cron is None:
         message += " · dispatch only"
     else:
-        scheduled = ordered[ordered["trigger"] == "schedule"]
+        # The newest succeeded weekly tick: retry slots that skip, failed attempts and the 2026-10-19/20 scheduled
+        # burn-in rows do not refresh "stale after".
+        scheduled = ordered[(ordered["trigger"] == "schedule") & (ordered["cadence"] == "weekly") & (ordered["status"] == "succeeded")]
         if scheduled.empty:
             message += " · schedule not started"
         else:

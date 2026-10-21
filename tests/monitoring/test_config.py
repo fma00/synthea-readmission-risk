@@ -72,7 +72,7 @@ def test_read_refuses_non_json_and_passes_missing_file(tmp_path):
 
 def test_cadence_for():
     config = _parse()
-    assert mc.cadence_for("schedule", "17 6 * * 1", config) == "weekly"
+    assert mc.cadence_for("schedule", mc.WEEKLY_CRON, config) == "weekly"
     assert mc.cadence_for("workflow_dispatch", "", config) == "dispatch"
     assert mc.cadence_for("laptop", None, config) == "catch_up"
     for retired in ("7,37 13-18 * * *", "7 13-22 * * *"):  # the burn-in crons, retired 2026-10-20
@@ -89,7 +89,7 @@ def test_cadence_for_requested_cadence():
         assert mc.cadence_for("workflow_dispatch", None, config, plain) == "dispatch"
     with pytest.raises(ValueError, match="must be dispatch or burn_in; got 'weekly'"):
         mc.cadence_for("workflow_dispatch", None, config, "weekly")
-    for event, schedule in (("schedule", "17 6 * * 1"), ("laptop", None)):
+    for event, schedule in (("schedule", mc.WEEKLY_CRON), ("laptop", None)):
         with pytest.raises(ValueError, match="only on workflow_dispatch"):
             mc.cadence_for(event, schedule, config, "burn_in")
 
@@ -106,7 +106,9 @@ def test_on_grid_and_period_of():
     assert mc.on_grid(config, date(2023, 4, 17)) and mc.on_grid(config, date(2026, 9, 7))
     assert not mc.on_grid(config, date(2023, 4, 18)) and not mc.on_grid(config, date(2023, 4, 10))
     assert not mc.on_grid(config, date(2026, 9, 14))
-    assert mc.period_of("17 6 * * 1") == timedelta(days=7)
+    assert mc.WEEKLY_CRON == "17 * * * 1-3" and mc.period_of(mc.WEEKLY_CRON) == timedelta(days=7)
+    with pytest.raises(ValueError, match="unknown monitoring cron"):
+        mc.period_of("17 6 * * 1")  # the single Monday slot, replaced by the retry slots (2026-10-21)
     for unknown in ("* * * * *", "7,37 13-18 * * *"):
         with pytest.raises(ValueError, match="unknown monitoring cron"):
             mc.period_of(unknown)

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import numpy as np
 import pytest
 
 from readmission_risk.monitoring import tick
+from readmission_risk.monitoring.config import WEEKLY_CRON
 from readmission_risk.monitoring.tick import (
     ClockRequest,
     EvaluateRequest,
@@ -163,10 +164,10 @@ def test_no_client_is_not_recorded_and_never_raises():
     assert clock.recorded is False and clock.sim_date is None
 
 
-def _clock(world, **kwargs):
+def _clock(world, now=None, **kwargs):
     defaults = {"event_name": "laptop", "schedule": None, "requested": None,
                 "config_path": ROOT / "deploy" / "monitoring.json", "champion_path": ROOT / "deploy" / "champion.json"}  # fmt: skip
-    return prepare_tick(ClockRequest(**{**defaults, **kwargs}), client_factory=lambda: world.fake)
+    return prepare_tick(ClockRequest(**{**defaults, **kwargs}), client_factory=lambda: world.fake, now=now)
 
 
 def test_prepare_tick_cadences_and_head():
@@ -174,7 +175,7 @@ def test_prepare_tick_cadences_and_head():
     world.succeed(CONFIG.first_sim_date)
     assert (_clock(world).sim_date, _clock(world).cadence) == (CONFIG.first_sim_date + timedelta(days=7), "catch_up")
     assert _clock(world, event_name="workflow_dispatch", requested_cadence="burn_in").cadence == "burn_in"
-    assert _clock(world, event_name="schedule", schedule="17 6 * * 1").cadence == "weekly"
+    assert _clock(world, event_name="schedule", schedule=WEEKLY_CRON).cadence == "weekly"
     replay = _clock(world, event_name="workflow_dispatch", requested=f"{CONFIG.first_sim_date:%Y%m%d}")
     assert (replay.sim_date, replay.cadence) == (CONFIG.first_sim_date, "dispatch")
     assert replay.head == _clock(world).head == CONFIG.first_sim_date + timedelta(days=7)  # a replay never moves the head
@@ -186,7 +187,7 @@ def test_prepare_tick_cadences_and_head():
     [
         {"event_name": "schedule", "schedule": "*/5 * * * *"},
         {"event_name": "schedule", "schedule": "7,37 13-18 * * *"},  # the retired burn-in cron
-        {"event_name": "schedule", "schedule": "17 6 * * 1", "requested_cadence": "burn_in"},
+        {"event_name": "schedule", "schedule": WEEKLY_CRON, "requested_cadence": "burn_in"},
         {"event_name": "workflow_dispatch", "requested_cadence": "weekly"},
         {"event_name": "workflow_dispatch", "requested": "20230418"},
         {"event_name": "workflow_dispatch", "requested": "2023-04-17"},
@@ -217,3 +218,70 @@ def test_prepare_tick_refuses_a_champion_mismatch(tmp_path):
     world = World()
     result = _clock(world, champion_path=champion)
     assert "must update the monitoring config" in str(result.error) and world.inserted[0]["status"] == "refused"
+
+
+# ---------------------------------------------------------------- the weekly retry slots' skip (Part 2, 2026-10-21)
+TUESDAY = datetime(2026, 10, 27, 10, 0, tzinfo=UTC)
+
+
+def _weekly_row(status="succeeded", cadence="weekly", trigger="schedule", started="2026-10-26T00:20:00Z", i=1):
+    return {"monitoring_run_id": f"w{i}", "status": status, "cadence": cadence, "trigger": trigger,
+            "model_bundle_id": CONFIG.model_bundle_id, "started_at": datetime.fromisoformat(started.replace("Z", "+00:00")),
+            "github_run_url": f"https://github.com/o/r/actions/runs/{i}", "sim_date": None}  # fmt: skip
+
+
+def test_weekly_skip_returns_no_row():
+    world = World()
+    world.succeed(CONFIG.first_sim_date)
+    world.ticks.append(_weekly_row())
+    result = _clock(world, now=lambda: TUESDAY, event_name="schedule", schedule=WEEKLY_CRON)
+    assert result.skip_reason == "this week's weekly tick already succeeded (https://github.com/o/r/actions/runs/1)"
+    assert (result.sim_date, result.cadence, result.error, result.recorded) == (None, None, None, True)
+    assert world.inserted == []
+
+
+def test_weekly_skip_does_not_apply_to_dispatch_or_burn_in():
+    world = World()
+    world.succeed(CONFIG.first_sim_date)
+    world.ticks.append(_weekly_row())
+    for kwargs in ({"event_name": "workflow_dispatch"}, {"event_name": "workflow_dispatch", "requested_cadence": "burn_in"}, {}):
+        result = _clock(world, now=lambda: TUESDAY, **kwargs)
+        assert result.skip_reason is None and result.sim_date == CONFIG.first_sim_date + timedelta(days=7)
+
+
+def test_weekly_tick_runs_when_this_week_has_no_attempt():
+    world = World()
+    world.succeed(CONFIG.first_sim_date)
+    world.ticks.append(_weekly_row(started="2026-10-19T00:20:00Z"))  # last week's tick
+    result = _clock(world, now=lambda: TUESDAY, event_name="schedule", schedule=WEEKLY_CRON)
+    assert result.skip_reason is None and result.cadence == "weekly"
+    assert result.sim_date == CONFIG.first_sim_date + timedelta(days=7)
+
+
+def _mismatched_champion(tmp_path):
+    champion = tmp_path / "champion.json"
+    champion.write_text('{"bundle_uri": "gs://b/' + "0" * 64 + '", "sha256": "' + "0" * 64 + '"}\n')
+    return champion
+
+
+def test_weekly_skip_precedes_champion_and_cadence_checks(tmp_path):
+    world = World()
+    world.ticks += [_weekly_row(status="refused", cadence=None, i=i) for i in range(3)]
+    result = _clock(world, now=lambda: TUESDAY, event_name="schedule", schedule="0 0 * * *", champion_path=_mismatched_champion(tmp_path))
+    assert result.skip_reason.startswith("retry budget spent") and result.error is None and world.inserted == []
+
+
+def test_budget_counts_champion_mismatch_refusals(tmp_path, monkeypatch):
+    for key, value in {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "schedule", "GITHUB_SERVER_URL": "https://github.com",
+                       "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "5", "GITHUB_SHA": "abc"}.items():  # fmt: skip
+        monkeypatch.setenv(key, value)
+    world = World()
+    world.ticks += [_weekly_row(status="refused", cadence=None, i=i) for i in range(2)]
+    champion = _mismatched_champion(tmp_path)
+    third = _clock(world, now=lambda: TUESDAY, event_name="schedule", schedule=WEEKLY_CRON, champion_path=champion)
+    assert third.skip_reason is None and "must update the monitoring config" in str(third.error)
+    [row] = world.inserted
+    assert (row["trigger"], row["status"], row["cadence"], row["model_bundle_id"]) == ("schedule", "refused", None, CONFIG.model_bundle_id)
+    world.ticks.append(row)  # World does not feed inserts back into its tick rows
+    fourth = _clock(world, now=lambda: TUESDAY, event_name="schedule", schedule=WEEKLY_CRON, champion_path=champion)
+    assert fourth.skip_reason.startswith("retry budget spent") and len(world.inserted) == 1
