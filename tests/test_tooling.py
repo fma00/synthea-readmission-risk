@@ -28,7 +28,7 @@ EXPECTED_TARGETS = {
     "help", "setup", "hooks", "lint", "test", "pre-commit", "train", "export", "export-portable", "score", "score-bq", "m5-check",
     "setup-runtime", "test-runtime", "lock-main", "lock-dev", "lock-runtime", "tf-validate", "spark-zip", "generate-vm", "bigjoin-batch",
     "check-population", "gate", "prereg-lock", "prereg-phase-b",
-    "m5-monitoring", "gold-200k", "monitor-preflight", "monitor-simulate", "monitor-catch-up", "ledger", "m3-check",
+    "m5-monitoring", "gold-200k", "monitor-preflight", "monitor-simulate", "monitor-catch-up", "ledger", "m3-check", "burn-in-timer",
 }
 # Every variable the Makefile reads, plus make's own propagation variables: a pytest started by `make test X=y` (or a
 # shell exporting VENV=...) must not change what these tests see.
@@ -36,7 +36,7 @@ MAKEFILE_VARIABLES = ("PYTHON", "PYTHON312", "VENV", "RUNTIME_VENV", "LOCK_VENV"
                       "REFERENCE_DATE", "TEST_START_DATE", "EXPERIMENT", "RUN_DATE", "TRAIN_EXPERIMENT", "TRAIN_ARGS", "SCORE_ARGS",
                       "EXPORT_MODEL", "EXPORT_ARGS", "SOURCE_BUNDLE", "PORTABLE_ARGS", "TERRAFORM", "GOLD_URI", "SCORER_SA", "RUN", "JDK_TARBALL", "GEN_ARGS", "CHECK_ARGS", "GATE_ARGS", "LOCK_ARGS", "PHASE_B_ARGS",
                       "BATCH_ARGS", "M5_RUN_DATE", "SCORE_GOLD_DIR", "MONITOR_SA", "LEDGER_SA", "WEEKS", "CHAMPION_BUNDLE_DIR",
-                      "LEDGER_OUT")
+                      "LEDGER_OUT", "BURN_IN_TICKS", "BURN_IN_INTERVAL", "CAFFEINATE")
 SCRUBBED_ENV = ("MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "GNUMAKEFLAGS", "MAKEFILES", *MAKEFILE_VARIABLES)
 EXPECTED_PRE_COMMIT = [
     "repos:",
@@ -146,6 +146,9 @@ def test_monitoring_targets_use_their_own_service_accounts():
     assert f"scripts/seeded_data_test_check.py --monitoring {monitor}" in _dry_run("m5-monitoring")
     assert f"scripts/render_ledger.py --out-dir data/monitoring/ledger {ledger}" in _dry_run("ledger")
     assert f"scripts/m3_check.py {ledger}" in _dry_run("m3-check")
+    # containment only: the caffeinate -i prefix exists on macOS and not on CI's Linux
+    assert "scripts/burn_in_timer.py --ticks 6 --interval-minutes 20" in _dry_run("burn-in-timer", "BURN_IN_TICKS=6", "BURN_IN_INTERVAL=20")
+    assert "scripts/burn_in_timer.py --ticks 5 --interval-minutes 30" in _dry_run("burn-in-timer")
     catch_up = _dry_run("monitor-catch-up", "WEEKS=18")
     assert "catch-up --weeks 18 --scorer-sa scorer@synthea-readmission-risk.iam.gserviceaccount.com --monitor-sa monitor@" in catch_up
     bundle = "bundles/569fdab6c17d433542b2cd6b531ed8efc5677fb37b00a792d84f79803c6a0f72"

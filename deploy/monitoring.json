@@ -6,6 +6,6 @@
   "step_days": 7,
   "window_days": 7,
   "top_n": 10,
-  "crons": {"burn_in": "7,37 13-18 * * *", "weekly": "17 6 * * 1"},
+  "crons": {"weekly": "17 6 * * 1"},
   "epoch": "20261018"
 }

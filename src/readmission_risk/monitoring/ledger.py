@@ -15,18 +15,25 @@ from .config import MonitoringConfig, period_of
 HEADER = (
     "**Simulated clock.** Each tick advances a simulated date by one week through the held-out 2023–2026 discharges of a "
     "synthetic 200,000-patient population; the wall-clock time is when the tick ran. Ticks labelled catch-up (laptop) "
-    "were run by the owner to fill the first weeks; ticks labelled burn-in (accelerated cadence) are scheduled every 30 "
-    "or 60 minutes on a burn-in afternoon; weekly ticks are scheduled on Mondays. This ledger shows repeatability and "
+    "were run by the owner to fill the first weeks; ticks labelled burn-in ran at an accelerated cadence, either fired "
+    "by GitHub's scheduler (scheduled) or, because that scheduler dropped most slots, dispatched by a timer on the "
+    "owner's laptop (dispatched); after the burn-in, weekly ticks are scheduled once a week. This ledger shows "
+    "repeatability and "
     "idempotency, not weeks of unattended operation. The monitored discharges come from a gold table built with hindsight "
     "(deaths and later stays shape which discharges are included), so this is a demonstration of the monitoring "
     "mechanics, not an estimate of live calibration. The exact Poisson interval treats readmissions as independent "
     "events; patients with several stays in a cohort make it somewhat too narrow. Synthetic data, not for clinical use. "
     "Source of truth: BigQuery `serving.scoring_runs` and `serving.monitoring`."
 )
-CADENCE_LABELS = {
-    "burn_in": "burn-in (accelerated cadence)", "weekly": "weekly", "dispatch": "dispatch", "catch_up": "catch-up (laptop)",
-}  # fmt: skip
+CADENCE_LABELS = {"weekly": "weekly", "dispatch": "dispatch", "catch_up": "catch-up (laptop)"}
 _CRON_RE = re.compile(r'^\s*-\s*cron:\s*"([^"]+)"\s*$', re.MULTILINE)
+
+
+def cadence_label(cadence, trigger) -> str:
+    """burn_in is labelled by how it was triggered: GitHub's scheduler (2026-10-19/20) or a dispatch (the laptop timer)."""
+    if cadence == "burn_in":
+        return "burn-in (scheduled, accelerated)" if trigger == "schedule" else "burn-in (dispatched, accelerated)"
+    return CADENCE_LABELS.get(cadence, "-")
 
 
 def _missing(value) -> bool:
@@ -79,7 +86,7 @@ def render_ledger(monitoring: pd.DataFrame, scoring_runs: pd.DataFrame, *, confi
             ratio = f"{_num(row['oe_ratio'], 3)} [{_num(row['oe_ci_low'], 3)}, {_num(row['oe_ci_high'], 3)}]"
         oe = "-" if _missing(row.get("observed")) else f"{row['observed']} / {_num(row['expected'], 1)}"
         cells = [
-            _wall(row["started_at"]), CADENCE_LABELS.get(row.get("cadence"), "-"), _day(row.get("sim_date")), status,
+            _wall(row["started_at"]), cadence_label(row.get("cadence"), row.get("trigger")), _day(row.get("sim_date")), status,
             _text(row.get("verdict")), ratio, oe, _text(row.get("n_matured")), _num(row.get("auc"), 3),
             _num(row.get("expected_immature"), 1), _link(row.get("github_run_url")),
         ]  # fmt: skip
@@ -101,7 +108,7 @@ def cron_state(workflow_text: str, config: MonitoringConfig) -> str | None:
     if len(crons) > 1:
         raise ValueError(f"monitor.yml has {len(crons)} cron lines; expected at most one")
     (cron,) = crons
-    if cron not in (config.crons["burn_in"], config.crons["weekly"]):
+    if cron not in (config.crons["weekly"],):
         raise ValueError(f"monitor.yml's cron {cron!r} is not one of deploy/monitoring.json's")
     return cron
 

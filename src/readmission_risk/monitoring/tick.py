@@ -61,6 +61,7 @@ class ClockRequest:
     requested: str | None  # dispatch input / --sim-date ("" -> None)
     config_path: Path = DEFAULT_CONFIG_PATH
     champion_path: Path = DEFAULT_CHAMPION_PATH
+    requested_cadence: str | None = None  # dispatch input "cadence" (the laptop burn-in timer sends burn_in); "" -> None
 
 
 @dataclass(frozen=True, eq=False)
@@ -124,6 +125,11 @@ def _head_or_none(succeeded, config) -> date | None:
         return None
 
 
+def _check_burn_in_request(cadence: str, requested: str | None) -> None:
+    if cadence == "burn_in" and requested:
+        raise ValueError("a burn-in tick processes the clock head; it cannot be combined with sim_date")
+
+
 def prepare_tick(request: ClockRequest, *, client_factory: Callable | None = None) -> ClockResult:
     record, start = _new_record()
     client = None
@@ -134,8 +140,9 @@ def prepare_tick(request: ClockRequest, *, client_factory: Callable | None = Non
         config = read_monitoring_config(request.config_path)
         record.model_bundle_id = config.model_bundle_id
         check_champion_matches(config, read_champion(request.champion_path))
-        cadence = cadence_for(request.event_name, request.schedule or None, config)
+        cadence = cadence_for(request.event_name, request.schedule or None, config, request.requested_cadence)
         record.cadence = cadence
+        _check_burn_in_request(cadence, request.requested)
         requested = _parse_date(request.requested)
         succeeded = store.succeeded_sim_dates(store.read_ticks(client, config), config)
         sim_date = next_sim_date(succeeded, config, requested=requested)

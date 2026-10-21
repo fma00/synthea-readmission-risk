@@ -46,19 +46,16 @@ def test_committed_config_monitors_the_committed_champion():
         ({"window_days": 30}, "window_days must be 7"),
         ({"top_n": 0}, "top_n"),
         ({"top_n": True}, "top_n"),
-        ({"crons": {"burn_in": "7,37 13-18 * * *"}}, "exactly the keys burn_in and weekly"),
-        ({"crons": {"burn_in": "*/5 * * * *", "weekly": "17 6 * * 1"}}, "crons.burn_in"),
-        ({"crons": {"burn_in": "7,37 13-18 * * *", "weekly": "0 0 * * 1"}}, "crons.weekly"),
+        ({"crons": {"burn_in": "7,37 13-18 * * *", "weekly": "17 6 * * 1"}}, "exactly the key weekly"),
+        ({"crons": {}}, "exactly the key weekly"),
+        ({"crons": ["17 6 * * 1"]}, "exactly the key weekly"),
+        ({"crons": {"weekly": "0 0 * * 1"}}, "crons.weekly"),
         ({"extra": 1}, "exactly the keys"),
     ],
 )
 def test_malformed_configs_are_refused(changes, match):
     with pytest.raises(ValueError, match=match):
         _parse(**changes)
-
-
-def test_hourly_burn_in_fallback_is_accepted():
-    assert _parse(crons={"burn_in": "7 13-22 * * *", "weekly": "17 6 * * 1"}).crons["burn_in"] == "7 13-22 * * *"
 
 
 def test_read_refuses_non_json_and_passes_missing_file(tmp_path):
@@ -75,14 +72,26 @@ def test_read_refuses_non_json_and_passes_missing_file(tmp_path):
 
 def test_cadence_for():
     config = _parse()
-    assert mc.cadence_for("schedule", "7,37 13-18 * * *", config) == "burn_in"
     assert mc.cadence_for("schedule", "17 6 * * 1", config) == "weekly"
     assert mc.cadence_for("workflow_dispatch", "", config) == "dispatch"
     assert mc.cadence_for("laptop", None, config) == "catch_up"
-    with pytest.raises(ValueError, match="does not name"):
-        mc.cadence_for("schedule", "7 13-22 * * *", config)
+    for retired in ("7,37 13-18 * * *", "7 13-22 * * *"):  # the burn-in crons, retired 2026-10-20
+        with pytest.raises(ValueError, match="does not name"):
+            mc.cadence_for("schedule", retired, config)
     with pytest.raises(ValueError, match="does not run on event"):
         mc.cadence_for("push", None, config)
+
+
+def test_cadence_for_requested_cadence():
+    config = _parse()
+    assert mc.cadence_for("workflow_dispatch", None, config, "burn_in") == "burn_in"
+    for plain in ("dispatch", "", None):
+        assert mc.cadence_for("workflow_dispatch", None, config, plain) == "dispatch"
+    with pytest.raises(ValueError, match="must be dispatch or burn_in; got 'weekly'"):
+        mc.cadence_for("workflow_dispatch", None, config, "weekly")
+    for event, schedule in (("schedule", "17 6 * * 1"), ("laptop", None)):
+        with pytest.raises(ValueError, match="only on workflow_dispatch"):
+            mc.cadence_for(event, schedule, config, "burn_in")
 
 
 def test_champion_mismatch_is_refused():
@@ -97,8 +106,7 @@ def test_on_grid_and_period_of():
     assert mc.on_grid(config, date(2023, 4, 17)) and mc.on_grid(config, date(2026, 9, 7))
     assert not mc.on_grid(config, date(2023, 4, 18)) and not mc.on_grid(config, date(2023, 4, 10))
     assert not mc.on_grid(config, date(2026, 9, 14))
-    assert mc.period_of("7,37 13-18 * * *") == timedelta(minutes=30)
-    assert mc.period_of("7 13-22 * * *") == timedelta(hours=1)
     assert mc.period_of("17 6 * * 1") == timedelta(days=7)
-    with pytest.raises(ValueError, match="unknown monitoring cron"):
-        mc.period_of("* * * * *")
+    for unknown in ("* * * * *", "7,37 13-18 * * *"):
+        with pytest.raises(ValueError, match="unknown monitoring cron"):
+            mc.period_of(unknown)

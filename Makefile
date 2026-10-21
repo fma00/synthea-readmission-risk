@@ -30,6 +30,8 @@ SCORER_SA        ?= scorer@synthea-readmission-risk.iam.gserviceaccount.com
 MONITOR_SA       ?= monitor@synthea-readmission-risk.iam.gserviceaccount.com
 LEDGER_SA        ?= ledger-reader@synthea-readmission-risk.iam.gserviceaccount.com
 WEEKS            ?= 1
+BURN_IN_TICKS    ?= 5
+BURN_IN_INTERVAL ?= 30
 CHAMPION_BUNDLE_DIR ?= bundles/569fdab6c17d433542b2cd6b531ed8efc5677fb37b00a792d84f79803c6a0f72
 LEDGER_OUT       ?= data/monitoring/ledger
 RUN              ?=
@@ -37,6 +39,7 @@ JDK_TARBALL      ?=
 GEN_ARGS         ?=
 BATCH_ARGS       ?=
 BIN := $(VENV)/bin
+CAFFEINATE := $(shell command -v caffeinate >/dev/null 2>&1 && echo caffeinate -i)
 
 # $(call check_python,<venv dir>,<major>,<minor>,<variable to override>)
 define check_python
@@ -51,7 +54,7 @@ define fresh_venv
 case "$(1)" in */*|*..*) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; .venv-*) ;; *) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; esac; rm -rf "$(1)" && $(2) -m venv "$(1)"
 endef
 
-.PHONY: help setup hooks lint test pre-commit train export export-portable score score-bq m5-check setup-runtime test-runtime lock-main lock-dev lock-runtime tf-validate spark-zip generate-vm bigjoin-batch check-population gate prereg-lock prereg-phase-b m5-monitoring gold-200k monitor-preflight monitor-simulate monitor-catch-up ledger m3-check
+.PHONY: help setup hooks lint test pre-commit train export export-portable score score-bq m5-check setup-runtime test-runtime lock-main lock-dev lock-runtime tf-validate spark-zip generate-vm bigjoin-batch check-population gate prereg-lock prereg-phase-b m5-monitoring gold-200k monitor-preflight monitor-simulate monitor-catch-up ledger m3-check burn-in-timer
 .DEFAULT_GOAL := help
 
 help: ## List the targets
@@ -119,8 +122,11 @@ monitor-catch-up: ## LIVE: run WEEKS monitoring ticks from the laptop (clean mai
 ledger: ## Render the run ledger and badge from BigQuery into LEDGER_OUT, as the ledger-reader SA
 	$(BIN)/python scripts/render_ledger.py --out-dir $(LEDGER_OUT) --impersonate-service-account $(LEDGER_SA)
 
-m3-check: ## Check metric M3 (>= 5 consecutive green burn-in ticks, then a weekly one), as the ledger-reader SA; needs gh
+m3-check: ## Check metric M3 (>= 5 consecutive green timer-dispatched burn-in ticks, then a scheduled weekly one), as the ledger-reader SA; needs gh
 	$(BIN)/python scripts/m3_check.py --impersonate-service-account $(LEDGER_SA)
+
+burn-in-timer: ## LIVE: dispatch BURN_IN_TICKS burn-in ticks of monitor.yml, one every BURN_IN_INTERVAL minutes (laptop; needs gh)
+	$(CAFFEINATE) $(BIN)/python scripts/burn_in_timer.py --ticks $(BURN_IN_TICKS) --interval-minutes $(BURN_IN_INTERVAL)
 
 setup-runtime: ## Recreate .venv-dataproc: Python 3.12 + the Dataproc runtime 3.0 mirror (requirements-dataproc-3.0.txt)
 	@$(call fresh_venv,$(RUNTIME_VENV),$(PYTHON312),RUNTIME_VENV)

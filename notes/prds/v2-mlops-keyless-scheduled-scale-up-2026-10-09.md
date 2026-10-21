@@ -29,6 +29,12 @@ Facts marked **(verified)** were checked against the repo or a primary source in
 - **D3, ledger (OQ3):** the PRD's fallback is taken: job B commits to a dedicated `ledger` branch; ruleset 24876876 keeps no bypass actors.
 - **FR21 in v2:** "stale since" is shown on the README as a "stale after <time>" badge (a static page cannot compare with the current time); the dashboard's live "stale since" is v3.0.
 
+**Amendment 2026-10-20 (owner decisions, made after observing the scheduled burn-in; `notes/eg-new-feature/monitoring-burn-in-timer-and-weekly-retry-2026-10-20.md`):** GitHub's scheduler dropped almost every slot for this repository (the burn-in cron started 3 runs in 24 slots on 2026-10-19/20; a permission-free probe started 7 in about 120), so the design no longer depends on slot reliability.
+- **E1, burn-in trigger:** the accelerated burn-in is dispatched by a timer on the owner's laptop (`make burn-in-timer`, dispatch input `cadence=burn_in`, one tick at a time, any hour), not by a cron.
+- **E2, M3 amended, after the outcome was observed:** M3 now counts ≥ 5 consecutive green *timer-dispatched* burn-in runs, then ≥ 1 green *scheduled* weekly tick. **The bar is lowered in one respect:** a laptop timer is the owner, so the burn-in no longer evidences running without the owner (FR19); only the scheduled weekly tick still does. The three green scheduled burn-in ticks of 2026-10-19/20 stay in the history and do not count.
+- **E3, weekly retry slots (effective with Part 2 of the design):** the weekly cron becomes hourly Monday to Wednesday (`17 * * * 1-3`, 72 slots). This relaxes the "daily cron" Out line and OQ1: at most one scheduled weekly tick succeeds per week, barring owner dispatches or re-runs; the other slots are retries that do nothing once the week's tick has run.
+- **E4, skip and retry cap (Part 2):** a scheduled run skips (no row, stays green) once this week's weekly tick succeeded or 3 weekly attempts failed or were refused.
+
 ## Executive summary
 
 v2 turns the v1 local demo into a small system that runs by itself on GCP without any long-lived credential in CI. In order, it delivers:
@@ -137,7 +143,7 @@ Three phases inside a 6-week box (a ceiling, not a target), started only after t
 - Vertex AI;
 - a Cloud Run dashboard;
 - `terraform apply` in CI;
-- a daily cron (an accelerated cron is allowed only for the one-afternoon burn-in, FR19);
+- a daily cron (an accelerated cron is allowed only for the one-afternoon burn-in, FR19); **amended 2026-10-20 (E3, owner decision): hourly weekly *retry slots* Monday to Wednesday are In; the tick cadence stays weekly, and the burn-in is dispatched by a laptop timer, not a cron**;
 - feature-drift statistics;
 - scheduled (automatic) retraining;
 - hyperparameter tuning;
@@ -267,7 +273,7 @@ Each requirement is testable; slice designs refine them.
 - **FR18** Data tests are one `ASSERT` script per table, each assertion labelled `AS '<id>: <message>'`, with NULL treated as failure on purpose. They run in every tick, and pass/fail is recorded in `scoring_runs`. A seeded bad row visibly fails them. **Slice 4 (2026-10-11, `notes/eg-new-feature/v2-slice4-score-to-bigquery-2026-10-11.md`):** done: `predictions.sql` (10 assertions, gates publishing) and `scoring_runs.sql` (7, on the table's prior state); M5's recorded run drives every one of the 17 assertions to fail on its own seeded copy (`make m5-check`).
 - **FR19** The weekly monitoring tick:
   - runs on an off-the-hour cron (e.g. `17 6 * * 1`) plus `workflow_dispatch`;
-  - is preceded by an **accelerated burn-in** (OQ1): for one afternoon a temporary cron fires every 30 minutes off the hour (e.g. `7,37 13-18 * * *`, ~10 opportunities for ≥5 consecutive green ticks, with margin for GitHub's delayed or dropped scheduled runs); a second commit to `main` then switches to the weekly cron. Scheduled workflows run only from the default branch. Every burn-in tick advances the simulated clock by one simulated week, and the ledger labels it "burn-in (accelerated cadence)". The README must not imply weeks of unattended operation: the burn-in proves repeatability, idempotency and running without the owner, not long-run behaviour;
+  - is preceded by an **accelerated burn-in** (OQ1): for one afternoon a temporary cron fires every 30 minutes off the hour (e.g. `7,37 13-18 * * *`, ~10 opportunities for ≥5 consecutive green ticks, with margin for GitHub's delayed or dropped scheduled runs); a second commit to `main` then switches to the weekly cron. Scheduled workflows run only from the default branch. Every burn-in tick advances the simulated clock by one simulated week, and the ledger labels it "burn-in (accelerated cadence)". The README must not imply weeks of unattended operation: the burn-in proves repeatability, idempotency and running without the owner, not long-run behaviour; **amended 2026-10-20 (E1/E2, owner decision after observing the scheduled burn-in): the burn-in is dispatched every 30 minutes (any hour) by a laptop timer, because GitHub's scheduler dropped most slots; the ledger labels burn-in ticks "burn-in (scheduled, accelerated)" (the three that GitHub did fire) or "burn-in (dispatched, accelerated)"; the burn-in now proves repeatability and idempotency but not running without the owner, which only the scheduled weekly tick shows**;
   - is keyed on the **simulated** clock, so a late or dropped run is caught up idempotently;
   - advances the clock, scores the new window and evaluates the cohort whose 30-day labels have matured over a rolling 13 weeks.
 
@@ -332,7 +338,7 @@ Each requirement is testable; slice designs refine them.
 |---|---|---|---|
 | M1 | CI on `main` | green, including the 3.12 pipeline leg, zizmor = 0 findings, `terraform validate` | Actions |
 | M2 | Keyless | 0 service-account keys used by any workflow; WIF condition on numeric repo/owner ids + `main` | `terraform plan` clean; repo grep; IAM key list for CI service accounts = empty |
-| M3 | Scheduled operation | **≥5 consecutive green scheduled ticks in the accelerated burn-in, plus ≥1 green tick at the weekly cadence** before `v2.0` (OQ1) | `scoring_runs` + ledger (burn-in ticks labelled) |
+| M3 | Scheduled operation | ~~**≥5 consecutive green scheduled ticks in the accelerated burn-in, plus ≥1 green tick at the weekly cadence**~~ **Amended 2026-10-20 (E2, owner decision after observing the scheduled burn-in): ≥5 consecutive green timer-dispatched burn-in ticks, plus ≥1 green scheduled tick at the weekly cadence** before `v2.0` (OQ1) | `scoring_runs` + ledger (burn-in ticks labelled); `make m3-check` |
 | M4 | Promotion gate | ≥1 real promotion PR with gate table; ≥1 deliberately bad model refused | PRs linked from the README |
 | M5 | Data tests | a seeded bad row visibly fails the `ASSERT` suite | recorded run |
 | M6 | Pre-registration | `prereg.yaml` commit precedes the 200k generation (timestamps); results reported against every pre-registered metric, including deviations | git log + `docs/results.md` |
@@ -353,7 +359,7 @@ Each requirement is testable; slice designs refine them.
 | Cost leak (forgotten VM, uncapped executors, leaked dashboard key) | Med | Med | Spot VM with TTL + DELETE; `maxExecutors` cap; custom query quota; labels; teardown checklist; $5 early-warning budget next to the $20 one (OQ4) |
 | Scheduled workflow auto-disabled after 60 days / cron delays | High over months | Med | Staleness banner, issue, reminder; idempotent catch-up on the simulated clock; "activity" definition unverified, so the ledger commits are not relied on as keep-alive |
 | Ledger bot push rejected by branch protection | Med | Low | Ruleset bypass for the ledger job (OQ3); fall back to a `ledger` branch if a personal repo cannot do it (NHV) |
-| Burn-in read as months of operation | Med | Med (credibility) | Ticks labelled "burn-in (accelerated cadence)"; ≥1 weekly-cadence tick required; README wording checked in review |
+| Burn-in read as months of operation | Med | Med (credibility) | Ticks labelled "burn-in (accelerated cadence)" (since 2026-10-20: "burn-in (scheduled, accelerated)" / "burn-in (dispatched, accelerated)", amendment E1); ≥1 weekly-cadence tick required; README wording checked in review |
 | Badge stays green after the schedule is disabled | High | Low | Badge always shown next to "last tick" date; staleness banner is the honest signal |
 | Quota too small or contended (`CPUS_ALL_REGIONS` = 32, measured) | Med | Med | `maxExecutors` = 7 fits it exactly; never run the generation VM and the batch at once; request an increase only if the 20k pilot is too slow (days of lead time) |
 | 200k generation slower than planned / spot preemption | Med | Low | 20k pilot sets expectations; preemption = restart (no checkpoint), ≈ $1 each |
@@ -387,7 +393,7 @@ Notes:
 ## Open questions
 
 **Resolved during the PRD review (2026-10-09):**
-- **OQ1, scheduled-tick count vs the timebox → accelerated burn-in.** One afternoon of scheduled ticks every 30 minutes, then the weekly cron. The DoD requires ≥5 consecutive green burn-in ticks **plus ≥1 green tick at the weekly cadence** (FR19, M3). The ≥1-weekly-tick part is an elephant default added for honesty; the owner may drop it. "Daily cron" stays Out; the accelerated cron is In only for the burn-in. The 6 weeks is a ceiling, not a target.
+- **OQ1, scheduled-tick count vs the timebox → accelerated burn-in.** One afternoon of scheduled ticks every 30 minutes, then the weekly cron. The DoD requires ≥5 consecutive green burn-in ticks **plus ≥1 green tick at the weekly cadence** (FR19, M3). The ≥1-weekly-tick part is an elephant default added for honesty; the owner may drop it. "Daily cron" stays Out; the accelerated cron is In only for the burn-in. The 6 weeks is a ceiling, not a target. **Amended 2026-10-20 (E1-E3):** the burn-in is dispatched by a laptop timer, not a cron, and need not fit one afternoon; hourly weekly retry slots Monday to Wednesday are In (the tick cadence stays weekly).
 - **OQ2, the Brier rule → non-inferiority.** The upper bound of the patient-level paired bootstrap CI of the Brier difference must be ≤ a pre-registered margin (FR15).
 - **OQ3, ledger path → commit to `main`** with an Actions ruleset bypass for the ledger job, falling back to a `ledger` branch (FR20).
 - **OQ4, budget → a $5/month early-warning budget plus the locked $20**, alert-only, no billing hard stop (FR0.1).

@@ -147,7 +147,8 @@ def clock(
     """Resolve the tick's simulated date and cadence (writes a monitoring row only on a refusal)."""
     gcp.configure(impersonate_service_account=impersonate_service_account)
     requested = sim_date or os.environ.get("REQUESTED_SIM_DATE") or None
-    request = ClockRequest(_event_name(), os.environ.get("SCHEDULE") or None, requested, config_path=config)
+    request = ClockRequest(_event_name(), os.environ.get("SCHEDULE") or None, requested, config_path=config,
+                           requested_cadence=os.environ.get("REQUESTED_CADENCE") or None)  # fmt: skip
     raise typer.Exit(code=_report_clock(prepare_tick(request)))
 
 

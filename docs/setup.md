@@ -368,7 +368,7 @@ Design, owner decisions and the live runbook (L0-L17): `notes/eg-new-feature/v2-
 5. renders the run ledger (job A, read-only identity) and commits it to the `ledger` branch (job B, no cloud credentials);
 6. opens or comments on ONE GitHub issue per kind: `monitoring-failure` when any job failed or was cancelled, `monitoring-alert` when the verdict is an alert.
 
-The clock moves only on success, so a failed or dropped tick is retried on the same simulated date; replaying a date is idempotent. `deploy/monitoring.json` names the monitored bundle (it must be the champion), the gold, the simulated range (178 Mondays, 2023-04-17 to 2026-09-07) and the two cron strings.
+The clock moves only on success, so a failed or dropped tick is retried on the same simulated date; replaying a date is idempotent. `deploy/monitoring.json` names the monitored bundle (it must be the champion), the gold, the simulated range (178 Mondays, 2023-04-17 to 2026-09-07) and the weekly cron string.
 
 ```sh
 export CLOUDSDK_CORE_PROJECT=synthea-readmission-risk
@@ -378,10 +378,17 @@ make m5-monitoring                         # every MON assertion fires on a seed
 make monitor-catch-up WEEKS=18             # LIVE, laptop: the 18 warm-up weeks (clean checkout of main; no Actions tick running)
 gh workflow run monitor.yml --ref main     # one tick; -f sim_date=YYYYMMDD replays an earlier simulated date
 make ledger                                # render the ledger locally (ledger-reader SA)
+make burn-in-timer                         # LIVE, laptop: the burn-in, 5 ticks dispatched 30 minutes apart (needs gh)
 make m3-check                              # metric M3 from the Actions runs + serving.monitoring
 ```
 
-- **Cron states.** `monitor.yml` holds no schedule after the v2 merge. A PR adds the burn-in cron (`7,37 13-18 * * *`, every 30 minutes for one afternoon; the fallback `7 13-22 * * *` if one tick takes more than 25 minutes, changed together with `deploy/monitoring.json`). After at least 5 consecutive green scheduled ticks, a second PR replaces it with the weekly cron (`17 6 * * 1`). This is a burn-in, not weeks of unattended operation.
+- **Cron states.** Amended 2026-10-20 ([design](../notes/eg-new-feature/monitoring-burn-in-timer-and-weekly-retry-2026-10-20.md)): GitHub's scheduler dropped almost every slot of the scheduled burn-in (3 runs in 24 slots), so `monitor.yml` holds **no schedule** during the burn-in, which a laptop timer dispatches; a second PR (Part 2) then adds the weekly cron with retry slots. This is a burn-in, not weeks of unattended operation.
+- **Burn-in timer.** `make burn-in-timer` (defaults `BURN_IN_TICKS=5`, `BURN_IN_INTERVAL=30`) dispatches `monitor.yml` with `cadence=burn_in`, one run at a time, 30 minutes start to start, and stops at the first red run. Prerequisites:
+  - `gh auth status --hostname github.com --active` is green and the token can dispatch workflows (`workflow` scope, or Actions read/write for a fine-grained token);
+  - the laptop is on mains power (`caffeinate -i` prevents idle sleep; closing the lid on battery can still sleep it);
+  - only one timer runs, and no catch-up runs at the same time (they cannot see each other).
+
+  It may run overnight. Its exit codes are 0 (all ticks concluded success), 1 (refused), 2 (stopped: gh error after retries, timeout, unidentifiable or repeatedly dropped run), 3 (a red tick) and 130 (interrupted). Through `make`, a non-zero code shows only as `make: *** [burn-in-timer] Error N` and make itself exits 2; run `python scripts/burn_in_timer.py` (or `python scripts/m3_check.py`) directly to see the code. After a red tick, fix the cause and restart: M3's streak restarts. After an interruption the streak continues if the run left in flight ended green; the timer logs the previous burn-in run at start. Each start dispatches up to `BURN_IN_TICKS` more simulated weeks. `make m3-check`, not the timer, decides M3.
 - **The ledger branch.** It is created once, by hand, **before `v2` merges into `main`** (so the README's badge and ledger links resolve from the start), as an orphan branch (a commit without parents) through the GitHub API, so the working tree is never touched; CI never creates it. The first commit holds a README and the two files job B later replaces: a placeholder ledger and the badge JSON the renderer writes when there is no tick yet.
   ```sh
   repo=fma00/synthea-readmission-risk
@@ -401,7 +408,7 @@ make m3-check                              # metric M3 from the Actions runs + s
   gh api "repos/$repo/contents/docs/last-tick.json?ref=ledger" --jq .name   # prints last-tick.json
   ```
   It is not covered by ruleset 24876876 (which targets `main` and `v2`), so job B can commit without a bypass.
-- **Staleness.** The README badge reads `docs/last-tick.json` on the `ledger` branch. It shows the last tick's wall time and simulated date, plus "stale after <time>": the last scheduled tick plus two periods of the committed cron. A static page cannot say "stale since"; the v3 dashboard will. In the burn-in cron state the badge reads stale about an hour after the afternoon's last slot, until the weekly-cron PR is merged.
+- **Staleness.** The README badge reads `docs/last-tick.json` on the `ledger` branch. It shows the last tick's wall time and simulated date, plus "stale after <time>": the last scheduled tick plus two periods of the committed cron. A static page cannot say "stale since"; the v3 dashboard will. While `monitor.yml` holds no schedule (the timer burn-in), the badge reads "dispatch only". The separate "Monitoring tick (scheduled)" badge shows the latest *scheduled* run, so it can lag; the last-tick badge and the ledger are the record of each tick.
 - **GitHub disables scheduled workflows after 60 days without repository activity** (public repositories). Keep a calendar reminder 50 days after the last commit. To re-enable: `gh workflow enable monitor.yml`, then `gh workflow run monitor.yml --ref main` to catch up the clock.
 - **Repair a failing history test.** If `monitoring.sql` fails, every later tick fails at evaluate. Repair it as follows:
   1. Read the MON label in the issue or the job summary.
@@ -412,7 +419,7 @@ make m3-check                              # metric M3 from the Actions runs + s
   BigQuery time travel (7 days, `FOR SYSTEM_TIME AS OF`) can restore deleted rows. A wrong assertion is fixed by a PR instead.
 - **Identities.** `scorer` scores, `monitor` resolves the clock and evaluates (writes only `serving.monitoring`, reads predictions, scoring_runs and gold), and `ledger-reader` renders the ledger (read-only); all three are bound to `monitor.yml` on `main`. GitHub's OIDC token has no per-job claim, so the binding cannot tell the jobs apart (disclosed in the design note).
 
-- **Never overlap** a laptop catch-up with an Actions tick: the catch-up refuses while `gh run list` shows a `monitor.yml` run that is not completed. `score.yml` shares the concurrency group; a `score.yml` run on a simulated date replaces that week's 7-day partition with a 30-day one, so the cohorts that need it report `incomplete_cohort` until the date is replayed.
+- **Never overlap** a laptop catch-up with an Actions tick: the catch-up refuses while `gh run list` shows a `monitor.yml` run that is not completed. Do not run a catch-up while the burn-in timer runs: the timer only sees Actions runs, not a laptop catch-up. `score.yml` shares the concurrency group; a `score.yml` run on a simulated date replaces that week's 7-day partition with a 30-day one, so the cohorts that need it report `incomplete_cohort` until the date is replayed.
 - **Cost:** about 10 BigQuery queries (10 MB minimum each) and 40 MB of GCS egress per tick; about CHF 1-2 for the whole slice.
 - **Reproducibility across runners:** hosted runners differ in CPU, and on CPUs with AVX-512 numpy takes other SIMD code paths, which changed the last bits of 3 of 156 scores (slice 7, L11; max relative difference 9.3e-16). A replay on the same CPU class is bit-identical; across CPU classes, and between the laptop (macOS) and a runner, the same encounters, ranks, Top-N flags and monitoring metrics come back, and scores agree within 1e-15 relative. That is the idempotency criterion (owner decision 2026-10-19). Each score job logs its CPU and numpy's SIMD support.
 

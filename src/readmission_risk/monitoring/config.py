@@ -16,19 +16,14 @@ from readmission_risk.bundles.manifest import HEX64_RE
 DEFAULT_CONFIG_PATH = Path("deploy/monitoring.json")
 STEP_DAYS = 7  # consecutive ticks' 7-day windows tile the timeline exactly; any other value is a design change
 WINDOW_DAYS = 7
-BURN_IN_CRONS = ("7,37 13-18 * * *", "7 13-22 * * *")  # default, hourly fallback (if one tick takes > 25 minutes)
-WEEKLY_CRON = "17 6 * * 1"
+WEEKLY_CRON = "17 6 * * 1"  # the only cron since 2026-10-20: the burn-in is dispatched by a laptop timer (burn_in.py)
 CADENCES = ("burn_in", "weekly", "dispatch", "catch_up")
 _KEYS = {
     "model_bundle_id", "gold_uri", "first_sim_date", "last_sim_date", "step_days", "window_days", "top_n", "crons", "epoch",
 }  # fmt: skip
 _GS_URI_RE = re.compile(r"gs://[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]/[^\s]+")
 _INT32_MAX = 2**31 - 1
-_PERIODS = {
-    BURN_IN_CRONS[0]: timedelta(minutes=30),
-    BURN_IN_CRONS[1]: timedelta(minutes=60),
-    WEEKLY_CRON: timedelta(days=7),
-}
+_PERIODS = {WEEKLY_CRON: timedelta(days=7)}
 
 
 @dataclass(frozen=True)
@@ -40,7 +35,7 @@ class MonitoringConfig:
     step_days: int
     window_days: int
     top_n: int
-    crons: dict[str, str]  # exactly {"burn_in", "weekly"}
+    crons: dict[str, str]  # exactly {"weekly"}
     epoch: date  # every read of serving tables filters started_at >= this day
 
 
@@ -76,10 +71,8 @@ def parse_monitoring_config(document: object) -> MonitoringConfig:
     if type(top_n) is not int or not 1 <= top_n <= _INT32_MAX:
         raise ValueError(f"monitoring.json: top_n must be an int in [1, {_INT32_MAX}]; got {top_n!r}")
     crons = document["crons"]
-    if not isinstance(crons, dict) or set(crons) != {"burn_in", "weekly"}:
-        raise ValueError(f"monitoring.json: crons must have exactly the keys burn_in and weekly; got {crons!r}")
-    if crons["burn_in"] not in BURN_IN_CRONS:
-        raise ValueError(f"monitoring.json: crons.burn_in must be one of {list(BURN_IN_CRONS)}; got {crons['burn_in']!r}")
+    if not isinstance(crons, dict) or set(crons) != {"weekly"}:
+        raise ValueError(f"monitoring.json: crons must have exactly the key weekly; got {crons!r}")
     if crons["weekly"] != WEEKLY_CRON:
         raise ValueError(f"monitoring.json: crons.weekly must be {WEEKLY_CRON!r}; got {crons['weekly']!r}")
     return MonitoringConfig(
@@ -107,15 +100,23 @@ def on_grid(config: MonitoringConfig, day: date) -> bool:
     return config.first_sim_date <= day <= config.last_sim_date and (day - config.first_sim_date).days % config.step_days == 0
 
 
-def cadence_for(event_name: str, schedule: str | None, config: MonitoringConfig) -> str:
+def cadence_for(event_name: str, schedule: str | None, config: MonitoringConfig, requested_cadence: str | None = None) -> str:
+    """A dispatch may request burn_in (the laptop burn-in timer); no other event may request a cadence."""
     schedule = schedule or None
+    requested_cadence = requested_cadence or None
     if event_name == "laptop":
+        if requested_cadence is not None:
+            raise ValueError("a cadence can be requested only on workflow_dispatch")
         return "catch_up"
     if event_name == "workflow_dispatch":
-        return "dispatch"
-    if event_name == "schedule":
-        if schedule == config.crons["burn_in"]:
+        if requested_cadence in (None, "dispatch"):
+            return "dispatch"
+        if requested_cadence == "burn_in":
             return "burn_in"
+        raise ValueError(f"requested cadence must be dispatch or burn_in; got {requested_cadence!r}")
+    if event_name == "schedule":
+        if requested_cadence is not None:
+            raise ValueError("a cadence can be requested only on workflow_dispatch")
         if schedule == config.crons["weekly"]:
             return "weekly"
         raise ValueError(f"scheduled by cron {schedule!r}, which deploy/monitoring.json does not name")

@@ -51,6 +51,12 @@ tests only*.
   branch (the PRD's fallback), linked from the README. Ruleset 24876876 (targets exactly `refs/heads/main` and
   `refs/heads/v2`; rule `pull_request`, 0 approvals; **no bypass actors**; read 2026-10-18 with `gh api`) is not changed:
   a "GitHub Actions" bypass would apply to every workflow, not to job B only.
+- **Amendment 2026-10-20 (owner decisions after observing the scheduled burn-in; design in
+  `notes/eg-new-feature/monitoring-burn-in-timer-and-weekly-retry-2026-10-20.md`):** GitHub's scheduler dropped almost every slot for this repository, so the burn-in is dispatched by a laptop
+  timer (`make burn-in-timer`, input `cadence=burn_in`), M3 counts timer-dispatched burn-in runs (the bar is lowered:
+  the burn-in no longer shows running without the owner; the scheduled weekly tick still does), and the weekly cron
+  becomes hourly retry slots Monday to Wednesday with a skip check (Part 2). The cron states (a)-(c) and L13-L15 below
+  are superseded by that note's T1-T6.
 
 ## Why
 
@@ -1078,9 +1084,9 @@ the gitignored `data/monitoring/live-checks.md`; results are appended here under
 | L10 | `gh workflow run monitor.yml --ref main` | green; commit on `ledger`; every job's summary present; the badge JSON is served via shields; **oracle:** the row's `n_matured`, `observed` and verdict equal `make monitor-simulate`'s row for that sim date, and `expected` agrees within `abs ≤ n_matured × 1e-8` (a bound well above 2.6e-9 per row); the tick's wall time recorded (> 25 min → the hourly burn-in fallback) |
 | L11 | Idempotency (kill trigger): before the replay, export the L10 date's partition `(encounter_id, rank, risk_score)` (`bq query` as the operator); then `gh workflow run monitor.yml --ref main -f sim_date=<L10's date>` | (a) the new partition holds exactly the same `(encounter_id, rank, risk_score)` set, bit-identical (same runner image and batch), under a new `scoring_run_id`; (b) the replay row's `n_matured`, `observed`, `expected`, `oe_ratio`, `oe_ci_low`, `oe_ci_high`, `auc`, `n_label_after_sim`, `n_immature`, `expected_immature`, `coverage_found` and `verdict` equal L10's row exactly; (c) the clock head is unchanged. (a) is the actual re-scoring idempotency check: the matured metrics read older partitions, which a replay does not touch |
 | L12 | Failure path: `-f sim_date=20230418` (off-grid) twice | the clock refuses; run red; ONE failure issue created, then commented. Then a normal dispatch to make the badge green again; the owner closes the issue |
-| L13 | Burn-in: merge the (b) PR on the chosen day before 13:00 UTC | ≥ 5 consecutive green scheduled ticks; else repeat on another afternoon |
-| L14 | Merge the (c) PR | — |
-| L15 | Wait for the next Monday 06:17 UTC tick, then `make m3-check` | the tick is green; exit 0 (M3 met) |
+| L13 | Burn-in: merge the (b) PR on the chosen day before 13:00 UTC | ≥ 5 consecutive green scheduled ticks; else repeat on another afternoon **Replaced 2026-10-20 by T1-T5 of `monitoring-burn-in-timer-and-weekly-retry-2026-10-20.md`.** |
+| L14 | Merge the (c) PR | — **Replaced 2026-10-20 by T1-T5 of `monitoring-burn-in-timer-and-weekly-retry-2026-10-20.md`.** |
+| L15 | Wait for the next Monday 06:17 UTC tick, then `make m3-check` | the tick is green; exit 0 (M3 met) **Replaced 2026-10-20 by T1-T5 of `monitoring-burn-in-timer-and-weekly-retry-2026-10-20.md`.** |
 | L16 | Owner: calendar reminder for the last commit date + 50 days (check that `monitor.yml` is enabled); billing report for the slice's days | — |
 | L17 | Tag `v2.0` on `main` + release notes (owner); CLAUDE.md/memory say "v2.0 released" | — |
 
@@ -1310,4 +1316,14 @@ burn-in how often an alert will fire. The rule is pre-registered; this changes n
   - `numpy.show_runtime()` shows the real split: on the EPYC 7763 numpy finds `X86_V3` (AVX2) only; on the 8573C and 9V45 (and the earlier 9V74) it also finds `X86_V4`/`AVX512_*`, and numpy's own runtime-dispatched SIMD paths change the last bits. The OpenBLAS kernel had merely tracked the same CPU difference.
   - **Owner decision (2026-10-19):** accept a tolerance on hosted runners too, and remove the ineffective pin and its test (the CPU diagnostics step stays). **Idempotency criterion (a), final:** the same encounter set, ranks, Top-N flags and monitoring metrics; risk scores bit-identical within a CPU class (proven: 9 runs in two classes) and within 1e-15 relative across classes and platforms (measured max 9.3e-16). Not taken: disabling numpy's AVX-512 dispatch with `NPY_DISABLE_CPU_FEATURES` (would likely give bit-identical hosted ticks; not verified).
   - **L11 is recorded as passed under this criterion; the kill trigger does not fire.**
-
+- **Scheduled burn-in attempt (L13, 2026-10-19/20), superseded by the 2026-10-20 amendment:** the burn-in cron
+  `7,37 13-18 * * *` (PR #30, re-pushed in PR #31) started **3 runs in 24 due slots**, all green and all late:
+  [39316779856](https://github.com/fma00/synthea-readmission-risk/actions/runs/39316779856) (created 2026-10-19 20:08 UTC,
+  sim 2023-09-04), [39470293730](https://github.com/fma00/synthea-readmission-risk/actions/runs/39470293730) (2026-10-20
+  17:55, sim 2023-09-11) and [39501115506](https://github.com/fma00/synthea-readmission-risk/actions/runs/39501115506)
+  (2026-10-20 21:31, sim 2023-09-18, three hours after the last slot). The clock head is 2023-09-25. A permission-free
+  probe workflow (`schedule-probe.yml`, cron `11,26,41,56 * * * *`, PR #32, merged 2026-10-19 15:57 UTC) started **9
+  runs in about 160 slots** by 2026-10-21 08:06 UTC; it is removed by the amendment's PR 1. Ruled out: workflow state,
+  default branch, cron syntax, repository state, the 60-day rule, concurrency cancellations, SHA pinning, plan and
+  billing (Free plan, Actions net charge 0). A GitHub Actions incident (2026-10-19 15:49-16:56 UTC) explains at most two
+  slots. The owner chose not to open a support ticket.

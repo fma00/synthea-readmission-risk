@@ -173,7 +173,7 @@ def test_prepare_tick_cadences_and_head():
     world = World()
     world.succeed(CONFIG.first_sim_date)
     assert (_clock(world).sim_date, _clock(world).cadence) == (CONFIG.first_sim_date + timedelta(days=7), "catch_up")
-    assert _clock(world, event_name="schedule", schedule="7,37 13-18 * * *").cadence == "burn_in"
+    assert _clock(world, event_name="workflow_dispatch", requested_cadence="burn_in").cadence == "burn_in"
     assert _clock(world, event_name="schedule", schedule="17 6 * * 1").cadence == "weekly"
     replay = _clock(world, event_name="workflow_dispatch", requested=f"{CONFIG.first_sim_date:%Y%m%d}")
     assert (replay.sim_date, replay.cadence) == (CONFIG.first_sim_date, "dispatch")
@@ -185,6 +185,9 @@ def test_prepare_tick_cadences_and_head():
     "kwargs",
     [
         {"event_name": "schedule", "schedule": "*/5 * * * *"},
+        {"event_name": "schedule", "schedule": "7,37 13-18 * * *"},  # the retired burn-in cron
+        {"event_name": "schedule", "schedule": "17 6 * * 1", "requested_cadence": "burn_in"},
+        {"event_name": "workflow_dispatch", "requested_cadence": "weekly"},
         {"event_name": "workflow_dispatch", "requested": "20230418"},
         {"event_name": "workflow_dispatch", "requested": "2023-04-17"},
     ],
@@ -196,6 +199,16 @@ def test_prepare_tick_refusals_write_a_clock_row_without_invalid_values(kwargs):
     [row] = world.inserted
     assert (row["status"], row["failed_stage"]) == ("refused", "clock")
     assert row["sim_date"] is None and row["history_tests_passed"] is None
+
+
+def test_burn_in_with_replay_date_is_refused_with_cadence():
+    world = World()
+    world.succeed(CONFIG.first_sim_date)
+    result = _clock(world, event_name="workflow_dispatch", requested_cadence="burn_in", requested=f"{CONFIG.first_sim_date:%Y%m%d}")
+    assert "cannot be combined with sim_date" in str(result.error) and result.sim_date is None
+    [row] = world.inserted
+    assert (row["status"], row["failed_stage"], row["cadence"], row["sim_date"]) == ("refused", "clock", "burn_in", None)
+    assert _clock(world).head == CONFIG.first_sim_date + timedelta(days=7)  # the clock did not move
 
 
 def test_prepare_tick_refuses_a_champion_mismatch(tmp_path):
