@@ -7,6 +7,7 @@ import pytest
 
 from readmission_risk.monitoring.ledger import (
     HEADER,
+    cadence_label,
     cron_state,
     last_tick_badge,
     render_ledger,
@@ -38,7 +39,7 @@ def test_header_ordering_and_determinism():
     text = render_ledger(ticks, RUNS, config=CONFIG)
     assert HEADER in text and "not weeks of unattended operation" in text and "Simulated clock" in text
     table = [line for line in text.splitlines() if line.startswith("| 2026-")]
-    assert table[0].startswith("| 2026-10-20 13:37 UTC | burn-in (accelerated cadence)") and "failed (score)" in table[0]
+    assert table[0].startswith("| 2026-10-20 13:37 UTC | burn-in (scheduled, accelerated)") and "failed (score)" in table[0]
     assert "1.020 [0.750, 1.360]" in table[1] and "41 / 40.2" in table[1]
     assert render_ledger(ticks.iloc[::-1], RUNS, config=CONFIG) == text  # input order does not matter
     others = text.split("## Other scoring runs")[1]
@@ -52,16 +53,22 @@ def test_labels_and_missing_values():
     assert "catch-up (laptop)" in row and row.endswith("| laptop |") and "| - |" in row
 
 
+def test_cadence_labels():
+    assert cadence_label("burn_in", "schedule") == "burn-in (scheduled, accelerated)"
+    for trigger in ("workflow_dispatch", "laptop", None):
+        assert cadence_label("burn_in", trigger) == "burn-in (dispatched, accelerated)"
+    assert [cadence_label(c, "schedule") for c in ("weekly", "dispatch", "catch_up", None)] == ["weekly", "dispatch", "catch-up (laptop)", "-"]
+    ticks = pd.DataFrame([_tick(1, trigger="workflow_dispatch")])
+    row = next(line for line in render_ledger(ticks, RUNS, config=CONFIG).splitlines() if line.startswith("| 2026-"))
+    assert "| burn-in (dispatched, accelerated) |" in row
+
+
 def test_badge_cases():
     assert last_tick_badge(pd.DataFrame(), cron=None)["color"] == "lightgrey"
     ticks = pd.DataFrame([_tick(1)])
-    badge = last_tick_badge(ticks, cron="7,37 13-18 * * *")
-    assert badge["schemaVersion"] == 1 and badge["color"] == "brightgreen"
-    assert badge["message"] == "2026-10-20 13:07 UTC · sim 2023-08-14 · stale after 2026-10-20 14:07 UTC"
-    weekly = last_tick_badge(ticks, cron="17 6 * * 1")["message"]
-    assert weekly.endswith("stale after 2026-11-03 13:07 UTC")
-    hourly = last_tick_badge(ticks, cron="7 13-22 * * *")["message"]
-    assert hourly.endswith("stale after 2026-10-20 15:07 UTC")
+    weekly = last_tick_badge(ticks, cron="17 6 * * 1")
+    assert weekly["schemaVersion"] == 1 and weekly["color"] == "brightgreen"
+    assert weekly["message"] == "2026-10-20 13:07 UTC · sim 2023-08-14 · stale after 2026-11-03 13:07 UTC"
     laptop = pd.DataFrame([_tick(1, trigger="laptop", cadence="catch_up")])
     assert last_tick_badge(laptop, cron="17 6 * * 1")["message"].endswith("schedule not started")
     assert last_tick_badge(laptop, cron=None)["message"].endswith("dispatch only")
@@ -71,9 +78,9 @@ def test_badge_cases():
 
 def test_cron_state():
     assert cron_state("on:\n  workflow_dispatch:\n", CONFIG) is None
-    assert cron_state('  schedule:\n    - cron: "7,37 13-18 * * *"\n', CONFIG) == "7,37 13-18 * * *"
     assert cron_state('  schedule:\n    - cron: "17 6 * * 1"\n', CONFIG) == "17 6 * * 1"
-    with pytest.raises(ValueError, match="not one of"):
-        cron_state('    - cron: "0 0 * * *"\n', CONFIG)
+    for unknown in ("0 0 * * *", "7,37 13-18 * * *"):  # the burn-in cron is retired (2026-10-20)
+        with pytest.raises(ValueError, match="not one of"):
+            cron_state(f'    - cron: "{unknown}"\n', CONFIG)
     with pytest.raises(ValueError, match="2 cron lines"):
         cron_state('    - cron: "17 6 * * 1"\n    - cron: "7,37 13-18 * * *"\n', CONFIG)

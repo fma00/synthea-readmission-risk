@@ -449,13 +449,13 @@ def test_first_screen_shows_status_limits_and_next_steps():
         assert word in head, f"first 40 lines of the README must mention {word!r}"
 
 
-# v2 slice 7 (2026-10-18): cloud and scale-up are done in v2, monitoring is built with its scheduled burn-in pending, and
+# v2 slice 7 (2026-10-18): cloud and scale-up are done in v2, monitoring is built with its burn-in pending (dispatched by a laptop timer since 2026-10-20), and
 # the dashboard moved to v3.0 (owner decision). Each stage must state its status explicitly, and v2 work must say v2.0
 # is not yet tagged (the latest release is v1). Update these on purpose when the burn-in and the v2.0 tag happen.
 ROADMAP_STATUS = {"Cloud": "(done in v2", "Scale-up": "(done in v2", "Monitoring": "(built in v2, burn-in pending",
                   "Dashboard": "(v3.0, not started)"}  # fmt: skip
 STATUS_ROWS = {"**Cloud**": "Done in v2 (v2.0 not yet tagged)", "**Scale-up**": "Done in v2 (v2.0 not yet tagged)",
-               "**Monitoring**": "Built in v2; scheduled burn-in pending", "**Dashboard**": "Planned for v3.0 (not started)"}  # fmt: skip
+               "**Monitoring**": "Built in v2; burn-in pending", "**Dashboard**": "Planned for v3.0 (not started)"}  # fmt: skip
 
 
 def test_roadmap_names_the_stages_and_their_status():

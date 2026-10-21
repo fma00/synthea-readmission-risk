@@ -679,7 +679,7 @@ def test_monitor_workflow_cron_state_and_literals_match_the_config():
     config = json.loads(_read(ROOT / "deploy" / "monitoring.json"))
     text = _read(MONITOR)
     crons = re.findall(r'^\s*- cron: "([^"]+)"\s*$', text, flags=re.MULTILINE)
-    assert crons in ([], [config["crons"]["burn_in"]], [config["crons"]["weekly"]])
+    assert crons in ([], [config["crons"]["weekly"]])
     assert ("schedule:" in text) == bool(crons)
     assert config["gold_uri"] == expected_gold_uri()
     assert (
@@ -690,6 +690,25 @@ def test_monitor_workflow_cron_state_and_literals_match_the_config():
         assert re.search(r"^concurrency:\n  group: score\n  cancel-in-progress: false$", _read(path), flags=re.MULTILINE), path.name
 
 
+def _burn_in_run_name() -> str:
+    from readmission_risk.monitoring.burn_in import BURN_IN_TITLE
+
+    return f"run-name: ${{{{ github.event_name == 'workflow_dispatch' && inputs.cadence == 'burn_in' && '{BURN_IN_TITLE}' || 'Monitoring tick' }}}}"
+
+
+def test_monitor_workflow_burn_in_dispatch():
+    """The laptop burn-in timer (2026-10-20): a cadence input, a run title the timer and m3_check match exactly, and the
+    input reaching the clock only through env, guarded by the event so a schedule run never carries it."""
+    text = _read(MONITOR)
+    assert (
+        '      cadence:\n        description: "dispatch (default) or burn_in (used only by the laptop burn-in timer, make burn-in-timer)"\n'
+        "        required: false\n        type: choice\n        options: [dispatch, burn_in]\n        default: dispatch\n"
+    ) in text
+    assert text.split("\n")[1] == _burn_in_run_name()
+    assert "          REQUESTED_CADENCE: ${{ github.event_name == 'workflow_dispatch' && inputs.cadence || '' }}\n" in text
+    assert not (WORKFLOWS / "schedule-probe.yml").exists()  # the 2026-10-19 schedule probe is removed
+
+
 def test_monitor_workflow_expressions_only_where_allowed():
     allowed = (
         re.compile(r"^ {10}[A-Z_]+: (?:\$\{\{ [^}]+ \}\}|[^$])+$"),  # step env (one or more expressions)
@@ -698,4 +717,4 @@ def test_monitor_workflow_expressions_only_where_allowed():
     )
     for i, line in enumerate(_read(MONITOR).split("\n")):
         if "${{" in line:
-            assert any(p.match(line) for p in allowed), f"monitor.yml:{i + 1}: {line.strip()}"
+            assert line == _burn_in_run_name() or any(p.match(line) for p in allowed), f"monitor.yml:{i + 1}: {line.strip()}"

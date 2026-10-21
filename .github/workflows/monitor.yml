@@ -1,4 +1,5 @@
 name: Monitoring tick
+run-name: ${{ github.event_name == 'workflow_dispatch' && inputs.cadence == 'burn_in' && 'Monitoring tick (burn-in)' || 'Monitoring tick' }}
 
 # The monitoring tick on a SIMULATED clock (v2 slice 7, PRD FR19-FR21): each run advances the simulated date by one week
 # through the champion's held-out 2023-2026 discharges, scores that week into BigQuery (write-audit-publish, slice 4),
@@ -6,9 +7,10 @@ name: Monitoring tick
 # rule in prereg.yaml), records one serving.monitoring row, renders the run ledger (job A) and commits it to the `ledger`
 # branch (job B), and opens or updates one GitHub issue per kind on a failure or an alert. Keyless: three service
 # accounts are bound to this file's workflow_ref (infra/iam.tf); the WIF provider accepts only refs/heads/main and
-# workflow_dispatch/schedule. Cron states (exactly one at a time, tests/test_infra.py): none (this commit), the burn-in
-# cron from deploy/monitoring.json for one afternoon, then the weekly cron. The values below must match deploy/ and infra/.
-# Design: notes/eg-new-feature/v2-slice7-monitoring-tick-ledger-2026-10-18.md.
+# workflow_dispatch/schedule. Cron states (exactly one at a time, tests/test_infra.py): none (Part 1 of
+# notes/eg-new-feature/monitoring-burn-in-timer-and-weekly-retry-2026-10-20.md), then the weekly retry cron (Part 2);
+# the burn-in is dispatched by a laptop timer (make burn-in-timer), not scheduled. The values below must match deploy/
+# and infra/. Design: notes/eg-new-feature/v2-slice7-monitoring-tick-ledger-2026-10-18.md.
 on:
   workflow_dispatch:
     inputs:
@@ -16,13 +18,12 @@ on:
         description: "Optional YYYYMMDD on the simulated grid, at or before the clock head (replay); empty = the head"
         required: false
         type: string
-  schedule:
-    # Burn-in (accelerated cadence, PRD FR19/OQ1): every 30 minutes for one afternoon (UTC). Each run advances the
-    # simulated clock by one week; the ledger labels these ticks "burn-in (accelerated cadence)". A second PR replaces
-    # this line with the weekly cron once >= 5 consecutive scheduled ticks are green.
-    # Registration note (2026-10-19): after the merge that added this cron, GitHub started no scheduled run for five
-    # slots, and a workflow disable/enable did not help; this commit re-pushes the file so the schedule is re-read.
-    - cron: "7,37 13-18 * * *"
+      cadence:
+        description: "dispatch (default) or burn_in (used only by the laptop burn-in timer, make burn-in-timer)"
+        required: false
+        type: choice
+        options: [dispatch, burn_in]
+        default: dispatch
 
 permissions: {}
 
@@ -62,6 +63,7 @@ jobs:
         env:
           SCHEDULE: ${{ github.event.schedule }}
           REQUESTED_SIM_DATE: ${{ inputs.sim_date }}
+          REQUESTED_CADENCE: ${{ github.event_name == 'workflow_dispatch' && inputs.cadence || '' }}
         run: python scripts/monitor_tick.py clock
 
   score:

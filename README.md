@@ -10,7 +10,7 @@ An end-to-end, tested pipeline for predicting **unplanned** 30-day hospital read
 > - **Built:** the local pipeline, models and demo scorer (v1); in v2 also the cloud setup on GCP (Terraform, keyless CI identity, Dataproc Serverless, scoring into BigQuery), the 200,000-patient scale-up, a pre-registered promotion gate, and a monitoring tick on a simulated clock with a run ledger.
 > - **Not built yet:** the dashboard and the BigQuery gold table (planned for v3.0) — see the [Roadmap](#roadmap).
 > - **Limits:** synthetic data; the v1 numbers are a development set; on the v2 validation the models do not beat a no-model lookup — see [Limitations](#limitations).
-> - **Release:** the [latest release](https://github.com/fma00/synthea-readmission-risk/releases/latest) is the local-only v1 milestone; v2.0 is tagged once the monitoring tick has run on its schedule (metric M3).
+> - **Release:** the [latest release](https://github.com/fma00/synthea-readmission-risk/releases/latest) is the local-only v1 milestone; v2.0 is tagged once metric M3 (amended 2026-10-20: a dispatched burn-in, then a scheduled weekly tick) is met.
 > - **Read next:** [Status](#status) · [Results so far](#results-so-far) · [Limitations](#limitations) · [Roadmap](#roadmap)
 
 ## Status
@@ -24,7 +24,7 @@ An end-to-end, tested pipeline for predicting **unplanned** 30-day hospital read
 | 4 | [Top-N triage CLI (a demo over held-out rows)](notes/eg-new-feature/batch-scoring-cli-2026-09-20.md) ([usage](docs/scoring.md)) | Done |
 | v2 | **Cloud**: Terraform-managed GCS and IAM, keyless GitHub Actions identity, Big Join on Dataproc Serverless, scoring into BigQuery with data tests ([setup](docs/setup.md)) | Done in v2 (v2.0 not yet tagged) |
 | v2 | **Scale-up**: 200,000 patients with a fresh seed, pre-registered, and a promotion gate ([results](docs/results.md)) | Done in v2 (v2.0 not yet tagged) |
-| v2 | **Monitoring**: weekly delayed-label calibration check on a simulated clock, run ledger, failure issues ([design](notes/eg-new-feature/v2-slice7-monitoring-tick-ledger-2026-10-18.md), [ledger](https://github.com/fma00/synthea-readmission-risk/blob/ledger/docs/run-ledger.md)) | Built in v2; scheduled burn-in pending |
+| v2 | **Monitoring**: weekly delayed-label calibration check on a simulated clock, run ledger, failure issues ([design](notes/eg-new-feature/v2-slice7-monitoring-tick-ledger-2026-10-18.md), [ledger](https://github.com/fma00/synthea-readmission-risk/blob/ledger/docs/run-ledger.md)) | Built in v2; burn-in pending |
 | v3 | **Dashboard**: Streamlit on BigQuery, and the BigQuery gold table | Planned for v3.0 (not started) |
 
 ## 60-second tour
@@ -143,7 +143,7 @@ In the same way, the integrity checks and 14 guards in [`validate_bundle`](src/r
 - The label is still reason-concentrated (one admission reason dominates the test positives) — [details](docs/results.md).
 - The scorer is a demo over held-out rows, not as-of scoring of new discharges — [details](docs/scoring.md).
 - The champion was promoted by a disclosed override of the pre-registered gate, and its test window has now been used by the gate and by monitoring, so no untouched validation population is left — [PROMOTIONS.md](deploy/PROMOTIONS.md).
-- Monitoring replays held-out discharges on a simulated clock, from a gold table built with hindsight: it demonstrates the mechanics (repeatability, idempotency, alerts and issues), not live calibration or weeks of unattended operation; the burn-in runs every 30 minutes for one afternoon — [design](notes/eg-new-feature/v2-slice7-monitoring-tick-ledger-2026-10-18.md).
+- Monitoring replays held-out discharges on a simulated clock, from a gold table built with hindsight: it demonstrates the mechanics (repeatability, idempotency, alerts and issues), not live calibration or weeks of unattended operation; the burn-in is dispatched every 30 minutes by a timer on the owner's laptop, because GitHub's scheduler dropped most accelerated slots; the 'Monitoring tick (scheduled)' badge shows the latest scheduled run, which can lag, so the last-tick badge and the ledger are the record of each week's tick — [design](notes/eg-new-feature/v2-slice7-monitoring-tick-ledger-2026-10-18.md), [amendment](notes/eg-new-feature/monitoring-burn-in-timer-and-weekly-retry-2026-10-20.md).
 - The cloud set-up and the catch-up of the first monitoring weeks run from the operator's laptop; the dashboard is not built yet — see the [Roadmap](#roadmap).
 - One label definition, and two Synthea populations (v1 and the v2 validation) — see the [Roadmap](#roadmap).
 
@@ -153,11 +153,11 @@ In the same way, the integrity checks and 14 guards in [`validate_bundle`](src/r
 
 ## Roadmap
 
-Items 1-3 make up v2 (v2.0 is tagged once the scheduled monitoring has run, metric M3); item 4 moved to v3.0 (owner decision 2026-10-18); the v1 releases (v1.0, then v1.1 with the post-release hardening) are the local-only milestone. Full requirements: the [v2 PRD](notes/prds/v2-mlops-keyless-scheduled-scale-up-2026-10-09.md).
+Items 1-3 make up v2 (v2.0 is tagged once metric M3 is met: a dispatched burn-in, then a scheduled weekly tick); item 4 moved to v3.0 (owner decision 2026-10-18); the v1 releases (v1.0, then v1.1 with the post-release hardening) are the local-only milestone. Full requirements: the [v2 PRD](notes/prds/v2-mlops-keyless-scheduled-scale-up-2026-10-09.md).
 
 1. **Cloud (done in v2):** billing alerts, Terraform-managed GCS buckets and service accounts, a keyless GitHub Actions identity (Workload Identity Federation), the PySpark job on Dataproc Serverless reading and writing GCS, and scoring into BigQuery behind SQL data tests. The BigQuery gold table via the direct write method (Storage Write API) moved to v3.0.
 2. **Scale-up (done in v2):** a 200,000-patient population with a new seed and fresh `reference_date` as the untouched validation, pre-registered before it was generated (616 test positives); a retrained model went through a pre-registered promotion gate and was refused because it does not beat the reason-code lookup ([results](docs/results.md)), then promoted by a disclosed owner override ([PROMOTIONS.md](deploy/PROMOTIONS.md)).
-3. **Monitoring (built in v2, burn-in pending):** a scheduled tick on a simulated clock scores each simulated week into BigQuery and checks observed-versus-expected calibration on the 13-week cohort whose labels have matured, under the pre-registered rule; a run ledger on the [`ledger` branch](https://github.com/fma00/synthea-readmission-risk/blob/ledger/docs/run-ledger.md), and one GitHub issue per failure or alert. It is not weeks of unattended operation: a one-afternoon accelerated burn-in, then a weekly cadence ([runbook](docs/setup.md#monitoring-tick-v2-slice-7)).
+3. **Monitoring (built in v2, burn-in pending):** a tick on a simulated clock (scheduled weekly; the burn-in dispatched by a laptop timer) scores each simulated week into BigQuery and checks observed-versus-expected calibration on the 13-week cohort whose labels have matured, under the pre-registered rule; a run ledger on the [`ledger` branch](https://github.com/fma00/synthea-readmission-risk/blob/ledger/docs/run-ledger.md), and one GitHub issue per failure or alert. It is not weeks of unattended operation: an accelerated burn-in dispatched by a laptop timer, then a scheduled weekly cadence ([runbook](docs/setup.md#monitoring-tick-v2-slice-7)).
 4. **Dashboard (v3.0, not started):** a Streamlit dashboard reading BigQuery (Streamlit Community Cloud first, Cloud Run later), with a live "stale since" heartbeat, the model card and the BigQuery gold table.
 5. **Smaller follow-ups:** label v2, as-of scoring, hyperparameter tuning, feature attribution, hosted MLflow.
 
@@ -196,7 +196,7 @@ Needs a JDK 17+ on `PATH` (PySpark local mode) and, on macOS, `brew install libo
 | Score a Top-N list | `make score SCORE_GOLD_DIR=<gold> SCORE_ARGS="--bundle bundles/<id>"` | a bundle and its gold ([scoring.md](docs/scoring.md)) |
 | Check the monitoring range, simulate it | `make monitor-preflight`, `make monitor-simulate` | the champion bundle and gold (owner) |
 | Score into BigQuery, prove the data tests | `make score-bq RUN_DATE=…`, `make m5-check`, `make m5-monitoring` | owner: GCP credentials |
-| Run the monitoring tick | `gh workflow run monitor.yml --ref main` (scheduled during the burn-in and weekly); `make monitor-catch-up WEEKS=…` from the laptop | owner: GCP and GitHub ([runbook](docs/setup.md#monitoring-tick-v2-slice-7)) |
+| Run the monitoring tick | `gh workflow run monitor.yml --ref main` (dispatched by a laptop timer during the burn-in, `make burn-in-timer`; scheduled weekly); `make monitor-catch-up WEEKS=…` from the laptop | owner: GCP and GitHub ([runbook](docs/setup.md#monitoring-tick-v2-slice-7)) |
 | Ledger and metric M3 | `make ledger`, `make m3-check` | owner: GCP and `gh` |
 
 Without the author's credentials, everything in the first five rows works on a fresh clone; the cloud steps document the author's setup and need your own GCP project and Terraform apply ([setup.md](docs/setup.md#infrastructure-terraform)).
