@@ -16,7 +16,7 @@ from readmission_risk.bundles.manifest import HEX64_RE
 DEFAULT_CONFIG_PATH = Path("deploy/monitoring.json")
 STEP_DAYS = 7  # consecutive ticks' 7-day windows tile the timeline exactly; any other value is a design change
 WINDOW_DAYS = 7
-WEEKLY_CRON = "17 6 * * 1"  # the only cron since 2026-10-20: the burn-in is dispatched by a laptop timer (burn_in.py)
+WEEKLY_CRON = "17 * * * 1-3"  # weekly tick with hourly retry slots Monday-Wednesday; the clock skips once the week's tick succeeded or 3 attempts failed (weekly.py)
 CADENCES = ("burn_in", "weekly", "dispatch", "catch_up")
 _KEYS = {
     "model_bundle_id", "gold_uri", "first_sim_date", "last_sim_date", "step_days", "window_days", "top_n", "crons", "epoch",

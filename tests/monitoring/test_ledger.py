@@ -5,6 +5,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from readmission_risk.monitoring.config import WEEKLY_CRON
 from readmission_risk.monitoring.ledger import (
     HEADER,
     cadence_label,
@@ -65,22 +66,33 @@ def test_cadence_labels():
 
 def test_badge_cases():
     assert last_tick_badge(pd.DataFrame(), cron=None)["color"] == "lightgrey"
-    ticks = pd.DataFrame([_tick(1)])
-    weekly = last_tick_badge(ticks, cron="17 6 * * 1")
+    burn_in = pd.DataFrame([_tick(1)])  # a scheduled burn-in tick does not start the weekly schedule (Part 2)
+    assert last_tick_badge(burn_in, cron=WEEKLY_CRON)["message"].endswith("schedule not started")
+    weekly = last_tick_badge(pd.DataFrame([_tick(1, cadence="weekly")]), cron=WEEKLY_CRON)
     assert weekly["schemaVersion"] == 1 and weekly["color"] == "brightgreen"
     assert weekly["message"] == "2026-10-20 13:07 UTC · sim 2023-08-14 · stale after 2026-11-03 13:07 UTC"
     laptop = pd.DataFrame([_tick(1, trigger="laptop", cadence="catch_up")])
-    assert last_tick_badge(laptop, cron="17 6 * * 1")["message"].endswith("schedule not started")
+    assert last_tick_badge(laptop, cron=WEEKLY_CRON)["message"].endswith("schedule not started")
     assert last_tick_badge(laptop, cron=None)["message"].endswith("dispatch only")
     clock_failure = pd.DataFrame([_tick(1), _tick(2, status="refused", started="2026-10-20T14:00Z", sim_date=None)])
-    assert last_tick_badge(clock_failure, cron="17 6 * * 1")["color"] == "red"
+    assert last_tick_badge(clock_failure, cron=WEEKLY_CRON)["color"] == "red"
+
+
+def test_badge_staleness_uses_succeeded_weekly_only():
+    ticks = pd.DataFrame([
+        _tick(1, cadence="weekly"),
+        _tick(2, cadence="burn_in", started="2026-10-21T08:50Z"),  # a newer scheduled burn-in row
+        _tick(3, cadence="weekly", status="failed", started="2026-10-27T00:20Z"),  # a newer failed weekly attempt
+    ])  # fmt: skip
+    badge = last_tick_badge(ticks, cron=WEEKLY_CRON)
+    assert badge["message"].endswith("stale after 2026-11-03 13:07 UTC") and badge["color"] == "red"
 
 
 def test_cron_state():
     assert cron_state("on:\n  workflow_dispatch:\n", CONFIG) is None
-    assert cron_state('  schedule:\n    - cron: "17 6 * * 1"\n', CONFIG) == "17 6 * * 1"
-    for unknown in ("0 0 * * *", "7,37 13-18 * * *"):  # the burn-in cron is retired (2026-10-20)
+    assert cron_state(f'  schedule:\n    - cron: "{WEEKLY_CRON}"\n', CONFIG) == WEEKLY_CRON
+    for unknown in ("0 0 * * *", "7,37 13-18 * * *", "17 6 * * 1"):  # retired crons (2026-10-20/21)
         with pytest.raises(ValueError, match="not one of"):
             cron_state(f'    - cron: "{unknown}"\n', CONFIG)
     with pytest.raises(ValueError, match="2 cron lines"):
-        cron_state('    - cron: "17 6 * * 1"\n    - cron: "7,37 13-18 * * *"\n', CONFIG)
+        cron_state(f'    - cron: "{WEEKLY_CRON}"\n    - cron: "7,37 13-18 * * *"\n', CONFIG)

@@ -42,6 +42,7 @@ from .config import (
     read_monitoring_config,
 )
 from .rule import alert_rule_from_prereg
+from .weekly import weekly_skip_reason
 
 DEFAULT_PREREG_PATH = Path("prereg.yaml")
 
@@ -72,6 +73,7 @@ class ClockResult:
     record: store.MonitoringRecord | None  # written only on a refusal or failure
     error: BaseException | None
     recorded: bool
+    skip_reason: str | None = None  # a scheduled run that does nothing (weekly.py): no row, the clock does not move
 
 
 @dataclass(frozen=True)
@@ -130,25 +132,37 @@ def _check_burn_in_request(cadence: str, requested: str | None) -> None:
         raise ValueError("a burn-in tick processes the clock head; it cannot be combined with sim_date")
 
 
-def prepare_tick(request: ClockRequest, *, client_factory: Callable | None = None) -> ClockResult:
+def prepare_tick(
+    request: ClockRequest, *, client_factory: Callable | None = None, now: Callable[[], datetime] | None = None
+) -> ClockResult:
+    """`now` (tests) stamps the record's start, which also decides the weekly skip's week."""
     record, start = _new_record()
+    if now is not None:
+        record.started_at = now()
     client = None
-    sim_date = cadence = head = None
+    sim_date = cadence = head = skip_reason = None
     error: BaseException | None = None
     try:
         client = (client_factory or gcp.bigquery_client)()
         config = read_monitoring_config(request.config_path)
         record.model_bundle_id = config.model_bundle_id
-        check_champion_matches(config, read_champion(request.champion_path))
-        cadence = cadence_for(request.event_name, request.schedule or None, config, request.requested_cadence)
-        record.cadence = cadence
-        _check_burn_in_request(cadence, request.requested)
-        requested = _parse_date(request.requested)
-        succeeded = store.succeeded_sim_dates(store.read_ticks(client, config), config)
-        sim_date = next_sim_date(succeeded, config, requested=requested)
-        head = _head_or_none(succeeded, config)
+        ticks = store.read_ticks(client, config)
+        # Before the champion and cadence checks, so the retry cap also covers their refusals (weekly.py).
+        if request.event_name == "schedule":
+            skip_reason = weekly_skip_reason(ticks, config, record.started_at)
+        if skip_reason is None:
+            check_champion_matches(config, read_champion(request.champion_path))
+            cadence = cadence_for(request.event_name, request.schedule or None, config, request.requested_cadence)
+            record.cadence = cadence
+            _check_burn_in_request(cadence, request.requested)
+            requested = _parse_date(request.requested)
+            succeeded = store.succeeded_sim_dates(ticks, config)
+            sim_date = next_sim_date(succeeded, config, requested=requested)
+            head = _head_or_none(succeeded, config)
     except Exception as exc:  # noqa: BLE001 -- recorded below; the CLI decides the exit code
         error = exc
+    if error is None and skip_reason is not None:
+        return ClockResult(sim_date=None, cadence=None, head=None, record=None, error=None, recorded=True, skip_reason=skip_reason)
     if error is None:
         return ClockResult(sim_date=sim_date, cadence=cadence, head=head, record=None, error=None, recorded=True)
     record.failed_stage = "clock"

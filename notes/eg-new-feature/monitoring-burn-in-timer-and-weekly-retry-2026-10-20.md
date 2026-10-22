@@ -489,8 +489,9 @@ def weekly_skip_reason(ticks: pd.DataFrame, config: MonitoringConfig, at: dateti
   - else `None`.
 - An empty frame returns `None`. The input is not mutated.
 - Which time counts: the week is that of the **clock stage's start** (`at`). A counted row's `started_at` is its own
-  stage's start: evaluate-stage rows start a few minutes after their clock. Both happen Mon–Wed, so no week boundary can
-  separate them.
+  stage's start: evaluate-stage rows start a few minutes after their clock. The ISO week runs Monday to Sunday, so the
+  two stages fall in the same week unless a slot is delayed into the following Monday (about four days or more for a
+  Wednesday slot), which has not been observed (worst delay seen: about 3 hours).
 
 **`tick.py` (Part 2)**
 - `ClockResult` gains a last field `skip_reason: str | None = None`.
@@ -550,7 +551,161 @@ def weekly_skip_reason(ticks: pd.DataFrame, config: MonitoringConfig, at: dateti
 - In `classify`, before the green/red decision: `conclusion == "success"`, no row for the URL, and the job named
   `score` has `conclusion == "skipped"` give `Verdict("skipped", None, run_info)`.
 - `first_weekly_after` already passes over non-green verdicts.
-- Burn-in runs never skip: skips need `cadence == weekly`.
+- Burn-in runs never skip: skip eligibility is `request.event_name == "schedule"` (checklist item 4), and burn-in runs are dispatches. A scheduled run whose cron is unknown (null cadence) can skip.
+
+### Part 2 implementation checklist (refreshed 2026-10-21 against `main` at `281dea5`, after Part 1 merged)
+
+This list consolidates every Part 2 change, including the ones stated elsewhere in this note (Part 1 sections, Failure
+modes, Verification, Records), with anchors checked against the current code. Where it and an older passage disagree,
+this list wins.
+
+**Code**
+1. `src/readmission_risk/monitoring/config.py:19`: `WEEKLY_CRON = "17 * * * 1-3"`; its comment becomes "weekly tick with
+   hourly retry slots Monday-Wednesday; the clock skips once the week's tick succeeded or 3 attempts failed (weekly.py)".
+   `_PERIODS` keeps `{WEEKLY_CRON: timedelta(days=7)}`.
+2. `deploy/monitoring.json:9`: `"crons": {"weekly": "17 * * * 1-3"}`.
+3. `src/readmission_risk/monitoring/weekly.py` (new): exactly as in "`weekly.py` (pure, new)" above, with the module
+   docstring stating the event/trigger invariant (Verification > the design invariant).
+4. `src/readmission_risk/monitoring/tick.py`:
+   - `ClockResult` (line 68) gains the last field `skip_reason: str | None = None`;
+   - `prepare_tick` (line 133) gains `now: Callable[[], datetime] | None = None`; after `record, start =
+     _new_record()` (line 134): `if now is not None: record.started_at = now()`;
+   - inside the `try`, the current order (lines 140-147: config, `model_bundle_id`, champion, cadence, burn-in check,
+     requested, `succeeded = store.succeeded_sim_dates(store.read_ticks(...))`) becomes: config; `model_bundle_id`;
+     `ticks = store.read_ticks(client, config)`; the skip check (`request.event_name == "schedule"`, `at =
+     record.started_at`), returning the skip `ClockResult`; champion; cadence; `_check_burn_in_request`; requested;
+     `succeeded = store.succeeded_sim_dates(ticks, config)`; the rest unchanged.
+   - `evaluate_tick` (line 164) is not changed.
+5. `scripts/monitor_tick.py`:
+   - `_report_clock` (line 93): the skip branch first (as in "`monitor_tick.py` `_report_clock` (Part 2)" above); the
+     success branch's `GITHUB_OUTPUT` text at line 96 becomes `f"sim_date={...}\ncadence={result.cadence}\nskip=false\n"`;
+   - a module-level `from datetime import UTC, datetime` (the imports at lines 12-19 have none today);
+   - a new `_check_catch_up_window()` raising `ValueError("catch-up does not run from Monday 00:00 to Thursday 06:00
+     (UTC): the weekly retry slots (and their delayed runs) may be active")` when `now = datetime.now(UTC)` has
+     `now.weekday() in {0, 1, 2}` or (`now.weekday() == 3 and now.hour < 6`). The six Thursday hours cover a delayed
+     Wednesday 23:17 slot (delays of up to about 3 h have been observed).
+   - It is called (a) at the end of `_check_catch_up_args` (line 178), after its existing two checks, and (b) **at the
+     top of every iteration** of the `catch_up` loop, before `prepare_tick`, **together with**
+     `require_no_running_workflow()`. The existing pre-loop call (line 198) **stays**, so the order of today's
+     refusals is unchanged and the call count for `--weeks N` is **N + 1**. In Part 2, `require_no_running_workflow`
+     (lines 82-90) also checks **both** workflows of the concurrency group, `monitor.yml` and `score.yml`, and pins the
+     repository: for each `w` it runs `["gh", "run", "list", "-R", "fma00/synthea-readmission-risk", "--workflow", w,
+     "--json", "status", "--limit", "20"]`, and its error names the workflow (`f"a {w} run is {status}; never catch up
+     while an Actions tick may run"`). A refusal there prints `ERROR:
+     <message>` and exits 1 (`EXIT_REFUSED`) after the weeks already done. A catch-up started on a Sunday evening
+     therefore stops before Monday's first slot, like the timer.
+   - The `catch-up` command's docstring (line 192) gains "Refused from Monday 00:00 to Thursday 06:00 UTC (the weekly
+     retry slots)."
+   - The timer keeps `BLOCKED_WEEKDAYS = {0, 1, 2}` (item 6). Its idle wait sees Actions runs, so a delayed Wednesday
+     slot running on Thursday only delays the timer's next dispatch; a conflict with a pending dispatch is handled as
+     `dropped`.
+6. `scripts/burn_in_timer.py:31`: `BLOCKED_WEEKDAYS: frozenset[int] = frozenset({0, 1, 2})  # the weekly retry slots`.
+7. `src/readmission_risk/monitoring/ledger.py`:
+   - `HEADER` (line 15): exactly one substring changes, old `"after the burn-in, weekly ticks are scheduled once a
+     week."` → new `"weekly ticks are scheduled, with retry slots that normally stop once the week's tick has
+     succeeded."`. The rest of the header is unchanged, including "Ticks labelled catch-up (laptop) …" and "This ledger
+     shows repeatability and idempotency, not weeks of unattended operation": a few weekly ticks before the `v2.0` tag
+     are still not weeks of operation. The Interfaces wording "replaces the whole sentence" means only this burn-in
+     sentence's last clause; this item is the exact edit.
+   - `last_tick_badge`, line 126: the staleness basis becomes succeeded weekly scheduled rows (as above). **No bundle
+     filter (accepted):** a champion promotion must change `deploy/monitoring.json` and re-anchor the clock anyway
+     (slice-7 `check_champion_matches`), and an old bundle's last weekly tick only sets a staleness time that the new
+     bundle's first weekly tick replaces.
+8. `scripts/m3_check.py`:
+   - `classify` (line 48): the `skipped` verdict, checked first: `run_info["conclusion"] == "success"`, no row for the
+     URL, and the job named `score` with `conclusion == "skipped"`, **with no `attempt` condition** (a re-run of a skip
+     run is still a skip, neutral either way);
+   - `Verdict.kind`'s comment (line 36) becomes `# green | red | dropped | skipped`;
+   - **outcome-neutral by design:** today a skip run would classify as red (success without a row), which
+     `first_weekly_after` already passes over; the new verdict changes only the printed evidence (`skipped` instead of
+     `red`), not whether M3 is met;
+   - **listing bound (critic round P2-1, gap 6):** in `collect`, the scheduled-run listing gains
+     `"--created", f">={streak[-1].run['createdAt'][:10]}"` (the streak end's UTC date), so the 1000-run limit counts
+     only runs from the streak onwards and the first weekly tick after the streak cannot drop out of the listing for
+     about 14 weeks at a full fire rate; the help text of `--limit` notes "scheduled runs are listed from the streak's
+     date". Because of this, `collect` lists the scheduled runs only after the streak is known (it already does);
+   - the docstring's second paragraph (the `--help` text) is **replaced** by exactly: "Burn-in runs are the
+     workflow_dispatch runs titled 'Monitoring tick (burn-in)'; weekly runs are the scheduled runs. A run counts green
+     only if its Actions conclusion is success, its attempt is 1, AND serving.monitoring holds a succeeded row for its
+     URL with the expected cadence. A cancelled run that never started its clock job is dropped (neither green nor
+     red); a scheduled run whose score job was skipped is a skip (neutral). The streak is the first 5 consecutive green
+     burn-in runs; M3 is met by the first green weekly run after it, and red, dropped or skipped weekly runs in between
+     do not invalidate it. Scheduled runs are listed from the streak's date. Needs `gh` and BigQuery read access
+     (laptop: the ledger-reader SA). Exit 0 met, 3 not met, 2 on a gh or BigQuery error." (one line in the file, as
+     today);
+   - `first_weekly_after`'s docstring (line 81) becomes "The first green weekly verdict created after `after`; red,
+     dropped or skipped scheduled runs before it are passed over."
+9. `.github/workflows/monitor.yml`: the `schedule:` block after `workflow_dispatch` (as above); the clock job's
+   `outputs:` gains `skip: ${{ steps.clock.outputs.skip }}`; the `if:`s of `score`, `evaluate`, `ledger-render` and
+   `issues` as above; the header's cron-state sentence becomes "Cron states (exactly one at a time,
+   tests/test_infra.py): the weekly retry cron (Part 2 of
+   notes/eg-new-feature/monitoring-burn-in-timer-and-weekly-retry-2026-10-20.md); the burn-in was dispatched by a laptop timer (make
+   burn-in-timer).".
+10. `Makefile`: `burn-in-timer`'s help gains "; refuses Mon-Wed UTC (weekly retry slots)" after "(laptop; needs gh)";
+    `monitor-catch-up`'s help (line 119) gains "; refused Mon 00:00-Thu 06:00 UTC (weekly retry slots)".
+
+**Tests (changed and new; each listed so the semantic-change count is visible)**
+- `tests/monitoring/test_config.py`: lines 75, 92 and 109 read `mc.WEEKLY_CRON` instead of `"17 6 * * 1"` (literal);
+  lines 49 and 51 keep the old literal as an arbitrary value (unchanged).
+- `tests/monitoring/test_tick.py`: lines 177 and 189 read `WEEKLY_CRON` (literal); new tests
+  `test_weekly_skip_returns_no_row`, `test_weekly_skip_does_not_apply_to_dispatch_or_burn_in`,
+  `test_weekly_tick_runs_when_this_week_has_no_attempt`, `test_weekly_skip_precedes_champion_and_cadence_checks`,
+  `test_budget_counts_champion_mismatch_refusals` (as specified in Verification).
+- `tests/monitoring/test_weekly.py` (new), as in Verification.
+- `tests/monitoring/test_ledger.py`:
+  - `test_badge_cases` (lines 66-76) changes **semantically**: the default `_tick` is a scheduled `burn_in` row, so with
+    the weekly cron it now reads "schedule not started"; a `_tick(1, cadence="weekly")` row gives "stale after
+    2026-11-03 13:07 UTC"; the laptop and clock-failure assertions use `WEEKLY_CRON` (literal);
+  - `test_cron_state` (lines 79-86) uses `WEEKLY_CRON` (literal);
+  - new `test_badge_staleness_uses_succeeded_weekly_only`;
+  - the header assertion follows the new `HEADER`.
+- `tests/monitoring/test_cli.py`:
+  - a new autouse fixture `_thursday` patching `cli.datetime` and `timer._now` to Thursday 2026-10-22 10:00 UTC, so the
+    existing catch-up tests (lines 114-170) and timer-CLI tests stay weekday-independent;
+  - new `test_catch_up_refuses_mon_wed`, `test_timer_refuses_mon_wed_at_start` (no `gh` call is made);
+  - new `test_clock_skip_writes_skip_output` and the resolved-path `skip=false` assertion in
+    `test_clock_resolved_writes_outputs`;
+  - new `test_m3_skip_runs_are_neutral`: the verdict is `skipped` (also on attempt 2), and a skipped verdict before
+    the first green weekly leaves M3 met with the same evidence;
+  - `test_m3_collect_lists_events_separately_and_bounds_the_views` additionally asserts the scheduled listing carries
+    `--created >=2026-10-20` (the streak end's date in its fixtures);
+  - new `test_catch_up_rechecks_the_window_each_week`: `cli.datetime` is patched with a class whose `now(tz)` returns
+    `state["now"]` (initially Sunday 2026-10-25 23:50 UTC); the patched `evaluate_tick` sets `state["now"]` to Monday
+    2026-10-26 00:05 UTC on its first call (driven by tick progress, not by the number of `now` calls); `--weeks 3`
+    gives exactly **1** `prepare_tick` call, then exit 1 with the window message;
+  - new `test_catch_up_window_boundaries`: Thursday 05:59 UTC is refused, Thursday 06:00 and Sunday 23:59 are allowed;
+  - `test_catch_up_switches_identities_monitor_scorer_monitor` runs with `--weeks 2` and asserts
+    `require_no_running_workflow` is called **3** times (start + each week; patched counter);
+  - new `test_require_no_running_workflow_checks_both_workflows_with_repo`: the faked `subprocess.run` sees two calls
+    carrying `-R fma00/synthea-readmission-risk` and `--workflow monitor.yml` / `--workflow score.yml`, and a busy
+    `score.yml` refuses with "a score.yml run is in_progress".
+- `tests/test_infra.py`: `test_monitor_workflow_job_graph`'s expected `if:` strings; a check that the clock job's
+  outputs include `skip`; `test_monitor_workflow_cron_state_and_literals_match_the_config` is **tightened** to
+  `crons == [config["crons"]["weekly"]] == ["17 * * * 1-3"]` and `"schedule:" in text`, so a Part 2 diff without the
+  schedule fails CI.
+
+**Records (Part 2)**:
+- **README and its pins (the burn-in is done since T2/T3):** the roadmap row status `Built in v2; burn-in pending`
+  becomes `Built in v2; burn-in done, scheduled weekly tick pending`; the paragraph heading "3. **Monitoring (built
+  in v2, burn-in pending):**" becomes "3. **Monitoring (built in v2, weekly tick pending):**"; `tests/test_docs.py`
+  `STATUS_ROWS["**Monitoring**"]` and `ROADMAP_STATUS["Monitoring"]` (`"(built in v2, weekly tick pending"`) change
+  with them, and the comment above them says so. They change again at T5/the `v2.0` tag (out of scope here).
+- **The scheduled-runs badge disclosure (failure-mode row "README's 'Monitoring tick (scheduled)' badge"):** README's
+  limitations bullet "…the 'Monitoring tick (scheduled)' badge shows the latest scheduled run, which can lag, …"
+  becomes "… which can lag and, with the weekly retry slots, can be a slot that skipped (green even after a week whose
+  3 attempts failed), …"; `docs/setup.md`'s Staleness bullet sentence "…so it can lag; …" gains the same clause.
+- **Memory:** `project_slice7_monitoring.md` records the Part 2 merge and T4-T6 status.
+- **`docs/setup.md` catch-up refusal:** the commands-block comment on `make monitor-catch-up WEEKS=18` gains "; not Mon
+  00:00-Thu 06:00 UTC", and the "Never overlap" bullet gains: "From the weekly retry slots on, the catch-up refuses from
+  Monday 00:00 to Thursday 06:00 UTC and re-checks for a running Actions tick before every week; the timer refuses
+  Monday to Wednesday."
+- PRD FR19 first sub-bullet, FR21 and the 60-day risk row (Records above); `docs/setup.md` (Cron
+states → the weekly retry cron is live; a "Weekly retry slots" bullet; the Staleness bullet's Part 2 sentence; the Cost
+bullet; the "do not re-run a weekly run" guidance; the burn-in-timer bullet's Mon–Wed refusal); README operations row
+(", with hourly retry slots Monday to Wednesday"); CLAUDE.md (the slice-7 sub-bullet: Part 2 merged); this note's
+Results (T1-T3 now, T4-T6 later).
+
+**Timing:** merge on a Thursday to Sunday (UTC). The first retry slot is Monday 2026-10-26 00:17 UTC.
 
 ## UX flow
 
@@ -593,8 +748,9 @@ def weekly_skip_reason(ticks: pd.DataFrame, config: MonitoringConfig, at: dateti
     interruption) dispatches up to `--ticks` more.
   - The weekly cadence moves it one week per real week, so the clock is exhausted around 2029.
   - A manual dispatch during the week moves the clock an extra week, as today.
-- **Determinism.** No randomness is added. The skip decision depends only on BigQuery rows and the clock-stage start
-  time; wall-clock timing does not affect outputs.
+- **Determinism.** No randomness is added. The skip decision is a pure function of the BigQuery rows and the recorded
+  (or injected) clock-stage start time. *Which* fired slot runs the week's tick depends on GitHub's timing and is not
+  deterministic; the tick's outputs for a given simulated date are not affected by it.
 - **Cost.**
   - A tick costs what slice 7's does.
   - A skip run costs one `read_ticks` query (10 MB minimum billing) and free runner minutes.
@@ -621,9 +777,10 @@ def weekly_skip_reason(ticks: pd.DataFrame, config: MonitoringConfig, at: dateti
 | Weekly: the tick succeeds in BigQuery but the Actions run ends red (ledger-commit push conflict, issues-job gh error) | **Accepted.** The skip rule sees the succeeded row (BigQuery is the truth), so the week is done and later slots skip. M3 counts that run red and waits for the next week's green weekly run. The red job shows in the run, and the issues job comments if it ran |
 | Part 2: an owner dispatch of `monitor.yml`/`score.yml` still *pending* when a retry slot fires (Mon–Wed, or a delayed Wednesday slot landing on Thursday) | the newer slot run replaces the pending dispatch in group `score`: the dispatch is cancelled (dropped, not failed). Documented in `docs/setup.md` ("Never overlap"); re-dispatch it. The timer treats such a drop as `dropped` and re-dispatches |
 | README's "Monitoring tick (scheduled)" badge (`?event=schedule`) | Part 1: it freezes on the last scheduled run (a 2026-10-20 burn-in, or a delayed retired-cron refusal). Part 2: skip runs conclude `success`, so it turns green again after a week's retry budget is spent. **Disclosed, not changed** (the badge is pinned by `test_docs` and FR20): the README limitations bullet and `docs/setup.md` say that the last-tick badge and the ledger are the truth for the week's tick |
-| Part 2: `make monitor-catch-up` during Mon–Wed | **Refused**: Part 2 adds the same weekday guard to `scripts/monitor_tick.py catch-up`. **At the end** of `_check_catch_up_args` (after the existing Actions refusal and the `--weeks` range check, so those keep their messages), it raises `ValueError("catch-up does not run Monday to Wednesday (UTC) while the weekly retry slots are active")` when `datetime.now(UTC).weekday() in {0, 1, 2}` (exit 1). The existing catch-up tests stay weekday-independent through the `_thursday` fixture. `scripts/monitor_tick.py` gains a module-level `from datetime import UTC, datetime`. Test: `test_catch_up_refuses_mon_wed` (P2) monkeypatches `cli.datetime` with a subclass whose `now(tz)` returns Tuesday 2026-10-27 10:00 UTC. The timer and a catch-up cannot see each other: documented, "run one at a time" |
-| Part 2: an owner "Re-run failed jobs" on a red weekly run | the re-run's row has `trigger = schedule`, `cadence = weekly`. It counts towards the budget, and if green it ends the week, but M3 scores it red (`attempt > 1`). **Guidance in `docs/setup.md`: do not re-run a weekly run; let the next slot retry, or dispatch.** Accepted |
+| Part 2: `make monitor-catch-up` from Monday 00:00 to Thursday 06:00 UTC | **Refused** (exit 1) at start and before every week, together with a re-check for a running Actions tick; exact placement, message and tests in "Part 2 implementation checklist" items 5 and Tests (that list wins over earlier wording). The timer and a catch-up cannot see each other: documented, "run one at a time" |
+| Part 2: an owner "Re-run failed jobs" on a red weekly run | the re-run's row has `trigger = schedule`, `cadence = weekly`. It counts towards the budget, and if green it ends the week, but M3 scores it red (`attempt > 1`). **Guidance in `docs/setup.md`: never re-run a weekly run (green or red); let the next slot retry, or dispatch.** Accepted |
 | Part 2: "Re-run failed jobs" on a red weekly run *after* a later slot succeeded | the re-run's score/evaluate replay the same `sim_date` (the evaluate re-check allows a date at or before the head), so the partition is replaced and a second succeeded weekly row with the same `sim_date` and an identical evaluation is appended. This is slice 7's documented replay idempotency; the clock does not move. Covered by the same "do not re-run a weekly run" guidance; the ledger header does not claim "once per week" |
+| Part 2: any re-run ("Re-run all jobs" or "Re-run failed jobs") of the week's **green** weekly run | the clock skips (the week's succeeded row exists), so the run ends `success` at attempt 2. `m3_check.classify` reads the latest attempt: there is a row for the URL (attempt 1), so it is not `skipped`, and attempt 2 is not green, so it is `red`. If that run was M3's evidence, M3 reads NOT MET until the next week's green weekly tick. **Accepted, with the guidance widened: never re-run a weekly run, green or red** (`docs/setup.md`) |
 | Timer started or still running on Mon–Wed after Part 2 | refused by the weekday guard (exit 2) before any dispatch |
 | Weekly: dispatch tick during Mon–Wed | not the weekly tick (cadence `dispatch`); clock moves an extra week |
 | Week boundary | ISO week in UTC from the clock-stage start; slots are Mon–Wed only |
@@ -680,7 +837,13 @@ def weekly_skip_reason(ticks: pd.DataFrame, config: MonitoringConfig, at: dateti
   - another bundle's rows;
   - `dispatch`/`catch_up`/`burn_in` successes;
   - a null-cadence dispatch refusal.
-- A null-cadence scheduled refusal counts.
+- A null-cadence scheduled refusal counts; a NaN cadence counts like `None`.
+- The upper week bound: rows from the **next** week are ignored.
+- Precedence: 3 failed + 1 succeeded attempt gives the "already succeeded" reason.
+- The succeeded reason names the earliest succeeded attempt (ties broken by `monitoring_run_id`), using its
+  `github_run_url`, else its `monitoring_run_id`; both exact strings are asserted.
+- The exact budget string: `"retry budget spent: 3 weekly attempts this week did not succeed"`.
+- Rows with `trigger` `laptop` or `None` never count, even with cadence `weekly` or null.
 - The input frame is unchanged.
 
 *`tests/monitoring/test_burn_in.py`* (a scripted fake `gh` keyed on args, a fake clock advanced by the fake `sleep`)
@@ -736,7 +899,8 @@ def weekly_skip_reason(ticks: pd.DataFrame, config: MonitoringConfig, at: dateti
     10:00 UTC:
     - `cli.datetime` (`scripts/monitor_tick.py`'s module-level `datetime`) with a subclass whose `now(tz)` returns it;
     - `timer._now` (`scripts/burn_in_timer.py`) with a lambda.
-  - This keeps every existing catch-up test (lines 112-167) and every timer-CLI test independent of the real weekday.
+  - This keeps every existing catch-up test and every timer-CLI test independent of the real weekday (current line
+    numbers: "Part 2 implementation checklist" > Tests).
     Mon–Wed tests override it with a Tuesday.
 - Changed:
   - the clock test at lines 61-67 (schedule + burn-in cron), which becomes a dispatch with `REQUESTED_CADENCE=burn_in`;
@@ -763,17 +927,9 @@ def weekly_skip_reason(ticks: pd.DataFrame, config: MonitoringConfig, at: dateti
 - Changed: `test_ledger.py:41`. Its `_tick` default `trigger="schedule"` means the expected label becomes
   `"burn-in (scheduled, accelerated)"`.
 - New: `cadence_label` for `burn_in` × {`schedule`, `workflow_dispatch`, `laptop`} and for the other cadences.
-- (P1, changed) `test_badge_cases` (`test_ledger.py:55-69`): the burn-in-cron and hourly-fallback assertions (lines
-  58-60, 63-64) are deleted, because `period_of` no longer knows those crons.
-- (P2, changed **semantically**) `test_badge_cases` lines 61-62: the default `_tick` is a scheduled `burn_in` row, so
-  under Part 2's staleness basis `last_tick_badge(ticks, cron=WEEKLY_CRON)` reads "schedule not started". The
-  assertion is rewritten that way, and a new assertion with `_tick(1, cadence="weekly")` expects "stale after
-  2026-11-03 13:07 UTC". Lines 68-69 (`clock_failure`, colour red) are unchanged in meaning: the colour still follows
-  the newest row.
-- (P2, changed literally) every other test that hard-codes `"17 6 * * 1"` moves to `config.WEEKLY_CRON`:
-  `test_config.py:79` and `:102`, `test_tick.py:177`, `test_ledger.py:66`, `:69`, `:75` and `:79`, and the clock test
-  in `test_cli.py` once it is ported. `test_infra` reads the config, so it follows
-  automatically.
+- (P1, done in PR #33) `test_badge_cases`: the burn-in-cron and hourly-fallback assertions were deleted.
+- (P2) the changed tests and their current line numbers are listed in "Part 2 implementation checklist" > Tests, which
+  replaces the line references previously given here.
 - (P2) `test_badge_staleness_uses_succeeded_weekly_only`: a newer scheduled `burn_in` row and a newer failed weekly row
   do not move "stale after".
 
@@ -835,12 +991,17 @@ def weekly_skip_reason(ticks: pd.DataFrame, config: MonitoringConfig, at: dateti
   4. **pass criterion: at least one skip run observed live** (item 2). If no slot fires after the week's tick, T4.2 and
      T4.4 carry over to the following weeks, up to 3. If still none, that is recorded, and the skip path's live
      semantics stay under "checked only by unit tests". M3 (T5) does not wait for it.
+  5. **failed-clock path, live:** `gh workflow run monitor.yml --ref main -f sim_date=20230418` (off-grid). Expected:
+     the run is red; `clock` failed (refused, row `refused`/`clock`, `trigger = workflow_dispatch`, so it never counts
+     towards the weekly budget); `score` and `evaluate` skipped; `ledger-render`, `ledger-commit` and `issues` ran (the
+     empty `skip` output satisfies `!= 'true'`); one failure issue created or commented, closed by the owner after the
+     next green tick. Run it on a Thursday to Sunday, so it does not interfere with the weekly slots;
 - **T5:** the same command prints `M3 MET` and `0`.
 - **T6:** the slice-7 runbook's L16 and L17, then the Dependabot PR #24 reminder (memory).
 
 **Checked only by unit tests, not live (stated, accepted):**
 - the retry cap after 3 failures;
-- a failed clock in Part 2 (the empty `skip` output keeps ledger-render and issues running);
+- (moved to T4.5, now checked live) a failed clock in Part 2;
 - `m3_check`'s neutral handling of skip runs, if none precede the first green weekly.
 
 ## Records (all decisions and design changes reported)
@@ -1071,6 +1232,63 @@ def weekly_skip_reason(ticks: pd.DataFrame, config: MonitoringConfig, at: dateti
   following revision). The rounds past the 3-revision cap (5-7) were run at the owner's request. The next independent
   checks are the tests and `/eg-precommit-review` on the diff.
 
+- **Part 2 refresh round (2026-10-21; owner chose "refresh + one check round"):**
+  - **Readiness:** `implementation ready`, no open questions. **Critic:** 10 gaps.
+  - **Revision P2-1 addressed all of them:**
+    - README status rows and `test_docs` pins updated for "burn-in done";
+    - the scheduled-runs badge disclosure added to README and setup;
+    - the catch-up weekday guard rechecked every iteration, with a test;
+    - the exact `HEADER` substring edit;
+    - six more `test_weekly` cases;
+    - `--created` bounds the M3 scheduled listing;
+    - the week-boundary argument restated;
+    - the stale Verification line references removed;
+    - the `m3_check` skip details made explicit (no attempt condition, the kind comment, outcome-neutral);
+    - memory added to the Part 2 Records.
+
+- **Part 2 round 2 (owner asked for one more round):**
+  - **Readiness:** `implementation ready` again. **Critic:** 7 gaps.
+  - **Revision P2-2 addressed all of them:**
+    - the catch-up window becomes Mon 00:00–Thu 06:00 UTC, with a per-iteration running-tick re-check;
+    - a live failed-clock check (T4.5);
+    - the catch-up refusal recorded in the Makefile, setup and the docstring;
+    - the exact m3 `--help` paragraph and the `first_weekly_after` docstring;
+    - a deterministic test mechanism for the per-iteration re-check;
+    - the Determinism bullet corrected;
+    - `tick.py:164`, the stale test_cli reference and the failure row aligned.
+
+- **Part 2 round 3 (owner asked for one more round):**
+  - **Readiness:** `implementation ready` (third time). **Critic:** 7 gaps.
+  - **Revision P2-3:**
+    - the pre-loop running check kept (N + 1 calls);
+    - the running check covers `monitor.yml` and `score.yml` with `-R`, with a test;
+    - the cron-state test tightened to require the schedule;
+    - a failure row for re-running a green weekly run, and the guidance widened;
+    - the skip-eligibility wording fixed;
+    - the full path in the workflow header;
+    - the badge's missing bundle filter accepted, with the reason.
+- **Part 2 closure (owner decision, 2026-10-21):** Part 2 accepted by owner override after its round 3. Readiness closed
+  in all three Part 2 rounds; the critic found 10, 7 and 7 new gaps, each addressed in the following revision
+  (P2-1..P2-3). The next independent check is `/eg-precommit-review` on the diff.
+
 ## Results
 
-(filled in during T1-T6)
+- **T1 (2026-10-21), pass.** PR #33 merged at 08:38 UTC (merge commit `281dea5`), before the 12:00 UTC cut-off.
+  `git show origin/main:.github/workflows/monitor.yml | grep -c 'cron:'` printed `0`; `git ls-tree` of
+  `.github/workflows/` on `main` lists `ci.yml`, `monitor.yml`, `score.yml`, `smoke.yml` (no `schedule-probe.yml`).
+  Recorded: `gh workflow list --all` no longer lists "Schedule probe"; no scheduled `monitor.yml` run has been created
+  since the merge (newest scheduled run: 2026-10-20 21:31 UTC).
+- **T2 (2026-10-21), pass.** Recorded head before the timer: **2023-09-25**. `make burn-in-timer` (defaults: 5 ticks,
+  30 min) printed "previous burn-in run: none among the last 100 dispatch runs", then 5 green ticks, 0 dropped:
+  [39571676250](https://github.com/fma00/synthea-readmission-risk/actions/runs/39571676250) (08:53:45 UTC),
+  [39575534341](https://github.com/fma00/synthea-readmission-risk/actions/runs/39575534341) (09:23:46),
+  [39579421403](https://github.com/fma00/synthea-readmission-risk/actions/runs/39579421403) (09:53:17),
+  [39583252242](https://github.com/fma00/synthea-readmission-risk/actions/runs/39583252242) (10:23:21),
+  [39586927257](https://github.com/fma00/synthea-readmission-risk/actions/runs/39586927257) (10:54:25). `serving.monitoring`:
+  5 succeeded rows, `cadence = burn_in`, `trigger = workflow_dispatch`, sim dates 2023-09-25, 10-02, 10-09, 10-16,
+  10-23 (consecutive from the recorded head), all verdict `ok`, O/E 1.15-1.20. The ledger labels them "burn-in
+  (dispatched, accelerated)" (the 3 earlier ones "burn-in (scheduled, accelerated)"); the badge read "2026-10-21 10:51
+  UTC · sim 2023-10-23 · dispatch only", green.
+- **T3 (2026-10-21), pass.** `python scripts/m3_check.py --impersonate-service-account ledger-reader@…` listed the five
+  runs above as `burn-in … green burn_in`, no scheduled run after the streak, `M3 NOT MET` with those five as evidence,
+  exit `3`. The burn-in half of M3 is met; the weekly half waits for Part 2.

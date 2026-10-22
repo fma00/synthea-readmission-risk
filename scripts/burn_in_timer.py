@@ -28,7 +28,7 @@ from readmission_risk.monitoring.burn_in import (
 
 app = typer.Typer(add_completion=False, rich_markup_mode=None, pretty_exceptions_enable=False, help=__doc__.split("\n\n")[1])
 
-BLOCKED_WEEKDAYS: frozenset[int] = frozenset()  # Part 2 of the design blocks Monday-Wednesday (the weekly retry slots)
+BLOCKED_WEEKDAYS: frozenset[int] = frozenset({0, 1, 2})  # the weekly retry slots (Monday-Wednesday UTC)
 AUTH_CHECK = ["auth", "status", "--hostname", "github.com", "--active"]  # `auth status` takes no -R
 
 

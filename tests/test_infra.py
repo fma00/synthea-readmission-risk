@@ -665,22 +665,24 @@ def test_monitor_workflow_job_graph():
     jobs = _monitor_jobs()
     expected = {
         "clock": (None, None),
-        "score": ("clock", None),
-        "evaluate": ("[clock, score]", "always() && needs.clock.result == 'success'"),
-        "ledger-render": ("[clock, evaluate]", "always()"),
+        "score": ("clock", "needs.clock.outputs.skip != 'true'"),
+        "evaluate": ("[clock, score]", "always() && needs.clock.result == 'success' && needs.clock.outputs.skip != 'true'"),
+        "ledger-render": ("[clock, evaluate]", "always() && needs.clock.outputs.skip != 'true'"),
         "ledger-commit": ("ledger-render", "always() && needs.ledger-render.result == 'success'"),
-        "issues": ("[clock, score, evaluate, ledger-render, ledger-commit]", "always()"),
+        "issues": ("[clock, score, evaluate, ledger-render, ledger-commit]", "always() && needs.clock.outputs.skip != 'true'"),
     }
     for name, (needs, condition) in expected.items():
         assert (_job_value(jobs[name], "needs"), _job_value(jobs[name], "if")) == (needs, condition), name
+    # the weekly retry slots: a skipped clock ends the run green with every later job skipped (weekly.py)
+    assert "      skip: ${{ steps.clock.outputs.skip }}" in jobs["clock"]
 
 
 def test_monitor_workflow_cron_state_and_literals_match_the_config():
     config = json.loads(_read(ROOT / "deploy" / "monitoring.json"))
     text = _read(MONITOR)
     crons = re.findall(r'^\s*- cron: "([^"]+)"\s*$', text, flags=re.MULTILINE)
-    assert crons in ([], [config["crons"]["weekly"]])
-    assert ("schedule:" in text) == bool(crons)
+    assert crons == [config["crons"]["weekly"]] == ["17 * * * 1-3"]  # Part 2: the weekly retry slots are live
+    assert "schedule:" in text
     assert config["gold_uri"] == expected_gold_uri()
     assert (
         f'--gold-dir {config["gold_uri"]} --run-date "$SIM_DATE" --window-days {config["window_days"]} --top-n {config["top_n"]}'
