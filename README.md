@@ -10,7 +10,7 @@ An end-to-end, tested pipeline for predicting **unplanned** 30-day hospital read
 > - **Built:** the local pipeline, models and demo scorer (v1); in v2 also the cloud setup on GCP (Terraform, keyless CI identity, Dataproc Serverless, scoring into BigQuery), the 200,000-patient scale-up, a pre-registered promotion gate, and a monitoring tick on a simulated clock with a run ledger.
 > - **Not built yet:** the dashboard and the BigQuery gold table (planned for v3.0) — see the [Roadmap](#roadmap).
 > - **Limits:** synthetic data; the v1 numbers are a development set; on the v2 validation the models do not beat a no-model lookup — see [Limitations](#limitations).
-> - **Release:** the [latest release](https://github.com/fma00/synthea-readmission-risk/releases/latest) is the local-only v1 milestone; v2.0 is tagged once metric M3 (amended 2026-10-20: a dispatched burn-in, then a scheduled weekly tick) is met.
+> - **Release:** the [latest release](https://github.com/fma00/synthea-readmission-risk/releases/latest) is **v2.0** (cloud, scale-up, monitoring), tagged after metric M3 was met (a dispatched burn-in, then a scheduled weekly tick); v1.0 and v1.1 were the local-only milestone.
 > - **Read next:** [Status](#status) · [Results so far](#results-so-far) · [Limitations](#limitations) · [Roadmap](#roadmap)
 
 ## Status
@@ -22,9 +22,9 @@ An end-to-end, tested pipeline for predicting **unplanned** 30-day hospital read
 | 2b | [Unplanned-readmission label and gold-table provenance](notes/eg-new-feature/readmission-label-planned-exclusion-2026-09-20.md) | Done |
 | 3 | [Logistic regression and calibrated XGBoost, tracked in MLflow](notes/eg-new-feature/model-training-2026-09-19.md) ([results](docs/results.md)) | Done |
 | 4 | [Top-N triage CLI (a demo over held-out rows)](notes/eg-new-feature/batch-scoring-cli-2026-09-20.md) ([usage](docs/scoring.md)) | Done |
-| v2 | **Cloud**: Terraform-managed GCS and IAM, keyless GitHub Actions identity, Big Join on Dataproc Serverless, scoring into BigQuery with data tests ([setup](docs/setup.md)) | Done in v2 (v2.0 not yet tagged) |
-| v2 | **Scale-up**: 200,000 patients with a fresh seed, pre-registered, and a promotion gate ([results](docs/results.md)) | Done in v2 (v2.0 not yet tagged) |
-| v2 | **Monitoring**: weekly delayed-label calibration check on a simulated clock, run ledger, failure issues ([design](notes/eg-new-feature/v2-slice7-monitoring-tick-ledger-2026-10-18.md), [ledger](https://github.com/fma00/synthea-readmission-risk/blob/ledger/docs/run-ledger.md)) | Built in v2; burn-in done, scheduled weekly tick pending |
+| v2 | **Cloud**: Terraform-managed GCS and IAM, keyless GitHub Actions identity, Big Join on Dataproc Serverless, scoring into BigQuery with data tests ([setup](docs/setup.md)) | Done in v2.0 |
+| v2 | **Scale-up**: 200,000 patients with a fresh seed, pre-registered, and a promotion gate ([results](docs/results.md)) | Done in v2.0 |
+| v2 | **Monitoring**: weekly delayed-label calibration check on a simulated clock, run ledger, failure issues ([design](notes/eg-new-feature/v2-slice7-monitoring-tick-ledger-2026-10-18.md), [ledger](https://github.com/fma00/synthea-readmission-risk/blob/ledger/docs/run-ledger.md)) | Done in v2.0 |
 | v3 | **Dashboard**: Streamlit on BigQuery, and the BigQuery gold table | Planned for v3.0 (not started) |
 
 ## 60-second tour
@@ -153,11 +153,11 @@ In the same way, the integrity checks and 14 guards in [`validate_bundle`](src/r
 
 ## Roadmap
 
-Items 1-3 make up v2 (v2.0 is tagged once metric M3 is met: a dispatched burn-in, then a scheduled weekly tick); item 4 moved to v3.0 (owner decision 2026-10-18); the v1 releases (v1.0, then v1.1 with the post-release hardening) are the local-only milestone. Full requirements: the [v2 PRD](notes/prds/v2-mlops-keyless-scheduled-scale-up-2026-10-09.md).
+Items 1-3 make up v2.0 (tagged after metric M3 was met on 2026-10-26: a dispatched burn-in, then a scheduled weekly tick); item 4 moved to v3.0 (owner decision 2026-10-18); the v1 releases (v1.0, then v1.1 with the post-release hardening) are the local-only milestone. Full requirements: the [v2 PRD](notes/prds/v2-mlops-keyless-scheduled-scale-up-2026-10-09.md).
 
-1. **Cloud (done in v2):** billing alerts, Terraform-managed GCS buckets and service accounts, a keyless GitHub Actions identity (Workload Identity Federation), the PySpark job on Dataproc Serverless reading and writing GCS, and scoring into BigQuery behind SQL data tests. The BigQuery gold table via the direct write method (Storage Write API) moved to v3.0.
-2. **Scale-up (done in v2):** a 200,000-patient population with a new seed and fresh `reference_date` as the untouched validation, pre-registered before it was generated (616 test positives); a retrained model went through a pre-registered promotion gate and was refused because it does not beat the reason-code lookup ([results](docs/results.md)), then promoted by a disclosed owner override ([PROMOTIONS.md](deploy/PROMOTIONS.md)).
-3. **Monitoring (built in v2, weekly tick pending):** a tick on a simulated clock (scheduled weekly; the burn-in dispatched by a laptop timer) scores each simulated week into BigQuery and checks observed-versus-expected calibration on the 13-week cohort whose labels have matured, under the pre-registered rule; a run ledger on the [`ledger` branch](https://github.com/fma00/synthea-readmission-risk/blob/ledger/docs/run-ledger.md), and one GitHub issue per failure or alert. It is not weeks of unattended operation: an accelerated burn-in dispatched by a laptop timer, then a scheduled weekly cadence ([runbook](docs/setup.md#monitoring-tick-v2-slice-7)).
+1. **Cloud (done in v2.0):** billing alerts, Terraform-managed GCS buckets and service accounts, a keyless GitHub Actions identity (Workload Identity Federation), the PySpark job on Dataproc Serverless reading and writing GCS, and scoring into BigQuery behind SQL data tests. The BigQuery gold table via the direct write method (Storage Write API) moved to v3.0.
+2. **Scale-up (done in v2.0):** a 200,000-patient population with a new seed and fresh `reference_date` as the untouched validation, pre-registered before it was generated (616 test positives); a retrained model went through a pre-registered promotion gate and was refused because it does not beat the reason-code lookup ([results](docs/results.md)), then promoted by a disclosed owner override ([PROMOTIONS.md](deploy/PROMOTIONS.md)).
+3. **Monitoring (done in v2.0):** a tick on a simulated clock (scheduled weekly; the burn-in dispatched by a laptop timer) scores each simulated week into BigQuery and checks observed-versus-expected calibration on the 13-week cohort whose labels have matured, under the pre-registered rule; a run ledger on the [`ledger` branch](https://github.com/fma00/synthea-readmission-risk/blob/ledger/docs/run-ledger.md), and one GitHub issue per failure or alert. It is not weeks of unattended operation: an accelerated burn-in dispatched by a laptop timer, then a scheduled weekly cadence ([runbook](docs/setup.md#monitoring-tick-v2-slice-7)).
 4. **Dashboard (v3.0, not started):** a Streamlit dashboard reading BigQuery (Streamlit Community Cloud first, Cloud Run later), with a live "stale since" heartbeat, the model card and the BigQuery gold table.
 5. **Smaller follow-ups:** label v2, as-of scoring, hyperparameter tuning, feature attribution, hosted MLflow.
 

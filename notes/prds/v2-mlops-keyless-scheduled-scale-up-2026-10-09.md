@@ -296,7 +296,7 @@ Each requirement is testable; slice designs refine them.
 
   Its Python version is set at deploy time and documented, because changing it requires a redeploy.
 - **FR23** (**v3.0**, amendment 2026-10-18; `docs/run-ledger.md` lives on the `ledger` branch since slice 7) `docs/model-card.md` (generated from the champion's manifest, so it cannot drift), `docs/results.md` (200k results against `prereg.yaml`, the lookup comparison first, frozen-v1 validation), `docs/run-ledger.md`, and a README "60-second tour" with deep links. The single Mermaid diagram is upgraded with clickable nodes. `tests/test_docs.py` is updated deliberately: the docs page count, the status and roadmap wording, and the `streamlit.app` rule.
-- **FR24** Tag `v2.0` when the Definition of done (Success metrics) holds. **Amendment 2026-10-18:** v2.0 is tagged after slice 7's M3; metrics that depend on slice 8 (the dashboard, the model card) move with it to v3.0.
+- **FR24** Tag `v2.0` when the Definition of done (Success metrics) holds. **Amendment 2026-10-18:** v2.0 is tagged after slice 7's M3; metrics that depend on slice 8 (the dashboard, the model card) move with it to v3.0. **Done 2026-10-26/27:** M3 met (see the M3 row); `v2.0` is tagged on the merge commit of the release-prep PR.
 
 ## Non-functional requirements
 
@@ -338,7 +338,7 @@ Each requirement is testable; slice designs refine them.
 |---|---|---|---|
 | M1 | CI on `main` | green, including the 3.12 pipeline leg, zizmor = 0 findings, `terraform validate` | Actions |
 | M2 | Keyless | 0 service-account keys used by any workflow; WIF condition on numeric repo/owner ids + `main` | `terraform plan` clean; repo grep; IAM key list for CI service accounts = empty |
-| M3 | Scheduled operation | ~~**≥5 consecutive green scheduled ticks in the accelerated burn-in, plus ≥1 green tick at the weekly cadence**~~ **Amended 2026-10-20 (E2, owner decision after observing the scheduled burn-in): ≥5 consecutive green timer-dispatched burn-in ticks, plus ≥1 green scheduled tick at the weekly cadence** before `v2.0` (OQ1) | `scoring_runs` + ledger (burn-in ticks labelled); `make m3-check` |
+| M3 | Scheduled operation | ~~**≥5 consecutive green scheduled ticks in the accelerated burn-in, plus ≥1 green tick at the weekly cadence**~~ **Amended 2026-10-20 (E2, owner decision after observing the scheduled burn-in): ≥5 consecutive green timer-dispatched burn-in ticks, plus ≥1 green scheduled tick at the weekly cadence** before `v2.0` (OQ1) | `scoring_runs` + ledger (burn-in ticks labelled); `make m3-check` **Met 2026-10-26** (`m3_check`: the 5 timer-dispatched burn-in runs of 2026-10-21, then the scheduled weekly tick of 2026-10-26 04:44 UTC; `notes/eg-new-feature/monitoring-burn-in-timer-and-weekly-retry-2026-10-20.md`, Results T5) |
 | M4 | Promotion gate | ≥1 real promotion PR with gate table; ≥1 deliberately bad model refused | PRs linked from the README |
 | M5 | Data tests | a seeded bad row visibly fails the `ASSERT` suite | recorded run |
 | M6 | Pre-registration | `prereg.yaml` commit precedes the 200k generation (timestamps); results reported against every pre-registered metric, including deviations | git log + `docs/results.md` |
