@@ -1292,3 +1292,27 @@ Results (T1-T3 now, T4-T6 later).
 - **T3 (2026-10-21), pass.** `python scripts/m3_check.py --impersonate-service-account ledger-reader@…` listed the five
   runs above as `burn-in … green burn_in`, no scheduled run after the streak, `M3 NOT MET` with those five as evidence,
   exit `3`. The burn-in half of M3 is met; the weekly half waits for Part 2.
+- **Part 2 merge (2026-10-22).** PR #34 merged at 08:57 UTC (Thursday), as required.
+- **T4 (week of 2026-10-26), pass; counts as of 2026-10-27 08:16 UTC.**
+  - **The week's tick.** [40270628943](https://github.com/fma00/synthea-readmission-risk/actions/runs/40270628943), created Mon 04:44 UTC from the 04:17 slot, 27 minutes late,
+    attempt 1, all six jobs green. Its row: `trigger = schedule`, `cadence = weekly`, sim date **2023-10-30** (the week
+    after the burn-in's 2023-10-23), `succeeded`, verdict `ok`, O/E 1.155. It was the first weekly attempt of the week,
+    so no failed or refused attempts preceded it (T4.1).
+  - **Skip runs (T4.2 and T4.4 pass).** Five, each green at attempt 1 with `score`, `evaluate`, `ledger-render`,
+    `ledger-commit` and `issues` skipped and no row written:
+    [40312503343](https://github.com/fma00/synthea-readmission-risk/actions/runs/40312503343) (Mon 11:06), [40368002602](https://github.com/fma00/synthea-readmission-risk/actions/runs/40368002602) (Mon 17:22),
+    [40414100609](https://github.com/fma00/synthea-readmission-risk/actions/runs/40414100609) (Mon 22:39), [40436294203](https://github.com/fma00/synthea-readmission-risk/actions/runs/40436294203) (Tue 02:04),
+    [40469574314](https://github.com/fma00/synthea-readmission-risk/actions/runs/40469574314) (Tue 07:50). The first logged `skip: this week's weekly tick already succeeded
+    (https://github.com/fma00/synthea-readmission-risk/actions/runs/40270628943)`.
+  - **Fired vs due (T4.3).** 6 runs out of 32 due slots (about 19%) by Tue 08:16 UTC; the final count for Mon-Wed is
+    appended after 2026-10-28 23:59 UTC.
+  - **Skip duration (T4 3b).** 79-112 s, median 101 s, under the 5-minute threshold, so follow-up 3 (a credential-free
+    first job) stays "if noisy".
+  - T4.5 (the failed-clock check) is still open; it runs on a Thursday to Sunday.
+- **T5 (2026-10-26), pass: M3 met.** `python scripts/m3_check.py --impersonate-service-account ledger-reader@…` listed
+  the five burn-in runs of 2026-10-21 as `burn-in … green burn_in`, then `scheduled 2026-10-26T04:44:43Z green weekly
+  …/40270628943`, and printed **`M3 MET`** with those six runs as evidence, exit `0`. The PRD's v2.0 condition (FR24:
+  tag after slice 7's M3) holds.
+- **T6.** The `v2.0` tag is set on the merge commit of the release-prep PR (owner). The 60-day calendar reminder,
+  the billing check and Dependabot PR #24 follow.
+
