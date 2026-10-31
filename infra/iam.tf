@@ -573,3 +573,41 @@ resource "google_service_account_iam_member" "operator_impersonates_gold_publish
 
   depends_on = [google_project_service.enabled]
 }
+
+# ---------------------------------------------------------------- v3 slice 2: the dashboard runtime
+# Reads only the authorized views in the dashboard dataset (PRD FR9): nothing on serving, scratch or scratch_gold, no
+# readSessionUser (the dashboard never builds a BigQuery Storage client). The Cloud Run service identity from slice 4; for now
+# impersonated by the operator only (make dashboard-access-check / dashboard-query-check). The dashboard dataset grants no view
+# authorizations itself, so a dataset_iam_member on it cannot drop one. Design:
+# notes/eg-new-feature/v3-slice2-authorized-views-2026-10-31.md (Interfaces section 2).
+resource "google_service_account" "dashboard_runtime" {
+  account_id   = "dashboard-runtime"
+  display_name = "Dashboard runtime (v3 slice 2)"
+  description  = "Reads the authorized views in the dashboard dataset; the Cloud Run service identity from slice 4; impersonated by the operator for live checks."
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_bigquery_dataset_iam_member" "dashboard_runtime_reads_dashboard" {
+  dataset_id = google_bigquery_dataset.dashboard.dataset_id
+  role       = "roles/bigquery.dataViewer"
+  member     = "serviceAccount:${google_service_account.dashboard_runtime.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_project_iam_member" "dashboard_runtime_runs_jobs" {
+  project = var.project_id
+  role    = "roles/bigquery.jobUser"
+  member  = "serviceAccount:${google_service_account.dashboard_runtime.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_service_account_iam_member" "operator_impersonates_dashboard_runtime" {
+  service_account_id = google_service_account.dashboard_runtime.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = var.operator_member
+
+  depends_on = [google_project_service.enabled]
+}

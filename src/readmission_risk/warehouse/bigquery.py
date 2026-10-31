@@ -19,6 +19,7 @@ SERVING_DATASET = "serving"
 SCRATCH_DATASET = "scratch"
 SCRATCH_GOLD_DATASET = "scratch_gold"  # the gold publish's staging tables (v3 slice 1; 1-day expiry)
 GOLD_TABLE = "gold"
+DASHBOARD_DATASET = "dashboard"  # authorized views, the only data the dashboard runtime SA reads (v3 slice 2)
 # The gold table serving.gold holds; infra/bigquery.tf's description names it (tests/test_infra.py keeps them equal) and the
 # publish refuses any other gold (notes/eg-new-feature/v3-slice1-gold-bigquery-2026-10-31.md, Interfaces section 5).
 SERVING_GOLD_FINGERPRINT = "80edd13dcc967d69b6fa4cfa17b4d7fa40188f8e7e17b2031b833332a59c63f3"

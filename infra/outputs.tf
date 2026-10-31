@@ -28,9 +28,15 @@ output "scorer_service_account_email" {
 
 output "bigquery_datasets" {
   value = {
-    serving = google_bigquery_dataset.serving.dataset_id
-    scratch = google_bigquery_dataset.scratch.dataset_id
+    serving      = google_bigquery_dataset.serving.dataset_id
+    scratch      = google_bigquery_dataset.scratch.dataset_id
+    scratch_gold = google_bigquery_dataset.scratch_gold.dataset_id
+    dashboard    = google_bigquery_dataset.dashboard.dataset_id
   }
+}
+
+output "dashboard_runtime_service_account_email" {
+  value = google_service_account.dashboard_runtime.email
 }
 
 output "generation_templates" {
