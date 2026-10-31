@@ -21,6 +21,8 @@ class FakeJob:
     error_result: dict | None = None
     raise_on_result: BaseException | None = None
     total_bytes_billed: int | None = None
+    total_bytes_processed: int | None = None  # dry runs (v3 slice 2)
+    cache_hit: bool | None = None
 
     def result(self, *args, **kwargs):
         assert "timeout" not in kwargs, "no client-side timeouts (the job's final state decides)"
@@ -46,6 +48,7 @@ class FakeBigQuery:
     frames: dict[str, object] = field(default_factory=dict)  # table id -> pyarrow.Table returned by list_rows(...).to_arrow()
     raise_on_get_table: BaseException | None = None
     raise_on_list_rows: BaseException | None = None
+    raise_on_list_tables: BaseException | None = None  # v3 slice 2: the dashboard access probes
 
     def query(self, sql, job_config=None, job_id=None, **kwargs):
         if job_id is not None:  # google-cloud-bigquery: a fixed job id needs job_retry=None (a FutureWarning, later an error)
@@ -97,6 +100,12 @@ class FakeBigQuery:
         if name not in self.frames:
             raise api.NotFound(f"404 Not found: Table {name}")
         return _Rows(self.frames[name])
+
+    def list_tables(self, dataset):
+        self.calls.append(("list_tables", dataset))
+        if self.raise_on_list_tables is not None:
+            raise self.raise_on_list_tables
+        return []
 
     def delete_table(self, table, not_found_ok=False):
         self.calls.append(("delete_table", table, not_found_ok))

@@ -2,7 +2,10 @@
 # serving holds only the real tables; scratch holds short-lived staging and data-test copies. v3 slice 1 adds serving.gold and
 # scratch_gold, the gold publish's staging dataset (notes/eg-new-feature/v3-slice1-gold-bigquery-2026-10-31.md). The table schemas are the
 # package's own JSON files, so Python and Terraform cannot disagree. No `access` blocks on the datasets: they are
-# authoritative and would fight the additive *_iam_member grants in iam.tf.
+# authoritative and would fight the additive *_iam_member grants in iam.tf. v3 slice 2 adds the dashboard dataset of
+# authorized views (notes/eg-new-feature/v3-slice2-authorized-views-2026-10-31.md): their SQL is packaged too, and serving
+# authorizes them through ONE google_bigquery_dataset_access, never an `access` block or a google_bigquery_dataset_iam_* on
+# serving (either silently drops the authorization; tests/test_infra.py forbids both).
 
 resource "google_bigquery_dataset" "serving" {
   dataset_id                 = "serving"
@@ -133,6 +136,90 @@ resource "google_project_iam_custom_role" "scorer_table_writer" {
     "bigquery.tables.getData",
     "bigquery.tables.updateData",
   ]
+
+  depends_on = [google_project_service.enabled]
+}
+
+# ---------------------------------------------------------------- v3 slice 2: the dashboard's authorized views
+# The only data the dashboard runtime SA can read (PRD V8, FR6). No label or demographic column leaves serving through them.
+resource "google_bigquery_dataset" "dashboard" {
+  dataset_id                 = "dashboard"
+  location                   = var.region
+  description                = "Authorized views read by the dashboard (synthetic Synthea data; not for clinical use). No label columns."
+  delete_contents_on_destroy = false
+  labels = {
+    purpose = "dashboard"
+  }
+
+  depends_on = [google_project_service.enabled]
+}
+
+# The views' table references; going through these values (not depends_on) makes each view depend on its base tables.
+locals {
+  dashboard_view_vars = {
+    predictions  = "${var.project_id}.${google_bigquery_table.predictions.dataset_id}.${google_bigquery_table.predictions.table_id}"
+    gold         = "${var.project_id}.${google_bigquery_table.gold.dataset_id}.${google_bigquery_table.gold.table_id}"
+    scoring_runs = "${var.project_id}.${google_bigquery_table.scoring_runs.dataset_id}.${google_bigquery_table.scoring_runs.table_id}"
+    monitoring   = "${var.project_id}.${google_bigquery_table.monitoring.dataset_id}.${google_bigquery_table.monitoring.table_id}"
+  }
+}
+
+resource "google_bigquery_table" "v_call_sheet" {
+  dataset_id          = google_bigquery_dataset.dashboard.dataset_id
+  table_id            = "v_call_sheet"
+  description         = "Top-N call sheet: predictions with a few gold features and the admission reason's readmission rate among discharges before 2023-01-01 (labels settled before the test window; withheld under 30 rows). No label or demographic column. Synthetic data, not for clinical use."
+  deletion_protection = true
+
+  view {
+    query          = templatefile("${path.module}/../src/readmission_risk/warehouse/sql/views/v_call_sheet.sql", local.dashboard_view_vars)
+    use_legacy_sql = false
+  }
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_bigquery_table" "v_scoring_runs" {
+  dataset_id          = google_bigquery_dataset.dashboard.dataset_id
+  table_id            = "v_scoring_runs"
+  description         = "Scoring attempts (serving.scoring_runs without the free-text error message and internal paths)."
+  deletion_protection = true
+
+  view {
+    query          = templatefile("${path.module}/../src/readmission_risk/warehouse/sql/views/v_scoring_runs.sql", local.dashboard_view_vars)
+    use_legacy_sql = false
+  }
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_bigquery_table" "v_monitoring" {
+  dataset_id          = google_bigquery_dataset.dashboard.dataset_id
+  table_id            = "v_monitoring"
+  description         = "Monitoring ticks on the simulated clock (serving.monitoring without the free-text error message)."
+  deletion_protection = true
+
+  view {
+    query          = templatefile("${path.module}/../src/readmission_risk/warehouse/sql/views/v_monitoring.sql", local.dashboard_view_vars)
+    use_legacy_sql = false
+  }
+
+  depends_on = [google_project_service.enabled]
+}
+
+# THE authorization (FR6/FR7): every view in `dashboard` may read `serving`. Authoritative alternatives (an `access` block on
+# google_bigquery_dataset.serving, any google_bigquery_dataset_iam_* on serving) silently drop it; tests/test_infra.py forbids
+# both. Consequence: anyone who can create a view in `dashboard` can read all of serving, labels included; only the owner can
+# (dashboard-runtime has dataViewer there; make dashboard-access-check proves it cannot create one).
+resource "google_bigquery_dataset_access" "serving_authorizes_dashboard_views" {
+  dataset_id = google_bigquery_dataset.serving.dataset_id
+
+  dataset {
+    dataset {
+      project_id = var.project_id
+      dataset_id = google_bigquery_dataset.dashboard.dataset_id
+    }
+    target_types = ["VIEWS"]
+  }
 
   depends_on = [google_project_service.enabled]
 }

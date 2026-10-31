@@ -142,3 +142,15 @@ def test_the_cli_reports_an_unexpected_error_and_exits_5(monkeypatch, tmp_path):
     assert out.exit_code == 5, out.output
     assert "error" in out.output and "RuntimeError: unexpected" in out.output
     assert len(list((tmp_path / "reports").glob("*.json"))) == 1
+
+
+def test_checks_that_must_pass_and_the_v3_slice2_exit_precedence():
+    """v3 slice 2: check() results ("ok"/"failed"/"error") join the probes; a failed check is a FAIL like an allowed probe."""
+    from readmission_risk.warehouse.gold_access_check import _probe, check, probe
+
+    assert _probe is probe
+    ok = check("sa", "c", lambda: None)
+    failed = check("sa", "c", lambda: "wrong columns")
+    error = check("sa", "c", lambda: 1 / 0)
+    assert (ok.outcome, failed.outcome, failed.detail, error.outcome) == ("ok", "failed", "wrong columns", "error")
+    assert exit_code([ok]) == 0 and exit_code([ok, error]) == 5 and exit_code([error, failed]) == 3

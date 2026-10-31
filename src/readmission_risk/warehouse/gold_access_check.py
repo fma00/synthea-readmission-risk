@@ -19,7 +19,7 @@ PROBE_TABLE = "gold_access_probe"
 class ProbeResult:
     sa: str
     probe: str
-    outcome: str  # "denied" | "allowed" | "error"
+    outcome: str  # "denied" | "allowed" | "error"; v3 slice 2 adds "ok" | "failed" for checks that must pass
     detail: str
 
 
@@ -32,7 +32,8 @@ def is_denied(exc: BaseException) -> bool:
     return isinstance(exc, api.BadRequest) and ("Access Denied" in str(exc) or "Permission" in str(exc))
 
 
-def _probe(sa: str, probe: str, action: Callable[[], None], undo: Callable[[], None] | None = None) -> ProbeResult:
+def probe(sa: str, probe: str, action: Callable[[], None], undo: Callable[[], None] | None = None) -> ProbeResult:
+    """An expected-denied action: "denied" if is_denied(its exception), "allowed" (then undone) if it succeeds, else "error"."""
     try:
         action()
     except Exception as exc:  # noqa: BLE001 -- every outcome is a result
@@ -45,6 +46,19 @@ def _probe(sa: str, probe: str, action: Callable[[], None], undo: Callable[[], N
         except Exception as exc:  # noqa: BLE001 -- reported, never raised
             detail = f"ALLOWED, undo failed: {exc}"
     return ProbeResult(sa, probe, "allowed", detail)
+
+
+_probe = probe  # the v3 slice 1 name
+
+
+def check(sa: str, name: str, fn: Callable[[], str | None]) -> ProbeResult:
+    """A check that must pass (v3 slice 2): "ok" if fn returns None, "failed" with the message it returns, "error" on an
+    exception."""
+    try:
+        message = fn()
+    except Exception as exc:  # noqa: BLE001 -- every outcome is a result
+        return ProbeResult(sa, name, "error", f"{type(exc).__name__}: {exc}"[:500])
+    return ProbeResult(sa, name, "ok", "ok") if message is None else ProbeResult(sa, name, "failed", message[:500])
 
 
 def run_access_checks(make_client: Callable[[str], object], *, gold_sa: str, scorer_sa: str, monitor_sa: str) -> list[ProbeResult]:
@@ -107,8 +121,8 @@ def _publisher_probes(client, gold_sa: str, probe_id: str) -> list[ProbeResult]:
 
 
 def exit_code(results: list[ProbeResult]) -> int:
-    """3 if any probe was allowed (a FAIL, wins), else 5 if any errored, else 0."""
-    if any(r.outcome == "allowed" for r in results):
+    """3 if any probe was allowed or any check failed (a FAIL, wins), else 5 if any errored, else 0."""
+    if any(r.outcome in ("allowed", "failed") for r in results):
         return 3
     if any(r.outcome == "error" for r in results):
         return 5
