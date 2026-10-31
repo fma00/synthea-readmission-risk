@@ -1,4 +1,5 @@
-# Service accounts: gha-smoke and bundle-writer (v2 slice 3), scorer (v2 slice 4), monitor and ledger-reader (v2 slice 7).
+# Service accounts: gha-smoke and bundle-writer (v2 slice 3), scorer (v2 slice 4), monitor and ledger-reader (v2 slice 7),
+# gold-publisher (v3 slice 1).
 # Later slices add one per job (Big Join submitter, Dataproc runtime, trainer), each bound to its own workflow file like gha-smoke below. Only additive *_iam_member resources:
 # *_iam_policy or *_iam_binding would replace bindings this config does not own. One deliberate exception:
 # google_project_iam_member_remove.default_compute_no_editor removes Google's project roles/editor grant from the default
@@ -493,6 +494,118 @@ resource "google_service_account_iam_member" "ledger_wif" {
 # make ledger and make m3-check impersonate the ledger reader.
 resource "google_service_account_iam_member" "operator_impersonates_ledger_reader" {
   service_account_id = google_service_account.ledger_reader.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = var.operator_member
+
+  depends_on = [google_project_service.enabled]
+}
+
+# ---------------------------------------------------------------- v3 slice 1: the gold publish (write-audit-publish)
+# Laptop only (no WIF binding): loads gold Parquet into scratch_gold, audits it (GOLD data tests read serving.predictions),
+# replaces serving.gold in ONE DML transaction and verifies it. Nothing on the serving dataset: no tables.create/delete there,
+# so a load job into serving is impossible (slice 4's live finding). Disclosed residuals: updateData allows row deletes (time
+# travel recovers them for 7 days); the reused custom role is titled "Scorer table writer". Design:
+# notes/eg-new-feature/v3-slice1-gold-bigquery-2026-10-31.md (Interfaces section 2).
+resource "google_service_account" "gold_publisher" {
+  account_id   = "gold-publisher"
+  display_name = "Gold publisher (v3 slice 1)"
+  description  = "Loads gold Parquet into scratch_gold, audits it and publishes it into serving.gold; impersonated by the operator."
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_storage_bucket_iam_member" "gold_publisher_reads_gold" {
+  bucket = google_storage_bucket.gold.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.gold_publisher.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+# The champion manifest (GOLD-07 checks that the champion's predictions still join).
+resource "google_storage_bucket_iam_member" "gold_publisher_reads_bundles" {
+  bucket = google_storage_bucket.bundles.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.gold_publisher.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_bigquery_dataset_iam_member" "gold_publisher_edits_scratch_gold" {
+  dataset_id = google_bigquery_dataset.scratch_gold.dataset_id
+  role       = "roles/bigquery.dataEditor"
+  member     = "serviceAccount:${google_service_account.gold_publisher.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_bigquery_table_iam_member" "gold_publisher_writes_gold" {
+  dataset_id = google_bigquery_table.gold.dataset_id
+  table_id   = google_bigquery_table.gold.table_id
+  role       = google_project_iam_custom_role.scorer_table_writer.id
+  member     = "serviceAccount:${google_service_account.gold_publisher.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_bigquery_table_iam_member" "gold_publisher_reads_predictions" {
+  dataset_id = google_bigquery_table.predictions.dataset_id
+  table_id   = google_bigquery_table.predictions.table_id
+  role       = "roles/bigquery.dataViewer"
+  member     = "serviceAccount:${google_service_account.gold_publisher.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_project_iam_member" "gold_publisher_runs_jobs" {
+  project = var.project_id
+  role    = "roles/bigquery.jobUser"
+  member  = "serviceAccount:${google_service_account.gold_publisher.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+# make gold-publish, gold-seeded-check and gold-access-check impersonate the gold publisher.
+resource "google_service_account_iam_member" "operator_impersonates_gold_publisher" {
+  service_account_id = google_service_account.gold_publisher.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = var.operator_member
+
+  depends_on = [google_project_service.enabled]
+}
+
+# ---------------------------------------------------------------- v3 slice 2: the dashboard runtime
+# Reads only the authorized views in the dashboard dataset (PRD FR9): nothing on serving, scratch or scratch_gold, no
+# readSessionUser (the dashboard never builds a BigQuery Storage client). The Cloud Run service identity from slice 4; for now
+# impersonated by the operator only (make dashboard-access-check / dashboard-query-check). The dashboard dataset grants no view
+# authorizations itself, so a dataset_iam_member on it cannot drop one. Design:
+# notes/eg-new-feature/v3-slice2-authorized-views-2026-10-31.md (Interfaces section 2).
+resource "google_service_account" "dashboard_runtime" {
+  account_id   = "dashboard-runtime"
+  display_name = "Dashboard runtime (v3 slice 2)"
+  description  = "Reads the authorized views in the dashboard dataset; the Cloud Run service identity from slice 4; impersonated by the operator for live checks."
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_bigquery_dataset_iam_member" "dashboard_runtime_reads_dashboard" {
+  dataset_id = google_bigquery_dataset.dashboard.dataset_id
+  role       = "roles/bigquery.dataViewer"
+  member     = "serviceAccount:${google_service_account.dashboard_runtime.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_project_iam_member" "dashboard_runtime_runs_jobs" {
+  project = var.project_id
+  role    = "roles/bigquery.jobUser"
+  member  = "serviceAccount:${google_service_account.dashboard_runtime.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_service_account_iam_member" "operator_impersonates_dashboard_runtime" {
+  service_account_id = google_service_account.dashboard_runtime.name
   role               = "roles/iam.serviceAccountTokenCreator"
   member             = var.operator_member
 

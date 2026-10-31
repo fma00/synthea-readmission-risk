@@ -20,7 +20,7 @@ where = ["src"]
 
 # The warehouse SQL scripts and BigQuery table schemas ship with the package (Terraform reads the same schema files).
 [tool.setuptools.package-data]
-readmission_risk = ["warehouse/sql/*.sql", "warehouse/schemas/*.json"]
+readmission_risk = ["warehouse/sql/*.sql", "warehouse/sql/views/*.sql", "warehouse/schemas/*.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

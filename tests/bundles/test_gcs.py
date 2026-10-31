@@ -223,3 +223,11 @@ def test_validate_schema2_bundle_from_gs(fake, scoring_env, portable_env):
     gold, metadata = load_gold_table_with_metadata(scoring_env.gold_dir)
     bundle = validate_bundle(_upload(fake, portable_env.lr_portable_uri), gold=gold, metadata=metadata)
     assert bundle.bundle_id == portable_env.lr_result.bundle_id
+
+
+def test_read_file_uses_an_injected_client_instead_of_the_factory():
+    """v3 slice 1: the gold publish passes its own storage client (the factory raises in tests unless faked)."""
+    injected = FakeStorage()
+    injected.put("bkt", "x/manifest.json", b"{}")
+    assert gcs.read_file("gs://bkt/x", "manifest.json", client=injected) == b"{}"
+    assert ("download", "bkt", "x/manifest.json") in injected.calls

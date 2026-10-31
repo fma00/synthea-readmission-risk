@@ -106,3 +106,18 @@ def test_a_forbidden_download_is_a_value_error(fake, scoring_env, monkeypatch):
     monkeypatch.setattr("tests.bundles.fake_gcs.FakeBlob.download_to_filename", deny)
     with pytest.raises(ValueError, match="cannot read gold"), materialized_gold_dir(uri):
         pass
+
+
+def test_list_gold_objects_returns_parts_and_metadata_and_raises_api_errors_unwrapped(fake, scoring_env):
+    """v3 slice 1: the gold publish classifies Google errors itself, so list_gold_objects re-raises them unwrapped (only
+    materialized_gold_dir keeps turning them into ValueError, tested above)."""
+    uri = _upload_gold(fake, scoring_env.gold_dir)
+    fake.put(BUCKET, "full_run_2b/_SUCCESS", b"")
+    names = [name for name, _ in gold_source.list_gold_objects(fake, uri)]
+    assert "_gold_metadata.json" in names and all(n.endswith(".parquet") or n == "_gold_metadata.json" for n in names)
+    fake.forbidden = True
+    with pytest.raises(api.Forbidden):
+        gold_source.list_gold_objects(fake, uri)
+    fake.forbidden, fake.auth_error = False, RefreshError("token refresh failed")
+    with pytest.raises(RefreshError):
+        gold_source.list_gold_objects(fake, uri)
