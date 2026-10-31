@@ -71,11 +71,13 @@ def list_entries(uri: str) -> list[str]:
     return sorted(entries)
 
 
-def read_file(uri: str, name: str) -> bytes:
+def read_file(uri: str, name: str, *, client=None) -> bytes:
+    """One object's bytes. `client` (optional) is a storage client to use instead of gcp.storage_client() (the gold
+    publish injects its own, v3 slice 1)."""
     if name in ("", ".", "..") or "/" in name or "\\" in name:
         raise ValueError(f"invalid bundle file name {name!r}")
     bucket_name, prefix = parse_gs_uri(uri)
-    blob = gcp.storage_client().bucket(bucket_name).blob(f"{prefix}/{name}")
+    blob = (client if client is not None else gcp.storage_client()).bucket(bucket_name).blob(f"{prefix}/{name}")
     try:
         return blob.download_as_bytes()
     except _read_failures() as exc:

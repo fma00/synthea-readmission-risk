@@ -17,8 +17,14 @@ if TYPE_CHECKING:  # pragma: no cover
 
 SERVING_DATASET = "serving"
 SCRATCH_DATASET = "scratch"
+SCRATCH_GOLD_DATASET = "scratch_gold"  # the gold publish's staging tables (v3 slice 1; 1-day expiry)
+GOLD_TABLE = "gold"
+# The gold table serving.gold holds; infra/bigquery.tf's description names it (tests/test_infra.py keeps them equal) and the
+# publish refuses any other gold (notes/eg-new-feature/v3-slice1-gold-bigquery-2026-10-31.md, Interfaces section 5).
+SERVING_GOLD_FINGERPRINT = "80edd13dcc967d69b6fa4cfa17b4d7fa40188f8e7e17b2031b833332a59c63f3"
 MAX_BYTES_BILLED = 100 * 1024**2  # per query job; the on-demand minimum is 10 MB per referenced table
-_SCHEMA_NAMES = ("predictions", "scoring_runs", "monitoring")
+GOLD_PUBLISH_MAX_BYTES_BILLED = 1024**3  # the gold audit and publish read ~185k rows (estimated 30-75 MB; 100 MiB is too close)
+_SCHEMA_NAMES = ("predictions", "scoring_runs", "monitoring", "gold")
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,1023}")
 
 
@@ -53,8 +59,8 @@ def quoted(identifier: str) -> str:
     return f"`{identifier}`"
 
 
-def query_config(**kwargs) -> bigquery.QueryJobConfig:
+def query_config(*, max_bytes_billed: int = MAX_BYTES_BILLED, **kwargs) -> bigquery.QueryJobConfig:
     """The only QueryJobConfig constructor in src/: maximum_bytes_billed on every query, standard SQL."""
     from google.cloud import bigquery
 
-    return bigquery.QueryJobConfig(maximum_bytes_billed=MAX_BYTES_BILLED, use_legacy_sql=False, **kwargs)
+    return bigquery.QueryJobConfig(maximum_bytes_billed=max_bytes_billed, use_legacy_sql=False, **kwargs)

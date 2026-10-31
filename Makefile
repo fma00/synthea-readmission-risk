@@ -29,6 +29,8 @@ GOLD_URI         ?= gs://synthea-readmission-risk-gold/v2/main_200k
 SCORER_SA        ?= scorer@synthea-readmission-risk.iam.gserviceaccount.com
 MONITOR_SA       ?= monitor@synthea-readmission-risk.iam.gserviceaccount.com
 LEDGER_SA        ?= ledger-reader@synthea-readmission-risk.iam.gserviceaccount.com
+GOLD_SA          ?= gold-publisher@synthea-readmission-risk.iam.gserviceaccount.com
+PUBLISH_ARGS     ?=
 WEEKS            ?= 1
 BURN_IN_TICKS    ?= 5
 BURN_IN_INTERVAL ?= 30
@@ -54,7 +56,7 @@ define fresh_venv
 case "$(1)" in */*|*..*) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; .venv-*) ;; *) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; esac; rm -rf "$(1)" && $(2) -m venv "$(1)"
 endef
 
-.PHONY: help setup hooks lint test pre-commit train export export-portable score score-bq m5-check setup-runtime test-runtime lock-main lock-dev lock-runtime tf-validate spark-zip generate-vm bigjoin-batch check-population gate prereg-lock prereg-phase-b m5-monitoring gold-200k monitor-preflight monitor-simulate monitor-catch-up ledger m3-check burn-in-timer
+.PHONY: help setup hooks lint test pre-commit train export export-portable score score-bq m5-check setup-runtime test-runtime lock-main lock-dev lock-runtime tf-validate spark-zip generate-vm bigjoin-batch check-population gate prereg-lock prereg-phase-b m5-monitoring gold-publish gold-seeded-check gold-access-check gold-200k monitor-preflight monitor-simulate monitor-catch-up ledger m3-check burn-in-timer
 .DEFAULT_GOAL := help
 
 help: ## List the targets
@@ -106,6 +108,15 @@ m5-check: ## Prove every predictions/scoring_runs data test fires on a seeded ba
 
 m5-monitoring: ## Prove every serving.monitoring data test fires on a seeded synthetic row (M5), as the monitor SA
 	$(BIN)/python scripts/seeded_data_test_check.py --monitoring --impersonate-service-account $(MONITOR_SA)
+
+gold-publish: ## LIVE: publish GOLD_URI into serving.gold by write-audit-publish, as the gold-publisher SA (PUBLISH_ARGS=--dry-run audits only)
+	$(BIN)/python scripts/publish_gold_to_bigquery.py --gold-uri $(GOLD_URI) --impersonate-service-account $(GOLD_SA) $(PUBLISH_ARGS)
+
+gold-seeded-check: ## LIVE, scratch_gold only: prove every GOLD data test fires on a seeded bad row (M5 for GOLD), as the gold-publisher SA
+	$(BIN)/python scripts/gold_seeded_check.py --impersonate-service-account $(GOLD_SA)
+
+gold-access-check: ## LIVE, expected-denied probes: gold-publisher cannot create/change in serving; scorer and monitor cannot read serving.gold
+	$(BIN)/python scripts/gold_access_check.py --gold-sa $(GOLD_SA) --scorer-sa $(SCORER_SA) --monitor-sa $(MONITOR_SA)
 
 gold-200k: ## Download the monitored gold (GOLD_URI) to SCORE_GOLD_DIR (LIVE, read-only; needs gcloud)
 	mkdir -p $(SCORE_GOLD_DIR) && gcloud storage cp "$(GOLD_URI)/*" $(SCORE_GOLD_DIR)/

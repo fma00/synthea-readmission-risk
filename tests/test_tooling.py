@@ -28,14 +28,14 @@ EXPECTED_TARGETS = {
     "help", "setup", "hooks", "lint", "test", "pre-commit", "train", "export", "export-portable", "score", "score-bq", "m5-check",
     "setup-runtime", "test-runtime", "lock-main", "lock-dev", "lock-runtime", "tf-validate", "spark-zip", "generate-vm", "bigjoin-batch",
     "check-population", "gate", "prereg-lock", "prereg-phase-b",
-    "m5-monitoring", "gold-200k", "monitor-preflight", "monitor-simulate", "monitor-catch-up", "ledger", "m3-check", "burn-in-timer",
+    "m5-monitoring", "gold-publish", "gold-seeded-check", "gold-access-check", "gold-200k", "monitor-preflight", "monitor-simulate", "monitor-catch-up", "ledger", "m3-check", "burn-in-timer",
 }
 # Every variable the Makefile reads, plus make's own propagation variables: a pytest started by `make test X=y` (or a
 # shell exporting VENV=...) must not change what these tests see.
 MAKEFILE_VARIABLES = ("PYTHON", "PYTHON312", "VENV", "RUNTIME_VENV", "LOCK_VENV", "LOCK314_VENV", "GOLD_DIR",
                       "REFERENCE_DATE", "TEST_START_DATE", "EXPERIMENT", "RUN_DATE", "TRAIN_EXPERIMENT", "TRAIN_ARGS", "SCORE_ARGS",
                       "EXPORT_MODEL", "EXPORT_ARGS", "SOURCE_BUNDLE", "PORTABLE_ARGS", "TERRAFORM", "GOLD_URI", "SCORER_SA", "RUN", "JDK_TARBALL", "GEN_ARGS", "CHECK_ARGS", "GATE_ARGS", "LOCK_ARGS", "PHASE_B_ARGS",
-                      "BATCH_ARGS", "M5_RUN_DATE", "SCORE_GOLD_DIR", "MONITOR_SA", "LEDGER_SA", "WEEKS", "CHAMPION_BUNDLE_DIR",
+                      "BATCH_ARGS", "M5_RUN_DATE", "SCORE_GOLD_DIR", "MONITOR_SA", "LEDGER_SA", "GOLD_SA", "PUBLISH_ARGS", "WEEKS", "CHAMPION_BUNDLE_DIR",
                       "LEDGER_OUT", "BURN_IN_TICKS", "BURN_IN_INTERVAL", "CAFFEINATE")
 SCRUBBED_ENV = ("MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "GNUMAKEFLAGS", "MAKEFILES", *MAKEFILE_VARIABLES)
 EXPECTED_PRE_COMMIT = [
@@ -137,6 +137,23 @@ def test_make_score_bq_and_m5_check_run_as_the_scorer_sa():
     ) in _dry_run("score-bq")
     assert "--bundle bundles/x" in _dry_run("score-bq", "SCORE_ARGS=--bundle bundles/x")
     assert f".venv/bin/python scripts/seeded_data_test_check.py --run-date 20230417 {sa}" in _dry_run("m5-check")
+
+
+@needs_make
+def test_make_gold_targets_run_as_the_gold_publisher_sa():
+    """v3 slice 1: the gold publish, its seeded check and the access probes; GOLD_URI is the monitored 200k gold."""
+    sa = "--impersonate-service-account gold-publisher@synthea-readmission-risk.iam.gserviceaccount.com"
+    assert (
+        ".venv/bin/python scripts/publish_gold_to_bigquery.py --gold-uri gs://synthea-readmission-risk-gold/v2/main_200k "
+        f"{sa}"
+    ) in _dry_run("gold-publish")
+    assert f"{sa} --dry-run" in _dry_run("gold-publish", "PUBLISH_ARGS=--dry-run")
+    assert f".venv/bin/python scripts/gold_seeded_check.py {sa}" in _dry_run("gold-seeded-check")
+    assert (
+        ".venv/bin/python scripts/gold_access_check.py --gold-sa gold-publisher@synthea-readmission-risk.iam.gserviceaccount.com "
+        "--scorer-sa scorer@synthea-readmission-risk.iam.gserviceaccount.com "
+        "--monitor-sa monitor@synthea-readmission-risk.iam.gserviceaccount.com"
+    ) in _dry_run("gold-access-check")
 
 
 @needs_make
