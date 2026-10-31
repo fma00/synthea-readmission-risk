@@ -1329,4 +1329,7 @@ burn-in how often an alert will fire. The rule is pre-registered; this changes n
   slots. The owner chose not to open a support ticket.
 - **M3 met (2026-10-26), via the 2026-10-20 amendment (`notes/eg-new-feature/monitoring-burn-in-timer-and-weekly-retry-2026-10-20.md`, Results T1-T5):** the burn-in ran on 2026-10-21 as five green timer-dispatched ticks (sim 2023-09-25 to 2023-10-23); Part 2 (weekly retry slots `17 * * * 1-3`, PR #34) merged on 2026-10-22; the first scheduled weekly tick, [40270628943](https://github.com/fma00/synthea-readmission-risk/actions/runs/40270628943) (2026-10-26 04:44 UTC, sim 2023-10-30, `ok`, O/E 1.155), completed M3, and `scripts/m3_check.py` printed `M3 MET` (exit 0). L13-L15 are replaced by that note's T1-T5.
 - **L16, L17:** L17, the `v2.0` tag on `main` with release notes, is set by the owner on the release-prep PR's merge commit. L16 (the calendar reminder for the last commit date + 50 days, and the billing report for the slice's days) is still open.
+- **v2.0 released (L17, 2026-10-27):** annotated tag `v2.0` on `fe44a72` (the PR #37 merge commit), GitHub release
+  "v2.0: cloud, scale-up, monitoring", marked Latest. The amendment's T4.5 passed on 2026-10-31, and the final week
+  count is in that note's Results. **L16** (the calendar reminder for 2026-12-16 and the billing check) is still open.
 
