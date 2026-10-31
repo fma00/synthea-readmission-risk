@@ -1315,4 +1315,26 @@ Results (T1-T3 now, T4-T6 later).
   tag after slice 7's M3) holds.
 - **T6.** The `v2.0` tag is set on the merge commit of the release-prep PR (owner). The 60-day calendar reminder,
   the billing check and Dependabot PR #24 follow.
+- **T4 final count (week of 2026-10-26, complete).** **14 scheduled runs fired out of 72 due slots (about 19%)**, all
+  green at attempt 1: the week's tick ([40270628943](https://github.com/fma00/synthea-readmission-risk/actions/runs/40270628943), 463 s) and 13 skips (79-116 s, median 101 s).
+  - One skip was a **delayed Wednesday slot that ran on Thursday 2026-10-29 02:27 UTC**
+    ([40806468680](https://github.com/fma00/synthea-readmission-risk/actions/runs/40806468680), `SCHEDULE: 17 * * * 1-3`). It skipped correctly ("this week's weekly tick already
+    succeeded"), because the ISO week runs to Sunday.
+  - This is the first observed case behind the catch-up's Thursday-06:00 window and the restated week-boundary argument.
+- **T4.5 (2026-10-31, Saturday), pass.** `gh workflow run monitor.yml --ref main -f sim_date=20230418`, run
+  [41185368282](https://github.com/fma00/synthea-readmission-risk/actions/runs/41185368282), 08:37-08:41 UTC:
+  - **The run** concluded `failure`. `clock` failed with `ERROR: sim date 2023-04-18 is not on the simulated grid
+    (2023-04-17 + multiples of 7 days, up to 2026-09-07)`.
+  - **Gating:** `score` and `evaluate` were skipped. `ledger-render`, `ledger-commit` ("Ledger: 2 of 2 file(s)
+    committed") and `issues` ran, which confirms live that an empty `skip` output satisfies `!= 'true'`.
+  - **The row:** `trigger = workflow_dispatch`, `cadence = dispatch`, `status = refused`, `failed_stage = clock`,
+    `sim_date` NULL. A dispatch row never counts towards the weekly budget, and the clock did not move.
+  - **The issue:** [#38](https://github.com/fma00/synthea-readmission-risk/issues/38) "Monitoring tick failing (simulated
+    clock)" (`monitoring-failure`) was created. The owner closes it after the next green tick (the week of 2026-11-02).
+- **T6 status (2026-10-31).**
+  - **Done:** `v2.0` released 2026-10-27 08:34 UTC as an annotated tag on `fe44a72` (the PR #37 merge commit).
+    Dependabot #24 was superseded by #35 (provider 8.7.0; a read-only `terraform plan` on its branch gave "No changes")
+    and #36 (`actions/setup-java` 6.1.0); both were merged, and the local `terraform init` is done.
+  - **Open (L16):** a calendar reminder for 2026-12-16 (the last `main` commit, 2026-10-27, plus 50 days; GitHub
+    disables scheduled workflows after 60 days without repository activity), and the billing check for the slice's days.
 
