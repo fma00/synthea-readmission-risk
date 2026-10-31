@@ -566,3 +566,49 @@ quota/rate-limit 403s are `unknown`, not IAM; an unknown load notes that its sta
 failure at verify names the committed job; docstring, `docs/setup.md` (exits 4 and 5) and CLAUDE.md (Architecture item 3)
 corrected. Test gate: `ruff check .` clean; `pytest` 1,937 passed, 2 skipped (the Dataproc-runtime environment check and the
 off-macOS lock guard). No live step has run yet (L0-L7 below are pending, each owner-confirmed).
+
+## Results (live, owner-confirmed)
+
+- **L0 (2026-10-31, owner):** `serving.gold`, `scratch_gold` and `gold-publisher` absent; `terraform plan -out` = `Plan: 10 to add,
+  0 to change, 0 to destroy`, the 10 designed resources. Re-checked before L1 from the saved plan file: 0 change/destroy/replace
+  markers; `serving.gold` MONTH on `index_stop`, `require_partition_filter`, clustering `admission_reason_code`, deletion
+  protection; all six grants to `gold-publisher`, impersonation for the operator; `scratch_gold` 1-day expiry, us-central1.
+  PR #41 merged into `v3` (`e4f3eac`), all four CI jobs green.
+- **L1 (2026-10-31 15:45Z):** `terraform apply` of exactly that saved plan. All 10 resources in state; live: `serving.gold` 24
+  fields, 0 rows, `timePartitioning {MONTH, index_stop}`, `requirePartitionFilter: true`, clustering `admission_reason_code`;
+  `scratch_gold` `defaultTableExpirationMs` 86400000; `gold-publisher` enabled. A fresh `terraform plan -detailed-exitcode`
+  right after: exit 0 (No changes). Plan file deleted. Noted: `infra/outputs.tf`'s `bigquery_datasets` output does not list
+  `scratch_gold` (cosmetic; follow-up).
+- **L2a (2026-10-31 15:57Z, ~12 min after L1): `make gold-seeded-check` → `GOLD M5 OK`.** The clean pair passed; GOLD-01..07 each
+  failed on its own seeded bad row with its own label (first run of `gold.sql` against BigQuery: it parses, the predictions
+  partition filter is accepted, and the stop-at-first-ASSERT order holds). `scratch_gold` empty afterwards. Report
+  `data/checks/gold_seeded_check/20261031T155827Z.json`.
+- **L2b (15:58Z): `make gold-access-check` → exit 0, all 5 probes denied (403):** `gold-publisher` cannot create a table in
+  `serving` (`serving.gold_access_probe`: Not found afterwards, i.e. refused, not undone), cannot change `serving.predictions`
+  ("Permission bigquery.tables.updateData denied"), cannot read `serving.scoring_runs`; `scorer` and `monitor` cannot read
+  `serving.gold` (accessDenied, jobs `7daf5231-…`, `b6df7e2f-…`). `serving` still holds exactly gold, monitoring, predictions,
+  scoring_runs. Report `data/checks/gold_access_check/20261031T155843Z.json`.
+- **L3 (2026-10-31, run by the owner): `make gold-publish PUBLISH_ARGS=--dry-run` → `dry_run_passed`** (publish id
+  `1e7151a97536`, load job `gold-load-1e7151a97536`). GOLD-01..07 passed on the 185,294 staging rows against the champion
+  `569fdab6…`'s predictions; staging fingerprint = metadata = champion gold fingerprint `80edd13d…63f3` (assumption A1, the exact
+  REST round-trip, holds at full size). Audit billed 34,603,008 bytes (33 MiB; estimate 30-75 MB, cap 1 GiB). Afterwards
+  `serving.gold` 0 rows, `scratch_gold` empty.
+- **L4 (16:09-16:13Z): `make gold-publish` → `published`, exit 0** (publish id `85a513d3eed6`, jobs `gold-load-85a513d3eed6`,
+  `gold-audit-85a513d3eed6`, `gold-publish-85a513d3eed6`). Verify: `serving_num_rows` 185,294, schema, partitioning and
+  description match, serving content fingerprint `80edd13d…63f3`. Bytes billed: audit 34,603,008, publish 52,428,800 (50 MiB).
+  Independent operator query: 185,294 rows, **2,825 positives** (= `_gold_metadata.json`, PRD FR3/M2), 185,294 distinct
+  encounters, 3,457 rows before 1960, range 1918-01-26..2026-09-25; `INFORMATION_SCHEMA.PARTITIONS`: 801 populated MONTH
+  partitions + `__UNPARTITIONED__` 3,457 rows + `__NULL__` 0 rows. `scratch_gold` empty. Report
+  `data/checks/main_200k/gold_bigquery_85a513d3eed6.json`.
+- **L5 (16:24-16:28Z): `make gold-publish` again → `published`, exit 0** (publish id `1f105e813ec6`): identical counts,
+  fingerprint and bytes billed; 185,294 rows (not doubled). Idempotence proven from the transactions' child jobs:
+  `gold-publish-85a513d3eed6` (L4) DELETE 0 / INSERT 185,294; `gold-publish-1f105e813ec6` (L5) DELETE 185,294 (incl. the
+  `__UNPARTITIONED__` rows) / INSERT 185,294.
+- **L6: `terraform plan -detailed-exitcode` → exit 0, "No changes"** after both publishes: the publish never alters the table
+  definition.
+- **L7 (open, owner):** billing for 2026-10-31 (console > Billing > Reports, project `synthea-readmission-risk`). Expected: cents
+  (two probes, three loads, ~250 MiB of query bytes billed in total).
+
+**PRD M2 status:** FR2 recorded (probe 1, FAIL U1 → FR4); counts equal to `_gold_metadata.json` (185,294 / 2,825) and the
+BigQuery content fingerprint equal to `80edd13d…63f3`; GOLD tests pass and each is shown to fire. The remaining M2 clause
+("views return rows with features for the newest tick") belongs to slice 2.
