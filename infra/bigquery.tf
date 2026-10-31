@@ -1,5 +1,6 @@
 # BigQuery serving (v2 slice 4, PRD FR17/FR18/FR20; design notes/eg-new-feature/v2-slice4-score-to-bigquery-2026-10-11.md).
-# serving holds only the real tables; scratch holds short-lived staging and data-test copies. The table schemas are the
+# serving holds only the real tables; scratch holds short-lived staging and data-test copies. v3 slice 1 adds serving.gold and
+# scratch_gold, the gold publish's staging dataset (notes/eg-new-feature/v3-slice1-gold-bigquery-2026-10-31.md). The table schemas are the
 # package's own JSON files, so Python and Terraform cannot disagree. No `access` blocks on the datasets: they are
 # authoritative and would fight the additive *_iam_member grants in iam.tf.
 
@@ -19,6 +20,19 @@ resource "google_bigquery_dataset" "scratch" {
   dataset_id                  = "scratch"
   location                    = var.region
   description                 = "Short-lived staging and data-test tables (expire after 1 day)."
+  default_table_expiration_ms = 86400000
+  delete_contents_on_destroy  = true
+  labels = {
+    purpose = "scratch"
+  }
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_bigquery_dataset" "scratch_gold" {
+  dataset_id                  = "scratch_gold"
+  location                    = var.region
+  description                 = "Gold publish staging tables (expire after 1 day)."
   default_table_expiration_ms = 86400000
   delete_contents_on_destroy  = true
   labels = {
@@ -81,6 +95,27 @@ resource "google_bigquery_table" "monitoring" {
   time_partitioning {
     type  = "DAY"
     field = "started_at"
+  }
+
+  depends_on = [google_project_service.enabled]
+}
+
+# The gold features + label (v3 slice 1). MONTH, not DAY, partitioning (owner decision D2): from 1960 on the 200k gold's
+# discharges fall on 22,184 distinct days, above BigQuery's 10,000 partitions per table; rows before 1960 land in
+# __UNPARTITIONED__. Written only by scripts/publish_gold_to_bigquery.py (write-audit-publish); the description names the one
+# gold it may hold (warehouse.bigquery.SERVING_GOLD_FINGERPRINT; tests/test_infra.py keeps them equal).
+resource "google_bigquery_table" "gold" {
+  dataset_id               = google_bigquery_dataset.serving.dataset_id
+  table_id                 = "gold"
+  description              = "Gold features + label, one row per index encounter (synthetic Synthea data; not for clinical use). Label unplanned_readmission_v1; spark-rowhash-v1 fingerprint 80edd13dcc967d69b6fa4cfa17b4d7fa40188f8e7e17b2031b833332a59c63f3 (v2/main_200k). Published by write-audit-publish (scripts/publish_gold_to_bigquery.py)."
+  schema                   = file("${path.module}/../src/readmission_risk/warehouse/schemas/gold.json")
+  require_partition_filter = true
+  clustering               = ["admission_reason_code"]
+  deletion_protection      = true
+
+  time_partitioning {
+    type  = "MONTH"
+    field = "index_stop"
   }
 
   depends_on = [google_project_service.enabled]

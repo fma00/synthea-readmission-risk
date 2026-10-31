@@ -15,6 +15,9 @@ notes/eg-new-feature/v2-slice3-terraform-wif-2026-10-11.md, Verification):
 - (v2 slice 4) the scorer has exactly its designed grants, is bound to score.yml on main, and cannot create or drop
   serving tables; the BigQuery tables are partitioned, filter-required and deletion-protected, and read their schemas
   from the package; every resource waits for the API set.
+- (v3 slice 1) serving.gold is MONTH-partitioned on index_stop, filter-required, clustered and deletion-protected, and its
+  description names the one gold it may hold; scratch_gold expires its tables after 1 day; gold-publisher has exactly its
+  designed grants (nothing on the serving dataset, no WIF binding).
 """
 
 from __future__ import annotations
@@ -22,6 +25,9 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+
+from readmission_risk.pipeline.gold_metadata import LABEL_DEFINITION
+from readmission_risk.warehouse.bigquery import SERVING_GOLD_FINGERPRINT
 
 ROOT = Path(__file__).resolve().parents[1]
 INFRA = ROOT / "infra"
@@ -193,7 +199,8 @@ def test_iam_is_additive_only():
     assert [t for t in types if t.endswith(("_iam_policy", "_iam_binding"))] == []
     # 12 (slices 3-4) + 14 (slice 5: synthea-generator 6, dataproc-runtime 8; the 2 staging grants removed 2026-10-14)
     # + 14 (slice 7: monitor 8, ledger-reader 5, scorer's monitor.yml binding 1)
-    assert len(_iam_members()) == 40
+    # + 7 (v3 slice 1: gold-publisher 6, its impersonation 1)
+    assert len(_iam_members()) == 47
     assert [(t, n) for t, n, _ in _resources(_all_tf()) if t.endswith("_iam_member_remove")] == [
         ("google_project_iam_member_remove", "default_compute_no_editor")
     ]
@@ -416,15 +423,71 @@ def test_score_workflow_is_dispatch_only_and_input_reaches_shell_only_via_env():
 
 
 def test_bigquery_tables_partitioned_require_filter_and_deletion_protected():
-    for name, field in (("predictions", "as_of_date"), ("scoring_runs", "started_at"), ("monitoring", "started_at")):
+    tables = (
+        ("predictions", "DAY", "as_of_date"),
+        ("scoring_runs", "DAY", "started_at"),
+        ("monitoring", "DAY", "started_at"),
+        ("gold", "MONTH", "index_stop"),  # v3 slice 1, owner decision D2: DAY would need ~22,000 partitions
+    )
+    for name, unit, field in tables:
         body = _collapse(_resource("google_bigquery_table", name))
-        assert f'time_partitioning {{ type = "DAY" field = "{field}" }}' in body, name
+        assert f'time_partitioning {{ type = "{unit}" field = "{field}" }}' in body, name
         assert "require_partition_filter = true" in body and "deletion_protection = true" in body, name
         assert f'schema = file("${{path.module}}/../src/readmission_risk/warehouse/schemas/{name}.json")' in body, name
         assert (ROOT / "src" / "readmission_risk" / "warehouse" / "schemas" / f"{name}.json").is_file()
     assert 'location = var.region' in _collapse(_resource("google_bigquery_dataset", "serving"))
     scratch = _collapse(_resource("google_bigquery_dataset", "scratch"))
     assert "default_table_expiration_ms = 86400000" in scratch
+    gold = _collapse(_resource("google_bigquery_table", "gold"))
+    assert 'clustering = ["admission_reason_code"]' in gold
+    assert "dataset_id = google_bigquery_dataset.serving.dataset_id" in gold
+    scratch_gold = _collapse(_resource("google_bigquery_dataset", "scratch_gold"))
+    assert "default_table_expiration_ms = 86400000" in scratch_gold and "location = var.region" in scratch_gold
+    for name in ("serving", "scratch", "scratch_gold"):
+        assert "access {" not in _collapse(_resource("google_bigquery_dataset", name)), name  # authoritative: would fight *_iam_member
+
+
+def test_every_bigquery_table_is_partitioned_filtered_and_protected():
+    """No future table escapes the rule (v3 slice 1)."""
+    tables = [(n, _collapse(body)) for t, n, body in _resources(_all_tf()) if t == "google_bigquery_table"]
+    assert {n for n, _ in tables} == {"predictions", "scoring_runs", "monitoring", "gold"}
+    for name, body in tables:
+        assert "require_partition_filter = true" in body and "deletion_protection = true" in body, name
+        assert "time_partitioning {" in body, name
+
+
+def test_gold_table_description_names_the_gold_fingerprint():
+    body = _resource("google_bigquery_table", "gold")
+    assert SERVING_GOLD_FINGERPRINT in body and LABEL_DEFINITION in body
+
+
+GOLD_PUBLISHER = '"serviceAccount:${google_service_account.gold_publisher.email}"'
+
+
+def test_gold_publisher_grants_are_exactly():
+    grants = sorted(
+        (m["_type"], m["role"], m.get("bucket") or m.get("table_id") or m.get("dataset_id") or m.get("project"))
+        for m in _iam_members()
+        if m.get("member") == GOLD_PUBLISHER
+    )
+    assert grants == sorted([
+        ("google_storage_bucket_iam_member", '"roles/storage.objectViewer"', "google_storage_bucket.gold.name"),
+        ("google_storage_bucket_iam_member", '"roles/storage.objectViewer"', "google_storage_bucket.bundles.name"),
+        ("google_bigquery_dataset_iam_member", '"roles/bigquery.dataEditor"', "google_bigquery_dataset.scratch_gold.dataset_id"),
+        ("google_bigquery_table_iam_member", "google_project_iam_custom_role.scorer_table_writer.id",
+         "google_bigquery_table.gold.table_id"),
+        ("google_bigquery_table_iam_member", '"roles/bigquery.dataViewer"', "google_bigquery_table.predictions.table_id"),
+        ("google_project_iam_member", '"roles/bigquery.jobUser"', "var.project_id"),
+    ])  # fmt: skip
+    on_account = sorted(
+        (m["role"], m["member"])
+        for m in _iam_members()
+        if m.get("service_account_id") == "google_service_account.gold_publisher.name"
+    )
+    assert on_account == [('"roles/iam.serviceAccountTokenCreator"', "var.operator_member")]  # laptop only: no WIF binding
+    # no one else gets anything on serving.gold (it holds the label columns)
+    on_gold = {m["member"] for m in _iam_members() if m.get("table_id") == "google_bigquery_table.gold.table_id"}
+    assert on_gold == {GOLD_PUBLISHER}
 
 
 def test_predictions_table_description_is_demo_notice():
