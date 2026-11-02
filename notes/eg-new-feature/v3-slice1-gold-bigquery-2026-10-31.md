@@ -606,8 +606,11 @@ off-macOS lock guard). No live step has run yet (L0-L7 below are pending, each o
   `__UNPARTITIONED__` rows) / INSERT 185,294.
 - **L6: `terraform plan -detailed-exitcode` → exit 0, "No changes"** after both publishes: the publish never alters the table
   definition.
-- **L7 (open, owner):** billing for 2026-10-31 (console > Billing > Reports, project `synthea-readmission-risk`). Expected: cents
-  (two probes, three loads, ~250 MiB of query bytes billed in total).
+- **L7: done 2026-11-02.** The billing for 2026-10-31 (owner, console > Billing > Reports, project `synthea-readmission-risk`)
+  was **CHF 0.02531, all Cloud Storage**, against CHF 0.03 (also Cloud Storage only) on 2026-10-30. There is no BigQuery line:
+  load jobs are free, and the ~250 MiB of billed query bytes (two probes, three loads) fall inside the monthly free query
+  tier, as expected ("cents"). The day's figure includes slice 2's live run (its L6). CI was green on all four jobs for the
+  PRs into `v3`: #41 and #42.
 
 **PRD M2 status:** FR2 recorded (probe 1, FAIL U1 → FR4); counts equal to `_gold_metadata.json` (185,294 / 2,825) and the
 BigQuery content fingerprint equal to `80edd13d…63f3`; GOLD tests pass and each is shown to fire. The remaining M2 clause
