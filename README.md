@@ -177,6 +177,7 @@ python3.14 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 pip install --require-hashes -r requirements.txt -r requirements-linux-extras.txt
+pip install --require-hashes -r requirements-dashboard.txt -r requirements-dashboard-linux-extras.txt
 pip install --require-hashes -r requirements-dev.txt
 ruff check . && pytest
 ```

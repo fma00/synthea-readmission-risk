@@ -17,6 +17,7 @@ refused against the champion bundle; that check is a named follow-up.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -49,11 +50,19 @@ LOCK_PAIRS = (
     LockPair("requirements-dev.in", "requirements-dev.txt", DEV_PYTHON,
              "pip-compile --allow-unsafe --generate-hashes --no-index --output-file=requirements-dev.txt requirements-dev.in",
              "make lock-dev"),
+    LockPair("requirements-dashboard.in", "requirements-dashboard.txt", DEV_PYTHON,
+             "pip-compile --generate-hashes --no-index --output-file=requirements-dashboard.txt requirements-dashboard.in",
+             "make lock-dashboard"),
     LockPair("requirements-dataproc-3.0.in", "requirements-dataproc-3.0.txt", "3.12",
              "pip-compile --generate-hashes --no-index --output-file=requirements-dataproc-3.0.txt requirements-dataproc-3.0.in",
              "make lock-runtime"),
 )
 LINUX_EXTRAS = "requirements-linux-extras.txt"
+# Hand-maintained Linux-only pins and the lockfile each complements (v3 slice 3, S17: the dashboard set has its own, so the
+# production workflows' requirements-linux-extras.txt stays unchanged).
+LINUX_EXTRAS_PAIRS = ((LINUX_EXTRAS, "requirements.txt"), ("requirements-dashboard-linux-extras.txt", "requirements-dashboard.txt"))
+# The only `-c` constraint an .in file may name: the dashboard set is constrained by the main lockfile.
+ALLOWED_CONSTRAINTS = ("requirements.txt",)
 LINUX_MARKER = '; platform_system == "Linux"'
 
 
@@ -105,20 +114,28 @@ def parse_lockfile(text: str) -> dict[str, Pin]:
     }
 
 
-def parse_in_file(text: str) -> list[Requirement]:
-    requirements = []
+def parse_in_file(text: str) -> tuple[list[Requirement], list[str]]:
+    """(requirements, constraint files). The only directive accepted is `-c <file>` for a file in ALLOWED_CONSTRAINTS."""
+    requirements, constraints = [], []
     for raw in text.split("\n"):
         line = raw.split("#", 1)[0].strip()
         if not line:
             continue
         if line.startswith("-"):
+            parts = line.split()
+            if len(parts) == 2 and parts[0] == "-c" and parts[1] in ALLOWED_CONSTRAINTS:
+                constraints.append(parts[1])
+                continue
             raise ValueError(f"unsupported .in directive: {line}")
         requirements.append(Requirement(line))
-    return requirements
+    return requirements, constraints
 
 
-def drift_problems(in_text: str, lock_text: str, *, pair: LockPair) -> list[str]:
-    """Every way `lock_text` is not pip-compile's output for `in_text`, as messages; empty when clean."""
+def drift_problems(
+    in_text: str, lock_text: str, *, pair: LockPair, constraints: Mapping[str, str] | None = None
+) -> list[str]:
+    """Every way `lock_text` is not pip-compile's output for `in_text`, as messages; empty when clean. `constraints` maps each
+    `-c` file the .in names to that lockfile's text (D8: a shared pin must have the constraint's version)."""
     problems = []
     lines = lock_text.split("\n")
 
@@ -133,7 +150,7 @@ def drift_problems(in_text: str, lock_text: str, *, pair: LockPair) -> list[str]
         problems.append(f"D2 header line 5 is {line(4)!r}, expected {expected!r}")
 
     pins = parse_lockfile(lock_text)
-    requirements = parse_in_file(in_text)
+    requirements, constraint_files = parse_in_file(in_text)
     in_name = pair.in_file
     for requirement in requirements:
         name = canonicalize_name(requirement.name)
@@ -156,13 +173,22 @@ def drift_problems(in_text: str, lock_text: str, *, pair: LockPair) -> list[str]
         if not pin.parents:
             problems.append(f"D5 {name}: no '# via' annotation")
         for parent in sorted(pin.parents):
-            if parent.startswith("-r "):
+            if parent.startswith(("-r ", "-c ")):
                 continue
             parent_name = PARENT_NAME_RE.match(parent)
             if parent_name is None or canonicalize_name(parent_name.group(0)) not in pins:
                 problems.append(f"D6 {name}: '# via' parent {parent!r} is not pinned")
         if pin.n_hashes < 1:
             problems.append(f"D7 {name}: no --hash line")
+
+    for constraint_file in constraint_files:
+        if constraints is None or constraint_file not in constraints:
+            problems.append(f"D8 {constraint_file}: constraint file not provided")
+            continue
+        constrained = parse_lockfile(constraints[constraint_file])
+        for name in sorted(pins.keys() & constrained.keys()):
+            if pins[name].version != constrained[name].version:
+                problems.append(f"D8 {name}: pinned {pins[name].version} but {constraint_file} pins {constrained[name].version}")
     return problems
 
 
@@ -171,25 +197,26 @@ def drift_problems(in_text: str, lock_text: str, *, pair: LockPair) -> list[str]
 
 @pytest.mark.parametrize("pair", LOCK_PAIRS, ids=[p.lock_file for p in LOCK_PAIRS])
 def test_lock_pair_has_no_drift(pair):
-    problems = drift_problems(
-        (ROOT / pair.in_file).read_text(), (ROOT / pair.lock_file).read_text(), pair=pair
-    )
+    in_text = (ROOT / pair.in_file).read_text()
+    constraints = {name: (ROOT / name).read_text() for name in parse_in_file(in_text)[1]}
+    problems = drift_problems(in_text, (ROOT / pair.lock_file).read_text(), pair=pair, constraints=constraints)
     assert problems == [], (
         "\n".join(problems) + f"\nfix: edit {pair.in_file} if needed, then run {pair.recipe} (on macOS, see docs/setup.md)"
     )
 
 
-def test_linux_extras_are_marked_hashed_and_not_in_the_main_lockfile():
-    text = (ROOT / LINUX_EXTRAS).read_text()
+@pytest.mark.parametrize(("extras_file", "lock_file"), LINUX_EXTRAS_PAIRS, ids=[e for e, _ in LINUX_EXTRAS_PAIRS])
+def test_linux_extras_are_marked_hashed_and_not_in_their_lockfile(extras_file, lock_file):
+    text = (ROOT / extras_file).read_text()
     extras = parse_lockfile(text)  # no D-rules: the file is hand-written and has no `# via`
-    assert extras, f"{LINUX_EXTRAS} pins nothing"
+    assert extras, f"{extras_file} pins nothing"
     unmarked = [line for line in text.split("\n") if PIN_RE.match(line) and LINUX_MARKER not in line]
     assert unmarked == [], f"pins without {LINUX_MARKER!r}: {unmarked}"
     assert [name for name, pin in extras.items() if pin.n_hashes < 1] == []
-    names = sorted(extras.keys() & parse_lockfile((ROOT / "requirements.txt").read_text()).keys())
+    names = sorted(extras.keys() & parse_lockfile((ROOT / lock_file).read_text()).keys())
     assert names == [], (
-        f"{names} pinned in both {LINUX_EXTRAS} and requirements.txt; was requirements.txt compiled on Linux? "
-        "(make lock-main must run on macOS)"
+        f"{names} pinned in both {extras_file} and {lock_file}; was {lock_file} compiled on Linux? "
+        "(the lock targets must run on macOS)"
     )
 
 
@@ -212,8 +239,8 @@ beta==2.0 \\
 """
 
 
-def problems(in_text: str = CLEAN_IN, lock_text: str = CLEAN_LOCK) -> list[str]:
-    return drift_problems(in_text, lock_text, pair=PAIR)
+def problems(in_text: str = CLEAN_IN, lock_text: str = CLEAN_LOCK, constraints: Mapping[str, str] | None = None) -> list[str]:
+    return drift_problems(in_text, lock_text, pair=PAIR, constraints=constraints)
 
 
 def test_clean_fixture_has_no_problems():
@@ -305,6 +332,33 @@ def test_parse_lockfile_rejects_unrecognised_lines(line):
 def test_parse_in_file_rejects_directives():
     with pytest.raises(ValueError, match=re.escape("unsupported .in directive: -r other.in")):
         parse_in_file("-r other.in\n")
+    with pytest.raises(ValueError, match=re.escape("unsupported .in directive: -c other.txt")):
+        parse_in_file("-c other.txt\n")
+
+
+def test_parse_in_file_returns_the_allowed_constraint():
+    requirements, constraints = parse_in_file("-c requirements.txt\nalpha==1.0\n")
+    assert [r.name for r in requirements] == ["alpha"] and constraints == ["requirements.txt"]
+
+
+CONSTRAINED_IN = "-c requirements.txt\nalpha==1.0\n"
+CONSTRAINED_LOCK = CLEAN_LOCK.replace("    # via alpha\n", "    # via\n    #   -c requirements.txt\n    #   alpha\n")
+MAIN_LOCK = "beta==2.0 \\\n    --hash=sha256:bb\n    # via -r requirements.in\n"
+
+
+def test_d6_skips_constraint_parents_and_d8_accepts_equal_pins():
+    assert problems(in_text=CONSTRAINED_IN, lock_text=CONSTRAINED_LOCK, constraints={"requirements.txt": MAIN_LOCK}) == []
+
+
+def test_d8_constraint_mismatch():
+    main = MAIN_LOCK.replace("beta==2.0", "beta==2.1")
+    assert problems(in_text=CONSTRAINED_IN, lock_text=CONSTRAINED_LOCK, constraints={"requirements.txt": main}) == [
+        "D8 beta: pinned 2.0 but requirements.txt pins 2.1"
+    ]
+
+
+def test_d8_constraint_file_not_provided():
+    assert problems(in_text=CONSTRAINED_IN, lock_text=CONSTRAINED_LOCK) == ["D8 requirements.txt: constraint file not provided"]
 
 
 def test_parse_lockfile_reads_extras_and_multiline_via():

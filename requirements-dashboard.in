@@ -1,0 +1,10 @@
+# The Streamlit dashboard's own dependency set (v3 slice 3, owner decision S17 in
+# notes/eg-new-feature/v3-slice3-dashboard-app-2026-11-01.md): installed by `make setup` and CI's lint-and-test only, never by
+# the production workflows (score.yml, monitor.yml), which install requirements.txt. The constraint keeps every shared pin
+# (pandas, numpy, pyarrow, ...) equal to requirements.txt's; recompile with `make lock-dashboard` after every `make lock-main`.
+# Each pin is a release at least 7 days old when added (the Dependabot cooldown rule): streamlit 1.66.1 (2026-10-21), altair
+# 6.3.0 (2026-09-15). streamlit needs watchdog off macOS only, which a macOS compile cannot see:
+# requirements-dashboard-linux-extras.txt holds it.
+-c requirements.txt
+streamlit==1.66.1
+altair==6.3.0

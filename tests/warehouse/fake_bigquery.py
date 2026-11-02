@@ -23,9 +23,12 @@ class FakeJob:
     total_bytes_billed: int | None = None
     total_bytes_processed: int | None = None  # dry runs (v3 slice 2)
     cache_hit: bool | None = None
+    allow_timeout: bool = False  # v3 slice 3: the dashboard's run_bounded passes timeout= (S16); the scorer's jobs must not
+    result_kwargs: dict | None = None
 
     def result(self, *args, **kwargs):
-        assert "timeout" not in kwargs, "no client-side timeouts (the job's final state decides)"
+        self.result_kwargs = dict(kwargs)
+        assert self.allow_timeout or "timeout" not in kwargs, "no client-side timeouts (the job's final state decides)"
         if self.raise_on_result is not None:
             raise self.raise_on_result
         return list(self.rows)
@@ -49,11 +52,13 @@ class FakeBigQuery:
     raise_on_get_table: BaseException | None = None
     raise_on_list_rows: BaseException | None = None
     raise_on_list_tables: BaseException | None = None  # v3 slice 2: the dashboard access probes
+    query_kwargs: list[dict] = field(default_factory=list)  # v3 slice 3: query()'s extra kwargs (retry, job_retry, timeout), per call
 
     def query(self, sql, job_config=None, job_id=None, **kwargs):
         if job_id is not None:  # google-cloud-bigquery: a fixed job id needs job_retry=None (a FutureWarning, later an error)
             assert "job_retry" in kwargs and kwargs["job_retry"] is None, "a fixed job_id needs job_retry=None"
         self.calls.append(("query", sql, job_config, job_id))
+        self.query_kwargs.append(dict(kwargs))
         if self.on_query is not None:
             return self.on_query(sql, job_config, job_id)
         return FakeJob()
