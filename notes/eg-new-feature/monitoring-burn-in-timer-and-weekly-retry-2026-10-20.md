@@ -1335,6 +1335,8 @@ Results (T1-T3 now, T4-T6 later).
   - **Done:** `v2.0` released 2026-10-27 08:34 UTC as an annotated tag on `fe44a72` (the PR #37 merge commit).
     Dependabot #24 was superseded by #35 (provider 8.7.0; a read-only `terraform plan` on its branch gave "No changes")
     and #36 (`actions/setup-java` 6.1.0); both were merged, and the local `terraform init` is done.
-  - **Open (L16):** a calendar reminder for 2026-12-16 (the last `main` commit, 2026-10-27, plus 50 days; GitHub
+  - **Open (L16):** a calendar reminder for 2026-12-22 (the last `main` commit, 2026-11-02, plus 50 days; GitHub
     disables scheduled workflows after 60 days without repository activity), and the billing check for the slice's days.
+    The date was 2026-12-16 (2026-10-27 plus 50 days) until Dependabot #44 and #45 merged into `main` on 2026-11-02. Every
+    later commit on `main` moves it again.
 
