@@ -5,7 +5,7 @@
 chose "apply fixes, re-run B/C" (revision 4); round 4 critic 4, readiness 1 (revision 5); round 5 readiness closed, critic 1
 (`FakeJob.cache_hit`, fixed in 5.1). **Gate note:** readiness closed in rounds 3 and 5; the critic never closed (its round-5 gap
 was fixed but not re-reviewed); the owner chose "proceed to implementation" (override, 2026-10-31). D5 was added by the owner
-after round 1; E1/E2 are the elephant's resolutions of PRD wording, flagged for the owner. Live steps L0-L5 green 2026-10-31 (Results); L6 open. Branch `v3-slice2-authorized-views` off `v3` (`97d5401`);
+after round 1; E1/E2 are the elephant's resolutions of PRD wording, flagged for the owner. Live steps L0-L5 green 2026-10-31 (Results); L6 (billing, CI) done 2026-11-02. Branch `v3-slice2-authorized-views` off `v3` (`97d5401`);
 PR into `v3` (ruleset 24876876: PR required, 0 approvals), never into `main`. PRD:
 `notes/prds/v3-cloud-run-call-sheet-bigquery-gold-2026-10-28.md` (V4, V5, V7, V8, FR6-FR9, FR12's "why", FR15's labels, FR18,
 M2, Implementation hints slice 2, Risks row "Authorized views silently lost"). Slice 1
@@ -651,4 +651,6 @@ The owner authorized L0-L5 in sequence (2026-10-31), on the condition that the r
   scan of all pre-2023 gold. Materializing the rate (an out-of-scope follow-up) would bring a call-sheet query down to a few MB.
 - **L5:** `terraform plan -detailed-exitcode` gave exit 0 (No changes). `dashboard` holds exactly `v_call_sheet`, `v_monitoring`,
   `v_scoring_runs` (no leftover probe view).
-- **L6 (open):** billing for 2026-10-31 (owner, console) and CI green on the PR into `v3`.
+- **L6: done 2026-11-02.** The billing for 2026-10-31 (owner, console) was **CHF 0.02531, all Cloud Storage**, against
+  CHF 0.03 on 2026-10-30. There is no BigQuery line: the ~115 MiB billed by the query check falls inside the monthly free
+  query tier. It is one figure for the day, shared with slice 1's L7. CI was green on all four jobs for PR #43 into `v3`.
