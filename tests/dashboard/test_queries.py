@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, date, datetime
+from pathlib import Path
 
 import pytest
 
@@ -178,3 +179,23 @@ def test_published_date_from_row():
         q.PublishedDate.from_row({k: v for k, v in row.items() if k != "window_days"})
     with pytest.raises(ValueError, match="window_days"):
         q.PublishedDate.from_row(row | {"window_days": None})
+
+
+def test_run_bounded_bounds_every_wait():
+    """V-Q (v3 slice 3, owner decision S16): retry and HTTP timeout on submission, no job re-run, a bounded result wait."""
+    job = FakeJob(rows=[{"a": 1}], allow_timeout=True)
+    client = FakeBigQuery(on_query=lambda sql, config, job_id: job)
+    query = q.call_sheet(PUBLISHED)
+    assert q.run_bounded(client, query) == [{"a": 1}]
+    kwargs = client.query_kwargs[0]
+    assert kwargs["job_retry"] is None and kwargs["timeout"] == q.SUBMIT_DEADLINE_S == 10.0
+    assert kwargs["retry"]._timeout == 10.0
+    assert job.result_kwargs["timeout"] == q.RESULT_TIMEOUT_S == 20.0 and job.result_kwargs["retry"]._timeout == 20.0
+    (_, sql, config, _) = client.calls[0]
+    assert sql == query.sql and config.maximum_bytes_billed == MAX_BYTES_BILLED and config.labels == {"component": "dashboard"}
+    assert [(p.name, p.type_, p.value) for p in config.query_parameters] == list(query.parameters)
+
+
+def test_the_app_queries_only_through_run_bounded():
+    source = (Path(__file__).resolve().parents[2] / "src/readmission_risk/dashboard/app.py").read_text()
+    assert "queries.run(" not in source and "queries.run_job(" not in source and source.count("queries.run_bounded(") == 4

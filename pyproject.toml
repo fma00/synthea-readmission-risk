@@ -26,6 +26,7 @@ readmission_risk = ["warehouse/sql/*.sql", "warehouse/sql/views/*.sql", "warehou
 pythonpath = ["src"]
 markers = [
     "real_gcp_module: keep readmission_risk.gcp's real functions (the test fakes google.auth itself; tests/conftest.py)",
+    "no_fake_world: a tests/dashboard/test_app.py test that keeps the refusing gcp factories (no fake BigQuery client)",
 ]
 
 # Pinned explicitly rather than relying on ruff's defaults, which change between ruff versions: this states the bar the

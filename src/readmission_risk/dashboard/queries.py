@@ -32,6 +32,11 @@ DASHBOARD_LABELS = {"component": "dashboard"}  # FR15 job label
 OPS_EPOCH = date(2026, 10, 1)
 PUBLISHED_DATES_LIMIT = 500  # the monitoring grid has 178 tick dates; the live check fails if the limit is reached
 SUCCEEDED = "succeeded"
+# The app's per-query bound (v3 slice 3, owner decision S16): submission retried for at most 10 s, each HTTP request at most
+# 10 s, the result awaited for at most 20 s, and a failed job never re-run, so a failure panel shows within about 30 s instead
+# of after google-cloud-bigquery's default 10-40 minutes of retries. The live checks keep run/run_job/dry_run unbounded.
+SUBMIT_DEADLINE_S = 10.0
+RESULT_TIMEOUT_S = 20.0
 
 
 @dataclass(frozen=True)
@@ -209,3 +214,22 @@ def dry_run(client, query: DashboardQuery) -> int:
     filter", Forbidden) are raised by client.query itself."""
     job = client.query(query.sql, job_config=query_config(**config_kwargs(query, dry_run=True)))
     return job.total_bytes_processed
+
+
+def run_bounded(
+    client, query: DashboardQuery, *, submit_deadline: float = SUBMIT_DEADLINE_S, result_timeout: float = RESULT_TIMEOUT_S
+) -> list[dict]:
+    """run() with the dashboard's time bound (S16): `timeout` caps each HTTP request (Client.query's default is None, and a
+    retry timeout does not interrupt a hung request), `job_retry=None` stops a failed job from being re-run (the visitor's next
+    interaction retries). Raises whatever the client raises, concurrent.futures.TimeoutError included."""
+    from google.cloud.bigquery.retry import DEFAULT_RETRY
+
+    job = client.query(
+        query.sql,
+        job_config=query_config(**config_kwargs(query)),
+        retry=DEFAULT_RETRY.with_timeout(submit_deadline),
+        job_retry=None,
+        timeout=submit_deadline,
+    )
+    rows = job.result(retry=DEFAULT_RETRY.with_timeout(result_timeout), timeout=result_timeout)
+    return [dict(row.items()) for row in rows]

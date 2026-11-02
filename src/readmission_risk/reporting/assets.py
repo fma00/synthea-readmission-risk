@@ -19,13 +19,14 @@ from mlflow.tracking import MlflowClient
 
 from readmission_risk.models.tracking import resolve_run_id
 
+from .palette import THEMES
 from .reliability import (
     DEFAULT_POPULATION_LABEL,
     bin_points,
     build_reliability_figure,
     title_for,
 )
-from .style import MODEL_DISPLAY_NAMES, MODEL_NAMES, THEMES, house_style, save_figure
+from .style import MODEL_DISPLAY_NAMES, MODEL_NAMES, house_style, save_figure
 from .topn_table import format_topn_markdown
 
 _PREVIEW_DPI = 200

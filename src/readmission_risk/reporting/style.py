@@ -7,7 +7,6 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -15,6 +14,8 @@ import matplotlib
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib.ticker import MaxNLocator
+
+from .palette import Theme
 
 CM = 1 / 2.54
 DPI = 1200
@@ -43,37 +44,6 @@ HOUSE_RC: dict[str, object] = {
     "svg.hashsalt": "readmission-risk",
     "font.family": "sans-serif",
     "font.sans-serif": ["-apple-system", "BlinkMacSystemFont", "Segoe UI", "Noto Sans", "Helvetica", "Arial", "DejaVu Sans"],
-}
-
-
-@dataclass(frozen=True)
-class Theme:
-    name: str
-    ink: str
-    grey: str
-    series: dict[str, str]
-    markers: dict[str, str]
-    preview_background: str
-
-
-_MARKERS = {"logistic_regression": "o", "xgboost_calibrated": "s"}
-THEMES: dict[str, Theme] = {
-    "light": Theme(
-        "light",
-        ink="#1f2328",
-        grey="#6e7781",
-        series={"logistic_regression": "#0072B2", "xgboost_calibrated": "#D55E00"},
-        markers=_MARKERS,
-        preview_background="#ffffff",
-    ),
-    "dark": Theme(
-        "dark",
-        ink="#e6edf3",
-        grey="#8b949e",
-        series={"logistic_regression": "#56B4E9", "xgboost_calibrated": "#E69F00"},
-        markers=_MARKERS,
-        preview_background="#0d1117",
-    ),
 }
 
 

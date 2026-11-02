@@ -10,10 +10,10 @@ from matplotlib.figure import Figure
 from matplotlib.ticker import MaxNLocator
 from PIL import Image
 
+from readmission_risk.reporting.palette import THEMES
 from readmission_risk.reporting.style import (
     CM,
     HOUSE_RC,
-    THEMES,
     figure_size_cm,
     house_style,
     new_axes,

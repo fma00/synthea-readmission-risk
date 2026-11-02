@@ -26,7 +26,7 @@ PRE_COMMIT_CONFIG = ROOT / ".pre-commit-config.yaml"
 
 EXPECTED_TARGETS = {
     "help", "setup", "hooks", "lint", "test", "pre-commit", "train", "export", "export-portable", "score", "score-bq", "m5-check",
-    "setup-runtime", "test-runtime", "lock-main", "lock-dev", "lock-runtime", "tf-validate", "spark-zip", "generate-vm", "bigjoin-batch",
+    "setup-runtime", "test-runtime", "lock-main", "lock-dev", "lock-dashboard", "lock-runtime", "tf-validate", "spark-zip", "generate-vm", "bigjoin-batch",
     "check-population", "gate", "prereg-lock", "prereg-phase-b",
     "m5-monitoring", "gold-publish", "gold-seeded-check", "gold-access-check", "dashboard-access-check", "dashboard-query-check", "gold-200k", "monitor-preflight", "monitor-simulate", "monitor-catch-up", "ledger", "m3-check", "burn-in-timer",
 }
@@ -266,6 +266,14 @@ def test_make_lock_targets_compile_under_the_intended_python():
     assert 'python3.14 -m venv ".venv-lock314"' in main
     assert ".venv-lock314/bin/pip-compile --generate-hashes --output-file=requirements.txt requirements.in" in main
     assert "--upgrade" not in main
+    assert "Then run make lock-dashboard: requirements-dashboard.txt is constrained by requirements.txt." in main
+    dashboard = _dry_run("lock-dashboard")  # v3 slice 3 (S17): the lock-main recipe, for the dashboard set
+    assert 'test "$(uname -s)" = Darwin' in dashboard
+    assert 'python3.14 -m venv ".venv-lock314"' in dashboard
+    assert (
+        ".venv-lock314/bin/pip-compile --generate-hashes --output-file=requirements-dashboard.txt requirements-dashboard.in"
+    ) in dashboard
+    assert "--upgrade" not in dashboard
 
 
 @needs_make
@@ -304,11 +312,17 @@ def test_pre_commit_is_a_hash_pinned_dev_dependency():
     assert lock[at + 1].strip().startswith("--hash=sha256:")
 
 
-def test_dev_and_main_lockfiles_agree_on_shared_pins():
-    # Both are installed into the same .venv by separate `pip install` calls, so a divergence would silently replace the
-    # main lockfile's pin. requirements-dataproc-3.0.txt is never co-installed with them and is not compared.
-    main, dev = _pins(ROOT / "requirements.txt"), _pins(ROOT / "requirements-dev.txt")
-    assert {name: (main[name], dev[name]) for name in main.keys() & dev.keys() if main[name] != dev[name]} == {}
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [("requirements.txt", "requirements-dev.txt"), ("requirements.txt", "requirements-dashboard.txt"),
+     ("requirements-dashboard.txt", "requirements-dev.txt")],
+)  # fmt: skip
+def test_co_installed_lockfiles_agree_on_shared_pins(first, second):
+    # These are installed into the same .venv by separate `pip install` calls (make setup, CI's lint-and-test), so a
+    # divergence would silently replace an earlier lockfile's pin. The dashboard set is `-c requirements.txt` constrained
+    # (tests/test_lockfiles.py D8) but the dev set is not. requirements-dataproc-3.0.txt is never co-installed and is not compared.
+    a, b = _pins(ROOT / first), _pins(ROOT / second)
+    assert {name: (a[name], b[name]) for name in a.keys() & b.keys() if a[name] != b[name]} == {}
 
 
 @pytest.mark.skipif(importlib.util.find_spec("pre_commit") is None, reason="pre-commit is not installed")

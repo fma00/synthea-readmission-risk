@@ -57,17 +57,18 @@ define fresh_venv
 case "$(1)" in */*|*..*) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; .venv-*) ;; *) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; esac; rm -rf "$(1)" && $(2) -m venv "$(1)"
 endef
 
-.PHONY: help setup hooks lint test pre-commit train export export-portable score score-bq m5-check setup-runtime test-runtime lock-main lock-dev lock-runtime tf-validate spark-zip generate-vm bigjoin-batch check-population gate prereg-lock prereg-phase-b m5-monitoring gold-publish gold-seeded-check gold-access-check dashboard-access-check dashboard-query-check gold-200k monitor-preflight monitor-simulate monitor-catch-up ledger m3-check burn-in-timer
+.PHONY: help setup hooks lint test pre-commit train export export-portable score score-bq m5-check setup-runtime test-runtime lock-main lock-dev lock-dashboard lock-runtime tf-validate spark-zip generate-vm bigjoin-batch check-population gate prereg-lock prereg-phase-b m5-monitoring gold-publish gold-seeded-check gold-access-check dashboard-access-check dashboard-query-check gold-200k monitor-preflight monitor-simulate monitor-catch-up ledger m3-check burn-in-timer
 .DEFAULT_GOAL := help
 
 help: ## List the targets
 	@grep -E '^[a-z0-9-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
 
-setup: ## Create .venv (Python 3.14) and install the three hash-locked dependency sets (docs/setup.md)
+setup: ## Create .venv (Python 3.14) and install the four hash-locked dependency sets (docs/setup.md)
 	test -d $(VENV) || $(PYTHON) -m venv $(VENV)
 	@$(call check_python,$(VENV),3,14,VENV)
 	$(BIN)/pip install -e .
 	$(BIN)/pip install --require-hashes -r requirements.txt -r requirements-linux-extras.txt
+	$(BIN)/pip install --require-hashes -r requirements-dashboard.txt -r requirements-dashboard-linux-extras.txt
 	$(BIN)/pip install --require-hashes -r requirements-dev.txt
 	@echo "Done. Run 'make hooks' to install the git pre-commit hook."
 
@@ -173,6 +174,7 @@ lock-main: ## Recompile requirements.txt under Python 3.14 on macOS, keeping exi
 	$(LOCK314_VENV)/bin/pip install --require-hashes -r requirements-dev.txt
 	$(LOCK314_VENV)/bin/pip-compile --generate-hashes --output-file=requirements.txt requirements.in
 	@echo "requirements-linux-extras.txt is hand-maintained: if a Linux-only dependency changed, update it (docs/setup.md)."
+	@echo "Then run make lock-dashboard: requirements-dashboard.txt is constrained by requirements.txt."
 
 lock-dev: ## Recompile requirements-dev.txt under Python 3.14 on macOS, keeping existing pins
 	@test "$$(uname -s)" = Darwin || { echo "ERROR: run lock-dev on macOS (see the comment above lock-main in the Makefile)" >&2; exit 1; }
@@ -181,6 +183,16 @@ lock-dev: ## Recompile requirements-dev.txt under Python 3.14 on macOS, keeping 
 	@$(LOCK314_VENV)/bin/python -c 'import sys; print("pip-compile interpreter:", sys.version.split()[0], sys.executable)'
 	$(LOCK314_VENV)/bin/pip install --require-hashes -r requirements-dev.txt
 	$(LOCK314_VENV)/bin/pip-compile --allow-unsafe --generate-hashes --output-file=requirements-dev.txt requirements-dev.in
+
+# The dashboard's set (v3 slice 3, S17): constrained by requirements.txt (`-c` in the .in), so run it after lock-main.
+lock-dashboard: ## Recompile requirements-dashboard.txt under Python 3.14 on macOS, keeping existing pins
+	@test "$$(uname -s)" = Darwin || { echo "ERROR: run lock-dashboard on macOS (see the comment above lock-main in the Makefile)" >&2; exit 1; }
+	@$(call fresh_venv,$(LOCK314_VENV),$(PYTHON),LOCK314_VENV)
+	@$(call check_python,$(LOCK314_VENV),3,14,PYTHON)
+	@$(LOCK314_VENV)/bin/python -c 'import sys; print("pip-compile interpreter:", sys.version.split()[0], sys.executable)'
+	$(LOCK314_VENV)/bin/pip install --require-hashes -r requirements-dev.txt
+	$(LOCK314_VENV)/bin/pip-compile --generate-hashes --output-file=requirements-dashboard.txt requirements-dashboard.in
+	@echo "requirements-dashboard-linux-extras.txt is hand-maintained: if streamlit's Linux-only dependency (watchdog) changed, update it."
 
 # --upgrade on purpose: the runtime mirror is defined as the newest patch of each bundled minor at compile time.
 lock-runtime: ## Recompile requirements-dataproc-3.0.txt under Python 3.12 (re-resolves to the newest allowed patches)

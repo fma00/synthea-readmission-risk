@@ -11,12 +11,15 @@ Developed and CI-tested on Python 3.14 (pinned via [.python-version](../.python-
 python3.14 -m venv .venv
 source .venv/bin/activate
 
-# Install: three separate invocations, since a local editable install can't carry
+# Install: four separate invocations, since a local editable install can't carry
 # pip's --require-hashes guarantee that the lockfiles use.
 pip install -e .
 pip install --require-hashes -r requirements.txt -r requirements-linux-extras.txt
+pip install --require-hashes -r requirements-dashboard.txt -r requirements-dashboard-linux-extras.txt
 pip install --require-hashes -r requirements-dev.txt
 ```
+
+The dashboard set (Streamlit, Altair) has its own lockfile, constrained by `requirements.txt` so every shared pin is equal; only this setup and CI's `lint-and-test` install it, never the scheduled scoring and monitoring workflows (v3 slice 3, owner decision S17).
 
 macOS only: XGBoost needs the OpenMP runtime — `brew install libomp`. A JDK 17+ must be on `PATH` for PySpark's local mode (the feature join and its tests).
 
@@ -38,7 +41,7 @@ The [Makefile](../Makefile) wraps the commands on this page. Its recipes call th
 
 | Target | What it does |
 |---|---|
-| `make setup` | Creates `.venv` with `python3.14` (or reuses it, refusing one of another Python) and runs the three installs above |
+| `make setup` | Creates `.venv` with `python3.14` (or reuses it, refusing one of another Python) and runs the four installs above |
 | `make hooks` | Installs the git pre-commit hook (see below) |
 | `make lint` | `ruff check .` and `zizmor --offline .`, the full-repository equivalent of CI's lint |
 | `make test` | `pytest` |
@@ -48,6 +51,7 @@ The [Makefile](../Makefile) wraps the commands on this page. Its recipes call th
 | `make score` | Scores run date `20250630` with the champion bundle (`deploy/champion.json`) on `SCORE_GOLD_DIR` (default `data/gold/main_200k`, downloaded by `make gold-200k`); override `RUN_DATE`, `SCORE_GOLD_DIR`, extra flags in `SCORE_ARGS` (e.g. `--bundle bundles/<id>`) |
 | `make setup-runtime`, `make test-runtime` | The Dataproc runtime environment, next section |
 | `make lock-main`, `make lock-dev` | Recompile `requirements.txt` / `requirements-dev.txt` under Python 3.14, on macOS (keeps existing pins) |
+| `make lock-dashboard` | Recompiles `requirements-dashboard.txt` under Python 3.14 on macOS; run after `make lock-main` |
 | `make lock-runtime` | Recompile `requirements-dataproc-3.0.txt` under Python 3.12 (re-resolves to the newest allowed patches) |
 | `make tf-validate` | Checks `infra/` like CI's `terraform-validate` job (`fmt -check`, `init` without a backend, `validate`; no credentials); needs Terraform 1.16.x ([Infrastructure](#infrastructure-terraform)) |
 

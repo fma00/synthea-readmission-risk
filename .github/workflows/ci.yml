@@ -50,11 +50,16 @@ jobs:
             requirements.txt
             requirements-dev.txt
             requirements-linux-extras.txt
+            requirements-dashboard.txt
+            requirements-dashboard-linux-extras.txt
 
+      # The dashboard set (v3 slice 3, S17) is installed here and by `make setup` only; the production workflows
+      # (score.yml, monitor.yml) install requirements.txt alone.
       - name: Install dependencies
         run: |
           pip install -e .
           pip install --require-hashes -r requirements.txt -r requirements-linux-extras.txt
+          pip install --require-hashes -r requirements-dashboard.txt -r requirements-dashboard-linux-extras.txt
           pip install --require-hashes -r requirements-dev.txt
 
       - name: Lint

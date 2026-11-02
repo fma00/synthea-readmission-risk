@@ -4,13 +4,14 @@ import pytest
 from matplotlib.collections import LineCollection
 from PIL import Image
 
+from readmission_risk.reporting.palette import THEMES
 from readmission_risk.reporting.reliability import (
     TITLE,
     bin_points,
     build_reliability_figure,
     wilson_interval,
 )
-from readmission_risk.reporting.style import THEMES, house_style, save_figure
+from readmission_risk.reporting.style import house_style, save_figure
 from tests.reporting.conftest import HIGH_CURVE, LOW_CURVE, make_curve
 
 
