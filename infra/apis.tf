@@ -16,6 +16,15 @@ locals {
     "compute.googleapis.com",
     "dataproc.googleapis.com",
     "policytroubleshooter.googleapis.com",
+    # v3 slice 4: the dashboard service, its image repository and the kill switch (Pub/Sub, a Cloud Run function built by Cloud
+    # Build, triggered through Eventarc). logging is on in every project already, so it is adopted.
+    "run.googleapis.com",
+    "artifactregistry.googleapis.com",
+    "pubsub.googleapis.com",
+    "cloudfunctions.googleapis.com",
+    "cloudbuild.googleapis.com",
+    "eventarc.googleapis.com",
+    "logging.googleapis.com",
   ])
 }
 

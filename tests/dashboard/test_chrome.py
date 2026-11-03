@@ -39,8 +39,18 @@ def test_footer():
         " · Image commit unknown (not a deployed image)"
         " · Synthetic patients generated with [Synthea](https://github.com/synthetichealth/synthea)"
         " ([Apache License 2.0](https://github.com/synthetichealth/synthea/blob/master/LICENSE))"
+        " · Admission reasons are SNOMED CT descriptions as distributed with Synthea"
+        " ([NOTICE](https://github.com/synthetichealth/synthea/blob/master/NOTICE)), shown for non-commercial education"
     )
     assert chrome.footer(commit=None, bundles=[]) == "Model bundle: none shown" + tail
     shown = chrome.footer(commit="0123456789abcdef", bundles=["f" * 64, "a" * 64, None, "NOT-HEX", "zz", "a" * 64])
     assert shown.startswith("Model bundle `unknown`, `aaaaaaaaaaaa…`, `ffffffffffff…` · ")
     assert "Image commit `0123456789ab`" in shown
+
+
+def test_footer_ends_with_the_terminology_credit():
+    # v3 slice 4, owner decision T4: the fifth part credits SNOMED CT as distributed with Synthea and links its NOTICE.
+    parts = chrome.footer(commit=None, bundles=[]).split(" · ")
+    assert len(parts) == 5 and parts[-1] == chrome.TERMINOLOGY_CREDIT
+    assert f"]({chrome.SYNTHEA_NOTICE_URL})" in chrome.TERMINOLOGY_CREDIT
+    assert chrome.SYNTHEA_NOTICE_URL == "https://github.com/synthetichealth/synthea/blob/master/NOTICE"

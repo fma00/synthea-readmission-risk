@@ -74,6 +74,10 @@ def _sheet_rows(gold: pd.DataFrame) -> list[dict]:
     return rows
 
 
+def _tick(sim_date, bundle, *, status="succeeded", started=datetime(2026, 10, 26, 0, 17, tzinfo=UTC), run_id="m1") -> dict:
+    return {"monitoring_run_id": run_id, "status": status, "sim_date": sim_date, "model_bundle_id": bundle, "started_at": started}
+
+
 def _published(run_date, run_id, fingerprint=SERVING_GOLD_FINGERPRINT, n=3) -> dict:
     return {"run_date": run_date, "scoring_run_id": run_id, "model_bundle_id": "b", "window_days": 7, "top_n": 2,
             "n_predictions": n, "gold_fingerprint": fingerprint}  # fmt: skip
@@ -91,6 +95,7 @@ class World:
     raise_on: dict[str, BaseException] = field(default_factory=dict)
     v1_count: int = 0
     filter_required: bool = True
+    monitoring: list[dict] | None = None  # v_monitoring rows for Q5 (default: one succeeded tick at the clock, bundle "b" x 64)
 
     def __post_init__(self):
         if not self.published:
@@ -98,6 +103,8 @@ class World:
                               _published(CLOCK, RUN), _published(date(2023, 10, 23), "run-prev")]  # fmt: skip
         if self.sheet is None:
             self.sheet = _sheet_rows(self.gold)
+        if self.monitoring is None:
+            self.monitoring = [] if self.clock is None else [_tick(self.clock, "b" * 64)]
 
     def _lists(self, clock_bound, fingerprint_filter):
         rows = sorted(self.published, key=lambda r: r["run_date"], reverse=True)
@@ -142,6 +149,7 @@ class World:
                 "unfiltered": lambda: self._lists(False, False),
                 "call_sheet": lambda: self.sheet,
                 "count": lambda: [{"n": self.v1_count}],
+                "monitoring_history": lambda: self.monitoring,
             }[kind]()
             return FakeJob(rows=rows, total_bytes_billed=10485760, cache_hit=False)
 
@@ -161,7 +169,7 @@ def test_everything_passes_and_is_measured():
     results, report = _run(World())
     assert set(_outcomes(results).values()) == {"pass"}, {k: r.detail for k, r in results.items() if r.outcome != "pass"}
     assert set(results) == {"Q0", "Q0b:i", f"Q0b:ii:{V1_DATE}", "Q0b:iii", "Q1:published_dates", "Q1:call_sheet",
-                            "Q1:monitoring_history", "Q1:recent_scoring_runs", "Q2", "Q3:discharge", "Q3:as_of", "Q4"}  # fmt: skip
+                            "Q1:monitoring_history", "Q1:recent_scoring_runs", "Q2", "Q3:discharge", "Q3:as_of", "Q4", "Q5"}  # fmt: skip
     m = report.measurements
     assert m["clock_sim_date"] == m["newest_published_date"] == CLOCK.isoformat() and m["n_published_dates"] == 2
     assert m["excluded_other_fingerprint_dates"] == {V1_DATE.isoformat(): 44}
@@ -177,7 +185,7 @@ def test_q0_empty_or_raising_skips_everything_else():
         results, _ = _run(world)
         assert results["Q0"].outcome in ("fail", "error")
         assert {k: r.detail for k, r in results.items() if k != "Q0"} == {
-            n: "skipped: Q0 returned no parseable row" for n in ("Q0b", "Q1", "Q2", "Q3", "Q4")
+            n: "skipped: Q0 returned no parseable row" for n in ("Q0b", "Q1", "Q2", "Q3", "Q4", "Q5")
         }
 
 
@@ -206,7 +214,7 @@ def test_q0_malformed_row_fails_and_no_partial_list_is_used(index):
     results, report = _run(world)
     assert results["Q0"].outcome == "fail" and "malformed" in results["Q0"].detail
     assert {k: r.detail for k, r in results.items() if k != "Q0"} == {
-        n: "skipped: Q0 returned no parseable row" for n in ("Q0b", "Q1", "Q2", "Q3", "Q4")
+        n: "skipped: Q0 returned no parseable row" for n in ("Q0b", "Q1", "Q2", "Q3", "Q4", "Q5")
     }
     assert "n_published_dates" not in report.measurements
 
@@ -282,3 +290,43 @@ def test_q4_a_reason_without_history_is_measured_not_failed():
 def test_exit_code_precedence():
     fail, error, ok = qc.CheckResult("a", "fail", ""), qc.CheckResult("b", "error", ""), qc.CheckResult("c", "pass", "")
     assert qc.exit_code([ok]) == 0 and qc.exit_code([ok, error]) == 5 and qc.exit_code([error, fail]) == 3
+
+
+# ---------------------------------------------------------------- Q5 clock parity (v3 slice 4, Interfaces section 11)
+
+
+def test_q5_passes_when_the_python_clock_equals_the_sql_clock_and_reports_both_bundles():
+    results, report = _run(World())
+    assert results["Q5"].outcome == "pass"
+    assert results["Q5"].detail == (
+        f"clock {CLOCK} (python) = {CLOCK} (sql); monitored bundle {'b' * 12}…; newest published run's bundle unknown"
+    )
+    assert "q5_bytes_billed" in report.measurements
+    assert list(results)[-1] == "Q5"
+
+
+def test_q5_fails_on_a_different_date():
+    results, report = _run(World(monitoring=[_tick(date(2023, 10, 23), "b" * 64)]))
+    assert results["Q5"].outcome == "fail"
+    assert results["Q5"].detail == f"python clock 2023-10-23 != sql clock {CLOCK}"
+    assert qc.exit_code(report.results) == 3
+
+
+def test_q5_bundles_are_reported_not_asserted():
+    results, _ = _run(World(monitoring=[_tick(CLOCK, "c" * 64)]))
+    assert results["Q5"].outcome == "pass" and f"monitored bundle {'c' * 12}…" in results["Q5"].detail
+
+
+def test_q5_fails_without_a_succeeded_tick():
+    results, _ = _run(World(monitoring=[_tick(CLOCK, "b" * 64, status="failed")]))
+    assert results["Q5"].outcome == "fail" and results["Q5"].detail == f"python clock None != sql clock {CLOCK}"
+
+
+def test_q5_reads_the_rows_the_app_reads(monkeypatch):
+    # The default limit of monitoring_history() equals present.MONITORING_LIMIT today, so patch the app's constant: Q5 must follow it.
+    monkeypatch.setattr("readmission_risk.dashboard.present.MONITORING_LIMIT", 7)
+    client = World().client()
+    qc.run_query_checks(client, gold=World().gold)
+    sql = q.monitoring_history().sql
+    real = [config for _, s, config, _ in client.calls if s == sql and not config.dry_run]
+    assert [{p.name: p.value for p in c.query_parameters}["limit"] for c in real] == [7]

@@ -1,5 +1,6 @@
-# Budgets notify; they do not cap spend (the Pub/Sub billing hard stop was declined in PRD OQ4). Amounts are in the
-# billing account's currency, CHF. Neither budget sets all_updates_rule, so notifications are the default emails to the
+# Budgets notify; they do not cap spend (a Pub/Sub billing hard stop was declined in the v2 PRD's OQ4; v3's V18 adds a
+# dashboard-only kill switch, which lives in dashboard.tf). Amounts are in the
+# billing account's currency, CHF. Neither budget in this file sets all_updates_rule, so notifications are the default emails to the
 # billing account's admins and users.
 
 # The CHF 20 budget was created with gcloud on 2026-10-09 (docs/setup.md). This block stays after the first apply: a

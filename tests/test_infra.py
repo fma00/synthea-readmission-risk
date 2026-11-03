@@ -203,7 +203,8 @@ def test_iam_is_additive_only():
     # 12 (slices 3-4) + 14 (slice 5: synthea-generator 6, dataproc-runtime 8; the 2 staging grants removed 2026-10-14)
     # + 14 (slice 7: monitor 8, ledger-reader 5, scorer's monitor.yml binding 1)
     # + 7 (v3 slice 1: gold-publisher 6, its impersonation 1) + 3 (v3 slice 2: dashboard-runtime 2, its impersonation 1)
-    assert len(_iam_members()) == 50
+    # + 10 (v3 slice 4: dashboard-deploy 4, dashboard-kill 1, dashboard-kill-trigger 1, function-builder 3, Billing's publisher 1)
+    assert len(_iam_members()) == 60
     assert [(t, n) for t, n, _ in _resources(_all_tf()) if t.endswith("_iam_member_remove")] == [
         ("google_project_iam_member_remove", "default_compute_no_editor")
     ]
@@ -336,12 +337,16 @@ def test_bootstrap_script_keeps_its_state_safety_checks():
 def test_terraform_versions_agree():
     ci_version = re.search(r'TERRAFORM_VERSION: "([^"]+)"', _read(CI))
     required = re.search(r'required_version = ">= ([0-9.]+), < ', _tf("versions.tf"))
-    provider = re.search(r'source\s*=\s*"hashicorp/google"\s*\n\s*version\s*=\s*"([0-9.]+)"', _tf("versions.tf"))
-    assert ci_version and required and provider
+    assert ci_version and required
     assert ci_version.group(1) == required.group(1)
+    pins = dict(re.findall(r'source\s*=\s*"hashicorp/(\w+)"\s*\n\s*version\s*=\s*"([0-9.]+)"', _tf("versions.tf")))
+    assert set(pins) == {"google", "archive"}  # archive since v3 slice 4 (the kill function's zip)
     lock = _read(INFRA / ".terraform.lock.hcl")
-    assert re.findall(r'^provider "([^"]+)"', lock, flags=re.MULTILINE) == ["registry.terraform.io/hashicorp/google"]
-    assert re.search(r'^  version\s*=\s*"([^"]+)"', lock, flags=re.MULTILINE).group(1) == provider.group(1)
+    blocks = dict(re.findall(r'^provider "registry\.terraform\.io/hashicorp/(\w+)" \{\n  version\s*=\s*"([^"]+)"', lock, flags=re.MULTILINE))
+    assert re.findall(r'^provider "([^"]+)"', lock, flags=re.MULTILINE) == sorted(
+        f"registry.terraform.io/hashicorp/{name}" for name in pins
+    )
+    assert blocks == pins  # each versions.tf pin equals the version inside that provider's own lock block
     # Platform coverage (linux_amd64 for CI, darwin_arm64 for the laptop) is enforced by CI's -lockfile=readonly init and
     # the recipe in docs/setup.md; h1: values are opaque, so only their number is checked here.
     assert len(re.findall(r'"h1:', lock)) >= 2
@@ -461,6 +466,7 @@ def test_every_bigquery_table_is_partitioned_filtered_and_protected():
 # ---------------------------------------------------------------- v3 slice 2: the dashboard's authorized views
 
 DASHBOARD_SA = '"serviceAccount:${google_service_account.dashboard_runtime.email}"'
+DEPLOY_SA = '"serviceAccount:${google_service_account.dashboard_deploy.email}"'  # v3 slice 4
 
 
 def test_bigquery_views_are_exactly_the_dashboard_views():
@@ -570,7 +576,10 @@ def test_dashboard_runtime_grants_are_exactly():
         ("google_bigquery_dataset_iam_member", '"roles/bigquery.dataViewer"', "google_bigquery_dataset.dashboard.dataset_id"),
         ("google_project_iam_member", '"roles/bigquery.jobUser"', "var.project_id"),
     ])  # fmt: skip
-    assert _on_account("dashboard_runtime") == [('"roles/iam.serviceAccountTokenCreator"', "var.operator_member")]
+    assert _on_account("dashboard_runtime") == sorted([
+        ('"roles/iam.serviceAccountTokenCreator"', "var.operator_member"),
+        ('"roles/iam.serviceAccountUser"', DEPLOY_SA),  # v3 slice 4: a revision runs as dashboard-runtime
+    ])  # fmt: skip
     mine = [m for m in _iam_members() if m.get("member") == DASHBOARD_SA]
     assert all("table_id" not in m for m in mine)  # nothing on any serving (or other) table
     assert [m for m in _iam_members() if "readSessionUser" in m.get("role", "")] == []  # FR9: no Storage read sessions
@@ -747,8 +756,11 @@ LEDGER_SA = '"serviceAccount:${google_service_account.ledger_reader.email}"'
 
 
 def _grants(member: str) -> list[tuple[str, str, str]]:
+    # name/repository/topic/service_account_id (v3 slice 4) come BEFORE project: Cloud Run and Artifact Registry members also
+    # carry project/location, which would otherwise make every binding of that kind look the same.
     return sorted(
-        (m["_type"], m["role"], m.get("bucket") or m.get("table_id") or m.get("dataset_id") or m.get("project"))
+        (m["_type"], m["role"], m.get("bucket") or m.get("table_id") or m.get("dataset_id") or m.get("name")
+         or m.get("repository") or m.get("topic") or m.get("service_account_id") or m.get("project"))
         for m in _iam_members()
         if m.get("member") == member
     )
@@ -905,3 +917,188 @@ def test_monitor_workflow_expressions_only_where_allowed():
     for i, line in enumerate(_read(MONITOR).split("\n")):
         if "${{" in line:
             assert line == _burn_in_run_name() or any(p.match(line) for p in allowed), f"monitor.yml:{i + 1}: {line.strip()}"
+
+
+
+# ---------------------------------------------------------------- v3 slice 4: Cloud Run, deploy, kill switch
+# Design: notes/eg-new-feature/v3-slice4-cloud-run-deploy-2026-11-03.md (Interfaces sections 6-8, Verification V-T).
+DEPLOY = WORKFLOWS / "deploy.yml"
+KILL_SA = '"serviceAccount:${google_service_account.dashboard_kill.email}"'
+TRIGGER_SA = '"serviceAccount:${google_service_account.dashboard_kill_trigger.email}"'
+BUILDER_SA = '"serviceAccount:${google_service_account.function_builder.email}"'
+DASHBOARD_IGNORE_CHANGES = (
+    "ignore_changes = [ template[0].containers[0].image, client, client_version, "
+    'template[0].labels["client.knative.dev/nonce"], template[0].annotations["run.googleapis.com/client-name"], '
+    'template[0].annotations["run.googleapis.com/client-version"], ]'
+)
+
+
+def test_dashboard_service_settings():
+    body = _collapse(_resource("google_cloud_run_v2_service", "dashboard"))
+    for fragment in (
+        'name = "dashboard"', "location = var.region", "deletion_protection = true", 'ingress = "INGRESS_TRAFFIC_ALL"',
+        "invoker_iam_disabled = true", "labels = local.dashboard_label",
+        'scaling { scaling_mode = "AUTOMATIC" min_instance_count = 0 max_instance_count = 1 }',
+        "service_account = google_service_account.dashboard_runtime.email",
+        'execution_environment = "EXECUTION_ENVIRONMENT_GEN1"', 'timeout = "900s"', "max_instance_request_concurrency = 80",
+        "session_affinity = true", "image = local.dashboard_placeholder", "ports { container_port = 8080 }",
+        'limits = { cpu = "1" memory = "512Mi" }', "cpu_idle = true", "startup_cpu_boost = true",
+        'traffic { type = "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST" percent = 100 }', DASHBOARD_IGNORE_CHANGES,
+    ):  # fmt: skip
+        assert fragment in body, fragment
+    assert re.search(r"template \{ labels = local\.dashboard_label", body)  # F4: billing reads template labels
+    ignored = re.search(r"ignore_changes = \[(.*?)\]", body, flags=re.DOTALL).group(1)
+    assert "template[0].revision" not in ignored  # provider issue #14569
+    for probe in ("startup_probe", "liveness_probe"):  # the default TCP startup probe only
+        assert probe not in body
+    assert 'dashboard_label = { component = "dashboard" }' in _collapse(_tf("dashboard.tf"))
+
+
+def test_dashboard_repositories_keep_the_newest_five():
+    for name, immutable in (("dashboard", "true"), ("functions", "false")):
+        body = _collapse(_resource("google_artifact_registry_repository", name))
+        assert f'repository_id = "{name}"' in body and 'format = "DOCKER"' in body
+        assert f"docker_config {{ immutable_tags = {immutable} }}" in body  # F12
+        assert "cleanup_policy_dry_run = false" in body
+        assert 'cleanup_policies { id = "delete-all" action = "DELETE" condition { tag_state = "ANY" } }' in body
+        assert 'cleanup_policies { id = "keep-5-newest" action = "KEEP" most_recent_versions { keep_count = 5 } }' in body
+
+
+def test_dashboard_deploy_grants_are_exactly():
+    assert _grants(DEPLOY_SA) == sorted([
+        ("google_cloud_run_v2_service_iam_member", '"roles/run.developer"', "google_cloud_run_v2_service.dashboard.name"),
+        ("google_service_account_iam_member", '"roles/iam.serviceAccountUser"', "google_service_account.dashboard_runtime.name"),
+        ("google_artifact_registry_repository_iam_member", '"roles/artifactregistry.writer"',
+         "google_artifact_registry_repository.dashboard.name"),
+    ])  # fmt: skip
+    assert _on_account("dashboard_deploy") == [('"roles/iam.workloadIdentityUser"', "local.deploy_principal_set")]
+
+
+def test_dashboard_kill_and_trigger_grants_are_exactly():
+    # F20/FR24: the function's identity may only update the dashboard; the trigger's may only invoke the function.
+    assert _grants(KILL_SA) == [
+        ("google_cloud_run_v2_service_iam_member", '"roles/run.developer"', "google_cloud_run_v2_service.dashboard.name")
+    ]
+    assert _grants(TRIGGER_SA) == [
+        ("google_cloud_run_v2_service_iam_member", '"roles/run.invoker"', "google_cloudfunctions2_function.dashboard_kill.name")
+    ]
+    assert _on_account("dashboard_kill") == [] and _on_account("dashboard_kill_trigger") == []
+
+
+def test_function_builder_grants_are_exactly():
+    assert _grants(BUILDER_SA) == sorted([
+        ("google_project_iam_member", '"roles/logging.logWriter"', "var.project_id"),
+        ("google_artifact_registry_repository_iam_member", '"roles/artifactregistry.writer"',
+         "google_artifact_registry_repository.functions.name"),
+        ("google_storage_bucket_iam_member", '"roles/storage.objectViewer"', "google_storage_bucket.artifacts.name"),
+    ])  # fmt: skip
+
+
+def test_no_admin_owner_or_editor_role_is_granted():
+    roles = [m.get("role", "") for m in _iam_members()]
+    assert not [r for r in roles if r in ('"roles/run.admin"', '"roles/owner"', '"roles/editor"')]
+
+
+def test_deploy_sa_binding_is_keyed_to_the_deploy_workflow_on_main():
+    iam = _collapse(_tf("iam.tf"))
+    assert 'deploy_workflow_ref = "${var.github_repository}/.github/workflows/deploy.yml@refs/heads/main"' in iam
+    assert (
+        'deploy_principal_set = "principalSet://iam.googleapis.com/${local.pool_name}/attribute.workflow_ref/'
+        '${local.deploy_workflow_ref}"'
+    ) in iam
+
+
+def test_billing_publishes_to_the_dashboard_budget_topic():
+    body = _collapse(_resource("google_pubsub_topic_iam_member", "billing_publishes_dashboard_budget"))
+    assert 'role = "roles/pubsub.publisher"' in body and "topic = google_pubsub_topic.dashboard_budget.id" in body
+    assert 'member = "serviceAccount:billing-budget-alert@system.gserviceaccount.com"' in body
+
+
+def test_dashboard_budget_and_variable():
+    body = _collapse(_resource("google_billing_budget", "dashboard"))
+    for fragment in (
+        'projects = ["projects/${var.project_number}"]', "labels = local.dashboard_label", 'calendar_period = "MONTH"',
+        'currency_code = "CHF" units = tostring(var.dashboard_budget_chf)',
+        "all_updates_rule { pubsub_topic = google_pubsub_topic.dashboard_budget.id schema_version = \"1.0\" }",
+        'threshold_rules { threshold_percent = 1.0 spend_basis = "CURRENT_SPEND" }',
+    ):  # fmt: skip
+        assert fragment in body, fragment
+    variable = _collapse(re.search(r'^variable "dashboard_budget_chf" \{\n(.*?)^\}', _tf("variables.tf"), re.M | re.S).group(1))
+    assert "type = number" in variable and "default = 3" in variable
+    assert "var.dashboard_budget_chf == floor(var.dashboard_budget_chf)" in variable
+    assert "var.dashboard_budget_chf >= 1 && var.dashboard_budget_chf <= 100" in variable
+
+
+def test_dashboard_kill_function_settings():
+    body = _collapse(_resource("google_cloudfunctions2_function", "dashboard_kill"))
+    for fragment in (
+        'runtime = "python314"', 'entry_point = "on_budget_message"',
+        "service_account = google_service_account.function_builder.id",
+        "docker_repository = google_artifact_registry_repository.functions.id",
+        "object = google_storage_bucket_object.dashboard_kill_source.name",
+        "service_account_email = google_service_account.dashboard_kill.email", 'ingress_settings = "ALLOW_INTERNAL_ONLY"',
+        "max_instance_count = 1", "TARGET_SERVICE = google_cloud_run_v2_service.dashboard.id",
+        "EXPECTED_BUDGET = google_billing_budget.dashboard.name",
+        'event_type = "google.cloud.pubsub.topic.v1.messagePublished"', "pubsub_topic = google_pubsub_topic.dashboard_budget.id",
+        'retry_policy = "RETRY_POLICY_DO_NOT_RETRY"',
+        "service_account_email = google_service_account.dashboard_kill_trigger.email",
+    ):  # fmt: skip
+        assert fragment in body, fragment
+    archive = _collapse(re.search(r'^data "archive_file" "dashboard_kill" \{\n(.*?)^\}', _tf("dashboard.tf"), re.M | re.S).group(1))
+    assert 'excludes = ["__pycache__", ".pytest_cache", ".DS_Store"]' in archive and 'output_file_mode = "0644"' in archive
+    source = _collapse(_resource("google_storage_bucket_object", "dashboard_kill_source"))
+    assert 'name = "sha256/${data.archive_file.dashboard_kill.output_sha256}/dashboard_kill.zip"' in source
+    assert "infra/.build/" in _read(ROOT / ".gitignore").split("\n")
+
+
+def test_slice4_apis_are_enabled():
+    apis = _tf("apis.tf")
+    for api in ("run", "artifactregistry", "pubsub", "cloudfunctions", "cloudbuild", "eventarc", "logging"):
+        assert f'"{api}.googleapis.com",' in apis, api
+
+
+def test_function_builder_reads_only_the_function_sources():
+    body = _collapse(_resource("google_storage_bucket_iam_member", "function_builder_reads_artifacts"))
+    assert (
+        'expression = "resource.name.startsWith(\\"projects/_/buckets/${google_storage_bucket.artifacts.name}/objects/sha256/\\") '
+        '&& resource.name.endsWith(\\"/dashboard_kill.zip\\")"'
+    ) in body
+
+
+def test_dashboard_budget_name_output_is_sensitive():
+    block = re.search(r'^output "dashboard_budget_name" \{\n(.*?)^\}', _tf("outputs.tf"), flags=re.M | re.S).group(1)
+    assert re.search(r"^  sensitive\s*=\s*true", block, flags=re.M)  # F16: the name carries the billing account id
+
+
+def test_dashboard_outputs():
+    outputs = _collapse(_tf("outputs.tf"))
+    for fragment in (
+        'output "dashboard_urls" {', "value = google_cloud_run_v2_service.dashboard.urls",
+        'output "dashboard_budget_name" {', "value = google_billing_budget.dashboard.name",
+        'output "dashboard_budget_chf" { value = var.dashboard_budget_chf }',
+    ):  # fmt: skip
+        assert fragment in outputs, fragment
+
+
+def test_deploy_workflow_matches_the_terraform_values():
+    lines = _read(DEPLOY).split("\n")
+    text = "\n".join(line for line in lines if not line.lstrip().startswith("#"))  # the comments name what is forbidden
+    assert _triggers(lines) == {"workflow_dispatch"} and "permissions: {}" in lines
+    assert "          service_account: dashboard-deploy@synthea-readmission-risk.iam.gserviceaccount.com" in lines
+    assert (
+        "          workload_identity_provider: "
+        "projects/271458030145/locations/global/workloadIdentityPools/github/providers/github-actions"
+    ) in lines
+    assert "--allow-unauthenticated" not in text and "update-traffic" not in text and "credentials_json" not in text
+    deploys = [line.strip() for line in lines if "gcloud run deploy" in line]
+    assert deploys == ['run: gcloud run deploy "$SERVICE" --region "$REGION" --image "$IMAGE" --quiet']
+    assert "          IMAGE: ${{ steps.push.outputs.image }}" in lines
+    assert 'case "$ref" in "$REPOSITORY/dashboard@sha256:"*) ;;' in text  # only a digest reference is deployed
+    assert "      REPOSITORY: us-central1-docker.pkg.dev/synthea-readmission-risk/dashboard" in lines
+    assert "token_format" not in text
+
+
+def test_dashboard_image_builds_are_single_manifest():
+    for path in (DEPLOY, CI):
+        builds = [line for line in _read(path).split("\n") if "docker build" in line]
+        assert builds and all("--provenance=false --sbom=false" in b and "--platform linux/amd64" in b for b in builds), path

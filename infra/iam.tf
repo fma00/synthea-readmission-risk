@@ -1,5 +1,6 @@
 # Service accounts: gha-smoke and bundle-writer (v2 slice 3), scorer (v2 slice 4), monitor and ledger-reader (v2 slice 7),
-# gold-publisher (v3 slice 1).
+# gold-publisher (v3 slice 1), dashboard-runtime (v3 slice 2), dashboard-deploy, dashboard-kill, dashboard-kill-trigger and
+# function-builder (v3 slice 4).
 # Later slices add one per job (Big Join submitter, Dataproc runtime, trainer), each bound to its own workflow file like gha-smoke below. Only additive *_iam_member resources:
 # *_iam_policy or *_iam_binding would replace bindings this config does not own. One deliberate exception:
 # google_project_iam_member_remove.default_compute_no_editor removes Google's project roles/editor grant from the default
@@ -35,6 +36,8 @@ locals {
   score_principal_set   = "principalSet://iam.googleapis.com/${local.pool_name}/attribute.workflow_ref/${local.score_workflow_ref}"
   monitor_workflow_ref  = "${var.github_repository}/.github/workflows/monitor.yml@refs/heads/main"
   monitor_principal_set = "principalSet://iam.googleapis.com/${local.pool_name}/attribute.workflow_ref/${local.monitor_workflow_ref}"
+  deploy_workflow_ref   = "${var.github_repository}/.github/workflows/deploy.yml@refs/heads/main"
+  deploy_principal_set  = "principalSet://iam.googleapis.com/${local.pool_name}/attribute.workflow_ref/${local.deploy_workflow_ref}"
 }
 
 # List only: storage.buckets.get + storage.objects.list, no objects.get, so the smoke job cannot download a pickle.
@@ -608,6 +611,132 @@ resource "google_service_account_iam_member" "operator_impersonates_dashboard_ru
   service_account_id = google_service_account.dashboard_runtime.name
   role               = "roles/iam.serviceAccountTokenCreator"
   member             = var.operator_member
+
+  depends_on = [google_project_service.enabled]
+}
+
+# ---------------------------------------------------------------- v3 slice 4: deploy, kill switch, function build
+# Design: notes/eg-new-feature/v3-slice4-cloud-run-deploy-2026-11-03.md (Interfaces section 6). No roles/run.admin anywhere: the
+# deployer and the kill function can update the service but never change its IAM policy.
+
+resource "google_service_account" "dashboard_deploy" {
+  account_id   = "dashboard-deploy"
+  display_name = "Dashboard deploy (deploy.yml)"
+  description  = "Pushes the dashboard image and deploys it to the Terraform-owned Cloud Run service; impersonable only by deploy.yml on main."
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_cloud_run_v2_service_iam_member" "deploy_develops_dashboard" {
+  name     = google_cloud_run_v2_service.dashboard.name
+  location = google_cloud_run_v2_service.dashboard.location
+  role     = "roles/run.developer"
+  member   = "serviceAccount:${google_service_account.dashboard_deploy.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+# A revision runs as dashboard-runtime, so deploying one needs actAs on it.
+resource "google_service_account_iam_member" "deploy_acts_as_dashboard_runtime" {
+  service_account_id = google_service_account.dashboard_runtime.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.dashboard_deploy.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_artifact_registry_repository_iam_member" "deploy_pushes_dashboard_images" {
+  repository = google_artifact_registry_repository.dashboard.name
+  location   = google_artifact_registry_repository.dashboard.location
+  role       = "roles/artifactregistry.writer"
+  member     = "serviceAccount:${google_service_account.dashboard_deploy.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_service_account_iam_member" "deploy_wif" {
+  service_account_id = google_service_account.dashboard_deploy.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = local.deploy_principal_set
+
+  depends_on = [google_project_service.enabled]
+}
+
+# The function's own identity: run.developer on the dashboard service only (FR24). P1 if the PATCH needs actAs.
+resource "google_service_account" "dashboard_kill" {
+  account_id   = "dashboard-kill"
+  display_name = "Dashboard kill switch (function identity)"
+  description  = "Runs dashboard-kill; may only update the dashboard Cloud Run service (manual scaling, 0 instances)."
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_cloud_run_v2_service_iam_member" "kill_develops_dashboard" {
+  name     = google_cloud_run_v2_service.dashboard.name
+  location = google_cloud_run_v2_service.dashboard.location
+  role     = "roles/run.developer"
+  member   = "serviceAccount:${google_service_account.dashboard_kill.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+# Eventarc delivers each budget message as this identity (F20): it may only invoke the function.
+resource "google_service_account" "dashboard_kill_trigger" {
+  account_id   = "dashboard-kill-trigger"
+  display_name = "Dashboard kill switch (Eventarc trigger identity)"
+  description  = "Eventarc's identity for the dashboard budget topic: may only invoke the dashboard-kill function."
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_cloud_run_v2_service_iam_member" "trigger_invokes_kill" {
+  name     = google_cloudfunctions2_function.dashboard_kill.name
+  location = google_cloudfunctions2_function.dashboard_kill.location
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.dashboard_kill_trigger.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+# The function's custom build identity (functions/docs/securing/build-custom-sa): the default compute SA has had no roles/editor
+# since 2026-10-14, so it cannot build.
+resource "google_service_account" "function_builder" {
+  account_id   = "function-builder"
+  display_name = "Cloud Run functions build (dashboard-kill)"
+  description  = "Builds the dashboard-kill function: reads its source in the artifacts bucket, writes the functions repository, writes logs."
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_project_iam_member" "function_builder_writes_logs" {
+  project = var.project_id
+  role    = "roles/logging.logWriter"
+  member  = "serviceAccount:${google_service_account.function_builder.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+resource "google_artifact_registry_repository_iam_member" "function_builder_pushes_functions" {
+  repository = google_artifact_registry_repository.functions.name
+  location   = google_artifact_registry_repository.functions.location
+  role       = "roles/artifactregistry.writer"
+  member     = "serviceAccount:${google_service_account.function_builder.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
+# Only the function's own source zips (sha256/<hex>/dashboard_kill.zip), not the bucket's other artifacts (the Synthea jar, the
+# JDK, the Spark zip). Static, so a new source hash needs no IAM change. P8 if the build needs more (e.g. objects.list).
+resource "google_storage_bucket_iam_member" "function_builder_reads_artifacts" {
+  bucket = google_storage_bucket.artifacts.name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.function_builder.email}"
+
+  condition {
+    title       = "dashboard-kill-source-only"
+    description = "Read only the dashboard-kill function's source zips."
+    expression  = "resource.name.startsWith(\"projects/_/buckets/${google_storage_bucket.artifacts.name}/objects/sha256/\") && resource.name.endsWith(\"/dashboard_kill.zip\")"
+  }
 
   depends_on = [google_project_service.enabled]
 }

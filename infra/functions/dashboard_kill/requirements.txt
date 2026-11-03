@@ -1,0 +1,1 @@
+# Intentionally no requirement: kill.py uses only the standard library and the buildpack provides functions-framework (v3 slice 4, T3).

@@ -20,6 +20,12 @@ INTENDED_USE = "**Intended use:** a simulated weekly triage call sheet for a fic
 MODEL_CARD_URL: str | None = None
 SYNTHEA_URL = "https://github.com/synthetichealth/synthea"
 SYNTHEA_LICENSE_URL = SYNTHEA_URL + "/blob/master/LICENSE"
+SYNTHEA_NOTICE_URL = SYNTHEA_URL + "/blob/master/NOTICE"
+# v3 slice 4, owner decision T4: the app shows SNOMED CT descriptions, which Synthea's NOTICE covers (not legal advice).
+TERMINOLOGY_CREDIT = (
+    "Admission reasons are SNOMED CT descriptions as distributed with Synthea "
+    f"([NOTICE]({SYNTHEA_NOTICE_URL})), shown for non-commercial education"
+)
 GIT_COMMIT_ENV = "READMISSION_RISK_GIT_COMMIT"  # set by slice 4's image build
 _COMMIT_RE = re.compile(r"[0-9a-f]{7,40}")
 
@@ -48,5 +54,6 @@ def footer(*, commit: str | None, bundles: Iterable) -> str:
         f"Gold `{SERVING_GOLD_FINGERPRINT[:12]}…`",
         f"Image commit `{commit[:12]}`" if commit else "Image commit unknown (not a deployed image)",
         f"Synthetic patients generated with [Synthea]({SYNTHEA_URL}) ([Apache License 2.0]({SYNTHEA_LICENSE_URL}))",
+        TERMINOLOGY_CREDIT,
     ]
     return " · ".join(parts)

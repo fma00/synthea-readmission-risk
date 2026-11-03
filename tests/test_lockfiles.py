@@ -58,9 +58,9 @@ LOCK_PAIRS = (
              "make lock-runtime"),
 )
 LINUX_EXTRAS = "requirements-linux-extras.txt"
-# Hand-maintained Linux-only pins and the lockfile each complements (v3 slice 3, S17: the dashboard set has its own, so the
-# production workflows' requirements-linux-extras.txt stays unchanged).
-LINUX_EXTRAS_PAIRS = ((LINUX_EXTRAS, "requirements.txt"), ("requirements-dashboard-linux-extras.txt", "requirements-dashboard.txt"))
+# Hand-maintained Linux-only pins and the lockfile each complements (the production set only: since v3 slice 4 the dashboard
+# lockfile is compiled on Linux and carries its one Linux-only pin, watchdog, itself; F10).
+LINUX_EXTRAS_PAIRS = ((LINUX_EXTRAS, "requirements.txt"),)  # the dashboard pair left in v3 slice 4: its lockfile is Linux-compiled
 # The only `-c` constraint an .in file may name: the dashboard set is constrained by the main lockfile.
 ALLOWED_CONSTRAINTS = ("requirements.txt",)
 LINUX_MARKER = '; platform_system == "Linux"'
@@ -218,6 +218,24 @@ def test_linux_extras_are_marked_hashed_and_not_in_their_lockfile(extras_file, l
         f"{names} pinned in both {extras_file} and {lock_file}; was {lock_file} compiled on Linux? "
         "(the lock targets must run on macOS)"
     )
+
+
+def test_dashboard_lockfile_is_linux_compiled():
+    """v3 slice 4 (T2, F10): compiled inside the image's base, so it pins watchdog (a macOS compile cannot see it), marked
+    Linux-only (no macOS wheel for Python 3.14), and no other pin is marked; the hand-maintained extras file is gone."""
+    lines = (ROOT / "requirements-dashboard.txt").read_text().split("\n")
+    marked = [line for line in lines if PIN_RE.match(line) and ";" in line]
+    assert marked == ['watchdog==6.0.0 ; platform_system == "Linux" \\'], marked
+    assert not (ROOT / "requirements-dashboard-linux-extras.txt").exists()
+
+
+def test_dashboard_lockfile_meets_fr20():
+    from packaging.version import Version
+
+    pins = parse_lockfile((ROOT / "requirements-dashboard.txt").read_text())
+    assert Version(pins["uvicorn"].version) >= Version("0.52")  # Streamlit 1.66's proxy warning
+    assert pins["pyarrow"].version != "25.0.0"  # streamlit requires pyarrow!=25.0.0
+    assert "google-cloud-bigquery" in pins and "pandas" in pins
 
 
 # ---------------------------------------------------------------- the rules, on synthetic text

@@ -1,7 +1,9 @@
 """Live proof of the dashboard's fixed queries (v3 slice 2, PRD FR8, M2), run as dashboard-runtime: the date list and the
 simulated clock (Q0), positive controls for the fingerprint and clock rules (Q0b), dry-run bytes under the cap (Q1), partition
-pruning (Q2), the filter requirement surviving the view (Q3), and the clock's call sheet against the local gold (Q4). See
-notes/eg-new-feature/v3-slice2-authorized-views-2026-10-31.md (Interfaces section 6) for every rule used here.
+pruning (Q2), the filter requirement surviving the view (Q3), the clock's call sheet against the local gold (Q4), and the
+heartbeat's Python clock against the SQL clock (Q5, v3 slice 4). See
+notes/eg-new-feature/v3-slice2-authorized-views-2026-10-31.md (Interfaces section 6) for every rule used here, and
+notes/eg-new-feature/v3-slice4-cloud-run-deploy-2026-11-03.md (Interfaces section 11) for Q5.
 """
 
 from __future__ import annotations
@@ -284,8 +286,30 @@ def _q4(client, report: QueryCheckReport, newest: q.PublishedDate, gold: pd.Data
     _guarded(report, "Q4", run)
 
 
+def _q5(client, report: QueryCheckReport, newest: q.PublishedDate) -> None:
+    """Clock parity (v3 slice 4, §11): the heartbeat's Python clock (simulated_clock over v_monitoring rows) equals the SQL clock
+    CTE every listed PublishedDate carries, over the rows the app reads (the same limit). Bundles are reported, not asserted.
+    Known divergence: monitoring_history() has a LIMIT (present.MONITORING_LIMIT, 1000) and the SQL clock CTE has none, so Q5 can fail after more than 1,000 monitoring rows since OPS_EPOCH; the
+    heartbeat would then be wrong too, so the failure is a true signal."""
+    from readmission_risk.dashboard.heartbeat import (
+        simulated_clock,  # pandas + stdlib only
+    )
+    from readmission_risk.dashboard.present import MONITORING_LIMIT, short_id
+
+    def run() -> str:
+        clock = simulated_clock(_real(client, q.monitoring_history(limit=MONITORING_LIMIT), report, "q5"))
+        if clock is None or clock[0] != newest.clock_sim_date:
+            raise _Failed(f"python clock {clock[0] if clock else None} != sql clock {newest.clock_sim_date}")
+        return (
+            f"clock {clock[0]} (python) = {newest.clock_sim_date} (sql); monitored bundle {short_id(clock[1])}; "
+            f"newest published run's bundle {short_id(newest.model_bundle_id)}"
+        )
+
+    _guarded(report, "Q5", run)
+
+
 def run_query_checks(client, *, gold: pd.DataFrame) -> QueryCheckReport:
-    """Every check's result plus the measurements. Dependencies (design, Interfaces 6): Q0b, Q1, Q3 and Q4 need Q0's rows (they
+    """Every check's result plus the measurements. Dependencies (design, Interfaces 6): Q0b, Q1, Q3, Q4 and Q5 (v3 slice 4) need Q0's rows (they
     use the newest); Q2 also needs Q1's call-sheet byte count. A fail never skips anything."""
     from readmission_risk.models.data import (
         prepare_features,  # the check only: the dashboard itself never imports models
@@ -294,7 +318,7 @@ def run_query_checks(client, *, gold: pd.DataFrame) -> QueryCheckReport:
     report = QueryCheckReport()
     listed = _q0(client, report)
     if not listed:
-        for name in ("Q0b", "Q1", "Q2", "Q3", "Q4"):
+        for name in ("Q0b", "Q1", "Q2", "Q3", "Q4", "Q5"):
             _skip(report, name, "Q0 returned no parseable row")
         return report
     newest = listed[0]
@@ -307,6 +331,7 @@ def run_query_checks(client, *, gold: pd.DataFrame) -> QueryCheckReport:
     _q3(client, report, newest)
     los = pd.Series(prepare_features(gold)["length_of_stay_days"].to_numpy(), index=gold["encounter_id"].to_numpy())
     _q4(client, report, newest, gold, los)
+    _q5(client, report, newest)
     return report
 
 

@@ -1,0 +1,8 @@
+*
+!requirements-dashboard.txt
+!src/readmission_risk
+!scripts/dashboard_app.py
+!scripts/dashboard_image_check.py
+!.streamlit/config.toml
+**/__pycache__
+**/*.pyc
