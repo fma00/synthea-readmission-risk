@@ -1331,5 +1331,5 @@ burn-in how often an alert will fire. The rule is pre-registered; this changes n
 - **L16, L17:** L17, the `v2.0` tag on `main` with release notes, is set by the owner on the release-prep PR's merge commit. L16 (the calendar reminder for the last commit date + 50 days, and the billing report for the slice's days) is still open.
 - **v2.0 released (L17, 2026-10-27):** annotated tag `v2.0` on `fe44a72` (the PR #37 merge commit), GitHub release
   "v2.0: cloud, scale-up, monitoring", marked Latest. The amendment's T4.5 passed on 2026-10-31, and the final week
-  count is in that note's Results. **L16** (the calendar reminder, 2026-12-22 since 2026-11-02 and 2026-12-16 before that, and the billing check) is still open.
+  count is in that note's Results. **L16** (the calendar reminder, 2026-12-23 since 2026-11-03 (PR #40, `v3` into `main`), 2026-12-22 since 2026-11-02 and 2026-12-16 before that, and the billing check) is still open.
 
