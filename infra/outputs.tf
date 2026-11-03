@@ -56,3 +56,23 @@ output "spark_subnet" {
   value = google_compute_subnetwork.spark_us_central1.self_link
 }
 
+
+# v3 slice 4
+output "dashboard_urls" {
+  description = "Every run.app URL of the dashboard service (the deterministic one and the legacy one; F6)."
+  value       = google_cloud_run_v2_service.dashboard.urls
+}
+
+output "dashboard_image_repository" {
+  value = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.dashboard.repository_id}"
+}
+
+output "dashboard_budget_name" {
+  description = "billingAccounts/<account>/budgets/<id>: contains the billing account id, so it is never committed (F16)."
+  value       = google_billing_budget.dashboard.name
+  sensitive   = true # hidden in apply/plan output; `terraform output -raw dashboard_budget_name` still prints it
+}
+
+output "dashboard_budget_chf" {
+  value = var.dashboard_budget_chf
+}

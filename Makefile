@@ -41,7 +41,12 @@ RUN              ?=
 JDK_TARBALL      ?=
 GEN_ARGS         ?=
 BATCH_ARGS       ?=
+DASHBOARD_IMAGE  ?= readmission-risk-dashboard:local
+DASHBOARD_URLS   ?= https://dashboard-271458030145.us-central1.run.app
+KILL_COST        ?= 0.01
 BIN := $(VENV)/bin
+# The dashboard image's base, read from the Dockerfile's FROM line, so the lockfile is compiled in exactly that image (v3 slice 4).
+DASHBOARD_BASE_IMAGE := $(shell sed -n 's/^FROM \(python:[^ ]*@sha256:[0-9a-f]\{64\}\)$$/\1/p' Dockerfile)
 CAFFEINATE := $(shell command -v caffeinate >/dev/null 2>&1 && echo caffeinate -i)
 
 # $(call check_python,<venv dir>,<major>,<minor>,<variable to override>)
@@ -57,7 +62,7 @@ define fresh_venv
 case "$(1)" in */*|*..*) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; .venv-*) ;; *) echo "ERROR: $(3) must name a .venv-* directory in the repository root (it is deleted and recreated)" >&2; exit 1;; esac; rm -rf "$(1)" && $(2) -m venv "$(1)"
 endef
 
-.PHONY: help setup hooks lint test pre-commit train export export-portable score score-bq m5-check setup-runtime test-runtime lock-main lock-dev lock-dashboard lock-runtime tf-validate spark-zip generate-vm bigjoin-batch check-population gate prereg-lock prereg-phase-b m5-monitoring gold-publish gold-seeded-check gold-access-check dashboard-access-check dashboard-query-check gold-200k monitor-preflight monitor-simulate monitor-catch-up ledger m3-check burn-in-timer
+.PHONY: help setup hooks lint test pre-commit train export export-portable score score-bq m5-check setup-runtime test-runtime lock-main lock-dev lock-dashboard lock-runtime tf-validate spark-zip generate-vm bigjoin-batch check-population gate prereg-lock prereg-phase-b m5-monitoring gold-publish gold-seeded-check gold-access-check dashboard-access-check dashboard-query-check dashboard-image dashboard-image-check dashboard-server-check dashboard-kill-test gold-200k monitor-preflight monitor-simulate monitor-catch-up ledger m3-check burn-in-timer
 .DEFAULT_GOAL := help
 
 help: ## List the targets
@@ -68,7 +73,7 @@ setup: ## Create .venv (Python 3.14) and install the four hash-locked dependency
 	@$(call check_python,$(VENV),3,14,VENV)
 	$(BIN)/pip install -e .
 	$(BIN)/pip install --require-hashes -r requirements.txt -r requirements-linux-extras.txt
-	$(BIN)/pip install --require-hashes -r requirements-dashboard.txt -r requirements-dashboard-linux-extras.txt
+	$(BIN)/pip install --require-hashes --only-binary=:all: -r requirements-dashboard.txt
 	$(BIN)/pip install --require-hashes -r requirements-dev.txt
 	@echo "Done. Run 'make hooks' to install the git pre-commit hook."
 
@@ -125,6 +130,25 @@ dashboard-access-check: ## LIVE, expected-denied probes: dashboard-runtime canno
 
 dashboard-query-check: ## LIVE, read-only: the dashboard's fixed queries as dashboard-runtime (dates, pruning, filters, bytes) and parity with SCORE_GOLD_DIR (make gold-200k)
 	$(BIN)/python scripts/dashboard_query_check.py --dashboard-sa $(DASHBOARD_SA) --gold-dir $(SCORE_GOLD_DIR)
+
+# The image records HEAD only when the working tree is clean: a build of uncommitted changes records no commit (its footer then
+# says "Image commit unknown"), and dashboard-image-check allows that one case. CI and deploy.yml always build clean checkouts.
+dashboard-image: ## Build the dashboard image as DASHBOARD_IMAGE (linux/amd64, single manifest; needs Docker)
+	commit=$$(test -z "$$(git status --porcelain)" && git rev-parse HEAD); docker build --platform linux/amd64 --provenance=false --sbom=false --build-arg GIT_COMMIT=$$commit -t $(DASHBOARD_IMAGE) .
+
+dashboard-image-check: dashboard-image ## Offline: the image's contents (IC1-IC7) and server behaviour (SC1-SC5) against a local container
+	docker run --rm $(DASHBOARD_IMAGE) python -I scripts/dashboard_image_check.py $$(test -z "$$(git status --porcelain)" || echo --allow-missing-commit)
+	@docker rm -f readmission-risk-dashboard-check >/dev/null 2>&1 || true
+	docker run -d --name readmission-risk-dashboard-check -p 127.0.0.1:8080:8080 -e PORT=8080 $(DASHBOARD_IMAGE) >/dev/null
+	@for i in $$(seq 1 60); do curl -fsS http://127.0.0.1:8080/_stcore/health >/dev/null 2>&1 && break; sleep 1; done; \
+	$(PYTHON) scripts/dashboard_server_check.py --connect 127.0.0.1:8080 --foreign-host-check $(foreach u,$(patsubst https://%,http://%,$(DASHBOARD_URLS)),--url $(u)) --url http://127.0.0.1:8080; status=$$?; \
+	docker logs readmission-risk-dashboard-check 2>&1 | tail -n 100; docker rm -f readmission-risk-dashboard-check >/dev/null; exit $$status
+
+dashboard-server-check: ## LIVE, read-only, no credentials: SC1-SC4 against every DASHBOARD_URLS entry
+	$(PYTHON) scripts/dashboard_server_check.py $(foreach u,$(DASHBOARD_URLS),--url $(u))
+
+dashboard-kill-test: ## LIVE: publish one synthetic budget message (cost KILL_COST, amount = the Terraform variable) to the kill switch's topic
+	$(PYTHON) scripts/publish_budget_message.py --budget-name "$$($(TERRAFORM) -chdir=infra output -raw dashboard_budget_name)" --budget-amount "$$($(TERRAFORM) -chdir=infra output -raw dashboard_budget_chf)" --cost $(KILL_COST)
 
 gold-200k: ## Download the monitored gold (GOLD_URI) to SCORE_GOLD_DIR (LIVE, read-only; needs gcloud)
 	mkdir -p $(SCORE_GOLD_DIR) && gcloud storage cp "$(GOLD_URI)/*" $(SCORE_GOLD_DIR)/
@@ -184,15 +208,13 @@ lock-dev: ## Recompile requirements-dev.txt under Python 3.14 on macOS, keeping 
 	$(LOCK314_VENV)/bin/pip install --require-hashes -r requirements-dev.txt
 	$(LOCK314_VENV)/bin/pip-compile --allow-unsafe --generate-hashes --output-file=requirements-dev.txt requirements-dev.in
 
-# The dashboard's set (v3 slice 3, S17): constrained by requirements.txt (`-c` in the .in), so run it after lock-main.
-lock-dashboard: ## Recompile requirements-dashboard.txt under Python 3.14 on macOS, keeping existing pins
-	@test "$$(uname -s)" = Darwin || { echo "ERROR: run lock-dashboard on macOS (see the comment above lock-main in the Makefile)" >&2; exit 1; }
-	@$(call fresh_venv,$(LOCK314_VENV),$(PYTHON),LOCK314_VENV)
-	@$(call check_python,$(LOCK314_VENV),3,14,PYTHON)
-	@$(LOCK314_VENV)/bin/python -c 'import sys; print("pip-compile interpreter:", sys.version.split()[0], sys.executable)'
-	$(LOCK314_VENV)/bin/pip install --require-hashes -r requirements-dev.txt
-	$(LOCK314_VENV)/bin/pip-compile --generate-hashes --output-file=requirements-dashboard.txt requirements-dashboard.in
-	@echo "requirements-dashboard-linux-extras.txt is hand-maintained: if streamlit's Linux-only dependency (watchdog) changed, update it."
+# The dashboard's set (v3 slice 3, S17; v3 slice 4, T2/F10): constrained by requirements.txt (`-c` in the .in), so run it after
+# lock-main. Compiled inside the dashboard image's own base (linux/amd64), so it is the image's lockfile; watchdog is then marked
+# Linux-only, because it has no macOS wheel for Python 3.14 (make setup installs this set with --only-binary=:all:).
+lock-dashboard: ## Recompile requirements-dashboard.txt inside the image's base (linux/amd64, Python 3.14), keeping existing pins; needs Docker
+	@test -n "$(DASHBOARD_BASE_IMAGE)" || { echo "ERROR: no digest-pinned FROM line in Dockerfile" >&2; exit 1; }
+	docker run --rm --platform linux/amd64 --user "$$(id -u):$$(id -g)" -e HOME=/tmp -v "$(CURDIR)":/src -w /src $(DASHBOARD_BASE_IMAGE) sh -euc 'python -m venv /tmp/lock && /tmp/lock/bin/pip install --require-hashes -r requirements-dev.txt && /tmp/lock/bin/python -c "import sys; print(\"pip-compile interpreter:\", sys.version.split()[0], sys.platform)" && /tmp/lock/bin/pip-compile --generate-hashes --output-file=requirements-dashboard.txt requirements-dashboard.in && /tmp/lock/bin/python scripts/mark_linux_only_pins.py requirements-dashboard.txt watchdog'
+	@grep -q '^watchdog==.* ; platform_system == "Linux" \\$$' requirements-dashboard.txt || { echo "ERROR: watchdog marker not applied (F10)" >&2; exit 1; }
 
 # --upgrade on purpose: the runtime mirror is defined as the newest patch of each bundled minor at compile time.
 lock-runtime: ## Recompile requirements-dataproc-3.0.txt under Python 3.12 (re-resolves to the newest allowed patches)

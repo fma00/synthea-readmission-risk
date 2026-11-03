@@ -1,0 +1,75 @@
+name: Deploy dashboard
+
+# Keyless deploy of the dashboard image (v3 slice 4, PRD FR23; notes/eg-new-feature/v3-slice4-cloud-run-deploy-2026-11-03.md,
+# Interfaces section 7): builds this commit's image in the runner, pushes it under an immutable tag, deploys THAT digest to the
+# Terraform-owned Cloud Run service (only the image changes, V15) and smoke-checks the served revision. No service-account key
+# exists anywhere. Dispatch only; the WIF provider (infra/wif.tf) accepts only refs/heads/main and workflow_dispatch/schedule
+# events, and dashboard-deploy is bound to this file's workflow_ref (infra/iam.tf). The values below must match infra/
+# (tests/test_infra.py checks them). Rollback: redeploy an earlier digest (F13), never update-traffic. While the kill switch has
+# disabled the service, Smoke fails: re-enable first (docs/setup.md > Dashboard on Cloud Run).
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+# One deploy at a time; a newer dispatch waits for the running one.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # id-token only here, at job level, on a dispatch-only workflow (PRD FR0.2).
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      REGION: us-central1
+      SERVICE: dashboard
+      REPOSITORY: us-central1-docker.pkg.dev/synthea-readmission-risk/dashboard
+    steps:
+      # The auth action writes its credentials file into $GITHUB_WORKSPACE and its README requires checkout first; the
+      # Dockerfile's .dockerignore is an allow-list, so that file never enters the build context.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No token_format: no access token is minted as a step output; configure-docker uses gcloud's credential helper.
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093  # v3.0.0
+        with:
+          workload_identity_provider: projects/271458030145/locations/global/workloadIdentityPools/github/providers/github-actions
+          service_account: dashboard-deploy@synthea-readmission-risk.iam.gserviceaccount.com
+
+      - name: Build
+        run: docker build --platform linux/amd64 --provenance=false --sbom=false --build-arg GIT_COMMIT="$GITHUB_SHA" -t "$REPOSITORY/dashboard:$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" .
+
+      - name: Image contents
+        run: docker run --rm "$REPOSITORY/dashboard:$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" python -I scripts/dashboard_image_check.py
+
+      - name: Push
+        id: push
+        run: |
+          tag="$REPOSITORY/dashboard:$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+          docker push "$tag"
+          ref=$(docker inspect --format '{{index .RepoDigests 0}}' "$tag")
+          case "$ref" in "$REPOSITORY/dashboard@sha256:"*) ;; *) echo "unexpected digest reference $ref" >&2; exit 1;; esac
+          echo "image=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy
+        env:
+          IMAGE: ${{ steps.push.outputs.image }}
+        run: gcloud run deploy "$SERVICE" --region "$REGION" --image "$IMAGE" --quiet
+
+      # The served revision must run exactly the pushed digest (status.imageDigest may hold the full reference or bare sha256:...).
+      - name: Smoke
+        env:
+          IMAGE: ${{ steps.push.outputs.image }}
+        run: |
+          rev=$(gcloud run services describe "$SERVICE" --region "$REGION" --format 'value(status.latestReadyRevisionName)')
+          served=$(gcloud run revisions describe "$rev" --region "$REGION" --format 'value(status.imageDigest)')
+          test "$served" = "$IMAGE" || test "$served" = "${IMAGE##*@}" || { echo "served $served, pushed $IMAGE" >&2; exit 1; }
+          python3 scripts/dashboard_server_check.py --url https://dashboard-271458030145.us-central1.run.app
+          echo "Deployed $IMAGE as $rev" >> "$GITHUB_STEP_SUMMARY"

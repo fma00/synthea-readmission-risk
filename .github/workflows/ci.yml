@@ -51,15 +51,15 @@ jobs:
             requirements-dev.txt
             requirements-linux-extras.txt
             requirements-dashboard.txt
-            requirements-dashboard-linux-extras.txt
 
-      # The dashboard set (v3 slice 3, S17) is installed here and by `make setup` only; the production workflows
-      # (score.yml, monitor.yml) install requirements.txt alone.
+      # The dashboard set (v3 slice 3, S17) is installed here, by `make setup` and in the dashboard image only; the production
+      # workflows (score.yml, monitor.yml) install requirements.txt alone. Binary-only (v3 slice 4, F10): a pin without a wheel
+      # for this platform fails here instead of building from source.
       - name: Install dependencies
         run: |
           pip install -e .
           pip install --require-hashes -r requirements.txt -r requirements-linux-extras.txt
-          pip install --require-hashes -r requirements-dashboard.txt -r requirements-dashboard-linux-extras.txt
+          pip install --require-hashes --only-binary=:all: -r requirements-dashboard.txt
           pip install --require-hashes -r requirements-dev.txt
 
       - name: Lint
@@ -128,6 +128,35 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         # --gh-token makes a missing token an error; without it zizmor would silently skip the online audits.
         run: zizmor --gh-token "$GH_TOKEN" .
+
+  # The dashboard image (v3 slice 4; notes/eg-new-feature/v3-slice4-cloud-run-deploy-2026-11-03.md, Interfaces section 5), offline:
+  # built as deploy.yml builds it, checked from inside (IC1-IC7: only the hash-locked dashboard set, non-root, the app and its
+  # lazy imports load) and against the real server (SC1-SC5: health, XSRF, CORS, the allowed hosts, a foreign Host refused). No
+  # credentials, no cache, no registry; the app script never runs (the WebSocket checks open no session), so nothing calls Google.
+  dashboard-image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build
+        run: docker build --platform linux/amd64 --provenance=false --sbom=false --build-arg GIT_COMMIT="$GITHUB_SHA" -t dashboard:ci .
+
+      - name: Image contents
+        run: docker run --rm dashboard:ci python -I scripts/dashboard_image_check.py
+
+      # The container's logs are printed on exit whatever the outcome (a trap, not an `if:` step:
+      # tests/test_docs.py's zizmor test forbids `if:` lines in ci.yml).
+      - name: Server behaviour
+        run: |
+          trap 'docker logs dash 2>&1 | tail -n 100 || true' EXIT
+          docker run -d --name dash -p 127.0.0.1:8080:8080 -e PORT=8080 dashboard:ci
+          for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8080/_stcore/health && break; sleep 1; done
+          python3 scripts/dashboard_server_check.py --connect 127.0.0.1:8080 --foreign-host-check \
+            --url http://dashboard-271458030145.us-central1.run.app \
+            --url http://127.0.0.1:8080
 
   # Static checks of infra/ only: fmt, init WITHOUT a backend (no GCS, no credentials) and validate. Never plan or
   # apply: Terraform is applied from the laptop (PRD FR8). The CLI comes from HashiCorp's release zip, checked against

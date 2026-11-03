@@ -13,10 +13,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def load_isolated(name: str, tmp_path: Path):
-    target = tmp_path / "isolated" / f"{name}.py"
-    target.parent.mkdir()
-    shutil.copyfile(ROOT / "scripts" / f"{name}.py", target)
+def load_isolated(name: str, tmp_path: Path, *, directory: Path = ROOT / "scripts"):
+    """Each module gets its own directory (tmp_path/isolated/<name>), so one test can load two (v3 slice 4)."""
+    target = tmp_path / "isolated" / name / f"{name}.py"
+    target.parent.mkdir(parents=True)
+    shutil.copyfile(directory / f"{name}.py", target)
     spec = importlib.util.spec_from_file_location(f"isolated_{name}", target)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -24,8 +25,9 @@ def load_isolated(name: str, tmp_path: Path):
     return module
 
 
-def imported_modules(name: str) -> set[str]:
-    tree = ast.parse((ROOT / "scripts" / f"{name}.py").read_text())
+def imported_modules(name: str, *, directory: Path = ROOT / "scripts") -> set[str]:
+    """Top-level names (collections.abc -> collections): compare with sys.stdlib_module_names | {"__future__"}."""
+    tree = ast.parse((directory / f"{name}.py").read_text())
     out = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
