@@ -1051,5 +1051,11 @@ follow-up PR into `v3` together with L1's two fixes (below); nothing is built fr
     created with its `component=dashboard` label filter (P5 not needed); Billing's publisher member accepted (P10 not needed).
   - `terraform output dashboard_urls`: `https://dashboard-271458030145.us-central1.run.app` and the legacy
     **`https://dashboard-6wf7ihuvwq-uc.a.run.app`**; both answered 200 (placeholder, ~0.19 s).
-- **L2 (prepared on branch `v3-slice4-l1-fixes-and-l2`):** the legacy host added to `.streamlit/config.toml`,
+- **L2 (2026-11-03, PR #51, merged into `v3`):** the legacy host added to `.streamlit/config.toml`,
   `tests/service_hosts.py`, `deploy.yml`'s smoke, `ci.yml`'s `dashboard-image` job and the Makefile's `DASHBOARD_URLS`.
+- **L3 (2026-11-03):** `main` held no commit missing from `v3`, so the merged tree was the `v3` tip `acda763` (PR #40
+  `MERGEABLE CLEAN`, CI green). `make monitor-simulate` on it (offline, 17 min): 178 rows; 17 `incomplete_cohort`, then 160 `ok`
+  and 1 `alert` on the 161 full cohorts; O/E 0.706-1.309; observed 26-64; `n_label_after_sim` at most 3: identical to slice 7's
+  L1 baseline (2026-10-18), so the merge changes nothing in scoring or evaluation (F14). PR #40 merged `v3` into `main` with a
+  merge commit at 2026-11-03T13:48:35Z (`92b95ce`) (T1); `v3` kept for slice 5. L16 moved from 2026-12-22 to **2026-12-23**
+  (CLAUDE.md and the two monitoring notes).
