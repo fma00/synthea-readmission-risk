@@ -19,7 +19,7 @@ EXPECTED = {
         "headless": True, "fileWatcherType": "none", "runOnSave": False, "enableXsrfProtection": True, "enableCORS": True,
         "enableStaticServing": False, "maxUploadSize": 1, "maxMessageSize": 16,
         # owner decision S9: the dev hosts are a recorded deviation from FR17's "service host only"
-        "allowedHosts": ["dashboard-271458030145.us-central1.run.app", "localhost", "127.0.0.1"],
+        "allowedHosts": ["dashboard-271458030145.us-central1.run.app", "dashboard-6wf7ihuvwq-uc.a.run.app", "localhost", "127.0.0.1"],
     },
 }  # fmt: skip
 

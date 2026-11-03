@@ -25,4 +25,4 @@ enableCORS = true
 enableStaticServing = false
 maxUploadSize = 1
 maxMessageSize = 16
-allowedHosts = ["dashboard-271458030145.us-central1.run.app", "localhost", "127.0.0.1"]
+allowedHosts = ["dashboard-271458030145.us-central1.run.app", "dashboard-6wf7ihuvwq-uc.a.run.app", "localhost", "127.0.0.1"]

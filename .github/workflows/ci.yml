@@ -156,6 +156,7 @@ jobs:
           for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8080/_stcore/health && break; sleep 1; done
           python3 scripts/dashboard_server_check.py --connect 127.0.0.1:8080 --foreign-host-check \
             --url http://dashboard-271458030145.us-central1.run.app \
+            --url http://dashboard-6wf7ihuvwq-uc.a.run.app \
             --url http://127.0.0.1:8080
 
   # Static checks of infra/ only: fmt, init WITHOUT a backend (no GCS, no credentials) and validate. Never plan or
