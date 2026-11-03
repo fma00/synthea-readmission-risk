@@ -727,6 +727,17 @@ resource "google_artifact_registry_repository_iam_member" "function_builder_push
 
 # Only the function's own source zips (sha256/<hex>/dashboard_kill.zip), not the bucket's other artifacts (the Synthea jar, the
 # JDK, the Spark zip). Static, so a new source hash needs no IAM change. P8 if the build needs more (e.g. objects.list).
+# P8, measured at L1 (2026-11-03): Cloud Run functions copies the source into its own Google-managed bucket
+# gcf-v2-sources-<project number>-<region> and the build reads it there ("Access to bucket gcf-v2-sources-271458030145-us-central1
+# denied. You must grant Storage Object Viewer permission to function-builder@..."). The bucket holds function sources only.
+resource "google_storage_bucket_iam_member" "function_builder_reads_gcf_sources" {
+  bucket = "gcf-v2-sources-${var.project_number}-${var.region}"
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.function_builder.email}"
+
+  depends_on = [google_project_service.enabled]
+}
+
 resource "google_storage_bucket_iam_member" "function_builder_reads_artifacts" {
   bucket = google_storage_bucket.artifacts.name
   role   = "roles/storage.objectViewer"

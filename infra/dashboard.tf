@@ -41,17 +41,14 @@ resource "google_artifact_registry_repository" "dashboard" {
 }
 
 # The kill function's build output (build_config.docker_repository), so the builder's writer grant is repository-scoped. Mutable
-# tags: the buildpack re-pushes fixed tags on every rebuild (F12).
+# tags (F12): the buildpack re-pushes fixed tags on every rebuild. They are the API default, so no docker_config block: an explicit
+# `immutable_tags = false` is not stored by the API and showed as a perpetual in-place diff (measured at L1, 2026-11-03).
 resource "google_artifact_registry_repository" "functions" {
   location      = var.region
   repository_id = "functions"
   description   = "Build output of the dashboard-kill function (v3 slice 4)."
   format        = "DOCKER"
   labels        = local.dashboard_label
-
-  docker_config {
-    immutable_tags = false
-  }
 
   cleanup_policy_dry_run = false
   cleanup_policies {

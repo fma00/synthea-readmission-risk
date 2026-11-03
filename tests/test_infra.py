@@ -204,7 +204,8 @@ def test_iam_is_additive_only():
     # + 14 (slice 7: monitor 8, ledger-reader 5, scorer's monitor.yml binding 1)
     # + 7 (v3 slice 1: gold-publisher 6, its impersonation 1) + 3 (v3 slice 2: dashboard-runtime 2, its impersonation 1)
     # + 10 (v3 slice 4: dashboard-deploy 4, dashboard-kill 1, dashboard-kill-trigger 1, function-builder 3, Billing's publisher 1)
-    assert len(_iam_members()) == 60
+    # + 1 (v3 slice 4's P8 at L1: function-builder reads Cloud Functions' own gcf-v2-sources bucket)
+    assert len(_iam_members()) == 61
     assert [(t, n) for t, n, _ in _resources(_all_tf()) if t.endswith("_iam_member_remove")] == [
         ("google_project_iam_member_remove", "default_compute_no_editor")
     ]
@@ -955,10 +956,11 @@ def test_dashboard_service_settings():
 
 
 def test_dashboard_repositories_keep_the_newest_five():
-    for name, immutable in (("dashboard", "true"), ("functions", "false")):
+    for name in ("dashboard", "functions"):
         body = _collapse(_resource("google_artifact_registry_repository", name))
         assert f'repository_id = "{name}"' in body and 'format = "DOCKER"' in body
-        assert f"docker_config {{ immutable_tags = {immutable} }}" in body  # F12
+        # F12: dashboard immutable; functions mutable by the API default (an explicit false is a perpetual diff, L1)
+        assert ("docker_config { immutable_tags = true }" in body) == (name == "dashboard") and "immutable_tags = false" not in body
         assert "cleanup_policy_dry_run = false" in body
         assert 'cleanup_policies { id = "delete-all" action = "DELETE" condition { tag_state = "ANY" } }' in body
         assert 'cleanup_policies { id = "keep-5-newest" action = "KEEP" most_recent_versions { keep_count = 5 } }' in body
@@ -991,6 +993,7 @@ def test_function_builder_grants_are_exactly():
         ("google_artifact_registry_repository_iam_member", '"roles/artifactregistry.writer"',
          "google_artifact_registry_repository.functions.name"),
         ("google_storage_bucket_iam_member", '"roles/storage.objectViewer"', "google_storage_bucket.artifacts.name"),
+        ("google_storage_bucket_iam_member", '"roles/storage.objectViewer"', '"gcf-v2-sources-${var.project_number}-${var.region}"'),
     ])  # fmt: skip
 
 

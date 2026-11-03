@@ -1026,4 +1026,30 @@ call, no workflow dispatch. Implementation-level deviations and measurements:
 
 ## Results
 
-*(filled during the live runbook)*
+Live runbook, from the laptop (`CLOUDSDK_CORE_PROJECT=synthea-readmission-risk`), each step owner-confirmed. The billing account
+is redacted (F16). PR #50 (the offline build) was merged into `v3` (`64ab159`) before L2, so L2's legacy host goes into a
+follow-up PR into `v3` together with L1's two fixes (below); nothing is built from `v3` before L3, so the order is harmless.
+
+- **L0 (2026-11-03):** `terraform init` (archive 2.8.1) + `plan`: **28 to add, 0 to change, 0 to destroy**, exactly the
+  pre-registered set (7 APIs, 2 repos, the service, topic + Billing's publisher, budget, source object, function, 4 SAs, 9 members).
+- **L1 (2026-11-03), three applies:**
+  1. The saved L0 plan: 24 of 28 created. `google_artifact_registry_repository.functions` was refused with 403 "Artifact
+     Registry API has not been used in project … If you enabled this API recently, wait a few minutes" (enabled seconds before in
+     the same apply; the `dashboard` repository on the same API succeeded). **P12:** waited 5 minutes, re-read the plan.
+  2. Plan 4 to add / 0 / 0 (the `functions` repo, the builder's push grant, the function, the trigger binding). The repo and the
+     grant were created; the function's build failed: "Access to bucket gcf-v2-sources-271458030145-us-central1 denied. You must
+     grant Storage Object Viewer permission to function-builder@…". Cloud Run functions copies the source into its own
+     Google-managed bucket `gcf-v2-sources-<project number>-<region>` and builds from there. The function was left tainted.
+     **P8 (owner-confirmed):** `google_storage_bucket_iam_member.function_builder_reads_gcf_sources` (objectViewer on that bucket
+     only; IAM members 60 → 61). The re-plan also showed a perpetual in-place diff on the `functions` repo: an explicit
+     `docker_config { immutable_tags = false }` (the API default) is not stored by the API; the block was removed (mutable remains
+     the default, F12 unchanged in effect) and the test now asserts no `immutable_tags = false`.
+  3. Plan 3 to add / 0 to change / 1 to destroy (the grant, the trigger binding, the tainted function replaced): applied; the
+     function built in 56 s. Then `terraform plan`: **No changes**.
+  - State: function `dashboard-kill` ACTIVE, `python314` (P7 not needed), `ALLOW_INTERNAL_ONLY`, `RETRY_POLICY_DO_NOT_RETRY`;
+    service `dashboard` revision `dashboard-00001-cz8` on the placeholder image; budget `billingAccounts/<redacted>/budgets/…5a5d`
+    created with its `component=dashboard` label filter (P5 not needed); Billing's publisher member accepted (P10 not needed).
+  - `terraform output dashboard_urls`: `https://dashboard-271458030145.us-central1.run.app` and the legacy
+    **`https://dashboard-6wf7ihuvwq-uc.a.run.app`**; both answered 200 (placeholder, ~0.19 s).
+- **L2 (prepared on branch `v3-slice4-l1-fixes-and-l2`):** the legacy host added to `.streamlit/config.toml`,
+  `tests/service_hosts.py`, `deploy.yml`'s smoke, `ci.yml`'s `dashboard-image` job and the Makefile's `DASHBOARD_URLS`.

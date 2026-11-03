@@ -71,5 +71,5 @@ jobs:
           rev=$(gcloud run services describe "$SERVICE" --region "$REGION" --format 'value(status.latestReadyRevisionName)')
           served=$(gcloud run revisions describe "$rev" --region "$REGION" --format 'value(status.imageDigest)')
           test "$served" = "$IMAGE" || test "$served" = "${IMAGE##*@}" || { echo "served $served, pushed $IMAGE" >&2; exit 1; }
-          python3 scripts/dashboard_server_check.py --url https://dashboard-271458030145.us-central1.run.app
+          python3 scripts/dashboard_server_check.py --url https://dashboard-271458030145.us-central1.run.app --url https://dashboard-6wf7ihuvwq-uc.a.run.app
           echo "Deployed $IMAGE as $rev" >> "$GITHUB_STEP_SUMMARY"

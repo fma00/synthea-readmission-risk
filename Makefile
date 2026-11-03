@@ -42,7 +42,7 @@ JDK_TARBALL      ?=
 GEN_ARGS         ?=
 BATCH_ARGS       ?=
 DASHBOARD_IMAGE  ?= readmission-risk-dashboard:local
-DASHBOARD_URLS   ?= https://dashboard-271458030145.us-central1.run.app
+DASHBOARD_URLS   ?= https://dashboard-271458030145.us-central1.run.app https://dashboard-6wf7ihuvwq-uc.a.run.app
 KILL_COST        ?= 0.01
 BIN := $(VENV)/bin
 # The dashboard image's base, read from the Dockerfile's FROM line, so the lockfile is compiled in exactly that image (v3 slice 4).
