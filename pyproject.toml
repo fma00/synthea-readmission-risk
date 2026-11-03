@@ -20,12 +20,13 @@ where = ["src"]
 
 # The warehouse SQL scripts and BigQuery table schemas ship with the package (Terraform reads the same schema files).
 [tool.setuptools.package-data]
-readmission_risk = ["warehouse/sql/*.sql", "warehouse/schemas/*.json"]
+readmission_risk = ["warehouse/sql/*.sql", "warehouse/sql/views/*.sql", "warehouse/schemas/*.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 markers = [
     "real_gcp_module: keep readmission_risk.gcp's real functions (the test fakes google.auth itself; tests/conftest.py)",
+    "no_fake_world: a tests/dashboard/test_app.py test that keeps the refusing gcp factories (no fake BigQuery client)",
 ]
 
 # Pinned explicitly rather than relying on ruff's defaults, which change between ruff versions: this states the bar the

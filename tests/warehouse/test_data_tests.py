@@ -24,6 +24,7 @@ EXPECTED_IDS = {
     "predictions": [f"PRED-{i:02d}" for i in range(1, 12)],
     "scoring_runs": [f"RUNS-{i:02d}" for i in range(1, 8)],
     "monitoring": [f"MON-{i:02d}" for i in range(1, 13)],
+    "gold": [f"GOLD-{i:02d}" for i in range(1, 8)],
 }
 
 
@@ -32,7 +33,7 @@ def _statements(name: str) -> list[str]:
     return [s.strip() for s in text.split(";") if s.strip()]
 
 
-@pytest.mark.parametrize("name", ["predictions", "scoring_runs", "monitoring"])
+@pytest.mark.parametrize("name", ["predictions", "scoring_runs", "monitoring", "gold"])
 def test_sql_scripts_follow_the_shape_rule(name):
     statements = _statements(name)
     assert statements[0].startswith("DECLARE c DEFAULT (")
@@ -40,7 +41,7 @@ def test_sql_scripts_follow_the_shape_rule(name):
     asserts = statements[1:]
     assert all(s.startswith("ASSERT ") for s in asserts)
     assert all("FROM" not in s.upper().split(" AS '")[0] for s in asserts)  # assertions read only `c`
-    labels = [re.search(r" AS '((?:PRED|RUNS|MON)-\d{2}): [^']+'$", s) for s in asserts]
+    labels = [re.search(r" AS '((?:PRED|RUNS|MON|GOLD)-\d{2}): [^']+'$", s) for s in asserts]
     assert all(labels), asserts
     assert [m.group(1) for m in labels] == EXPECTED_IDS[name]
     body = statements[0]

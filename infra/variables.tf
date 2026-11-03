@@ -84,3 +84,14 @@ variable "generation_templates" {
   }
 }
 
+
+variable "dashboard_budget_chf" {
+  description = "Monthly CHF amount at which dashboard-kill disables the dashboard (v3 slice 4, PRD FR24)."
+  type        = number
+  default     = 3
+
+  validation {
+    condition     = var.dashboard_budget_chf == floor(var.dashboard_budget_chf) && var.dashboard_budget_chf >= 1 && var.dashboard_budget_chf <= 100
+    error_message = "dashboard_budget_chf must be a whole number of CHF between 1 and 100 (it becomes the budget's units)."
+  }
+}

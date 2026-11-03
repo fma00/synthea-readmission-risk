@@ -92,6 +92,11 @@ def _token(column: str, kind: str, value: object) -> str:
     return "T" + stamp.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+
+# Public alias (v3 slice 1): the gold publish's column diagnostic compares cells by their canonical token, so dtype and
+# time-zone differences between BigQuery's and pyarrow's frames never count as differences. Not a new canonical form.
+canonical_token = _token
+
 def canonical_row_bytes(frame: pd.DataFrame) -> list[bytes]:
     """One UTF-8 byte string per row: `<name>=<token>` cells in column-name order, joined by U+001F. Never mutates `frame`."""
     missing = sorted(set(GOLD_COLUMN_KINDS) - set(frame.columns))

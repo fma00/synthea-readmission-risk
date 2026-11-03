@@ -1,0 +1,146 @@
+[
+  {
+    "name": "patient_id",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Synthea patient id (synthetic)."
+  },
+  {
+    "name": "encounter_id",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Synthea encounter id of the index inpatient stay (synthetic); unique."
+  },
+  {
+    "name": "index_start",
+    "type": "TIMESTAMP",
+    "mode": "NULLABLE",
+    "description": "Start (admission) of the index stay, UTC."
+  },
+  {
+    "name": "index_stop",
+    "type": "TIMESTAMP",
+    "mode": "NULLABLE",
+    "description": "End (discharge) of the index stay, UTC; the partition column (MONTH)."
+  },
+  {
+    "name": "is_readmitted",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "Label: 1 if an unplanned readmission starts within 30 days after index_stop (unplanned_readmission_v1), else 0."
+  },
+  {
+    "name": "label_horizon",
+    "type": "TIMESTAMP",
+    "mode": "NULLABLE",
+    "description": "Latest record the label depends on, UTC (the split's label-horizon purge reads it)."
+  },
+  {
+    "name": "admission_reason_code",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "SNOMED-CT reason code of the index stay; NULL when Synthea records none."
+  },
+  {
+    "name": "admission_reason_description",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Description of admission_reason_code; NULL when Synthea records none."
+  },
+  {
+    "name": "payer_ownership",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Ownership of the index stay's payer."
+  },
+  {
+    "name": "provider_specialty",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Specialty of the index stay's provider (constant on Synthea data; excluded from the features)."
+  },
+  {
+    "name": "organization_utilization",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "Whole-simulation utilization of the organization (not point-in-time; excluded from the features)."
+  },
+  {
+    "name": "prior_encounter_count",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "Encounters of the patient in the lookback window before index_start."
+  },
+  {
+    "name": "prior_inpatient_count",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "Inpatient encounters in the lookback window before index_start."
+  },
+  {
+    "name": "prior_emergency_count",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "Emergency encounters in the lookback window before index_start."
+  },
+  {
+    "name": "active_condition_count",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "Conditions active at index_start."
+  },
+  {
+    "name": "active_medication_count",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "Medications active at index_start."
+  },
+  {
+    "name": "procedure_count_window",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "Procedures in the lookback window before index_start."
+  },
+  {
+    "name": "active_careplan_count",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "Care plans active at index_start."
+  },
+  {
+    "name": "observation_count_window",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "Observations in the lookback window before index_start."
+  },
+  {
+    "name": "age_at_index_years",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "Age in years at index_start."
+  },
+  {
+    "name": "gender",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Synthea gender (synthetic)."
+  },
+  {
+    "name": "race",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Synthea race (synthetic)."
+  },
+  {
+    "name": "ethnicity",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Synthea ethnicity (synthetic)."
+  },
+  {
+    "name": "marital_status",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Synthea marital status (synthetic); NULL when Synthea records none."
+  }
+]

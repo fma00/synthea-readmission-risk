@@ -11,12 +11,15 @@ Developed and CI-tested on Python 3.14 (pinned via [.python-version](../.python-
 python3.14 -m venv .venv
 source .venv/bin/activate
 
-# Install: three separate invocations, since a local editable install can't carry
+# Install: four separate invocations, since a local editable install can't carry
 # pip's --require-hashes guarantee that the lockfiles use.
 pip install -e .
 pip install --require-hashes -r requirements.txt -r requirements-linux-extras.txt
+pip install --require-hashes --only-binary=:all: -r requirements-dashboard.txt
 pip install --require-hashes -r requirements-dev.txt
 ```
+
+The dashboard set (Streamlit, Altair, the BigQuery client) has its own lockfile, constrained by `requirements.txt` so every shared pin is equal; only this setup, CI's `lint-and-test` and the dashboard image install it, never the scheduled scoring and monitoring workflows (v3 slice 3, owner decision S17). Since v3 slice 4 it is compiled on Linux, inside the image's own base (`make lock-dashboard`, needs Docker), and installed binary-only: its one Linux-only pin, watchdog, carries a `platform_system == "Linux"` marker because it has no macOS wheel for Python 3.14.
 
 macOS only: XGBoost needs the OpenMP runtime — `brew install libomp`. A JDK 17+ must be on `PATH` for PySpark's local mode (the feature join and its tests).
 
@@ -38,7 +41,7 @@ The [Makefile](../Makefile) wraps the commands on this page. Its recipes call th
 
 | Target | What it does |
 |---|---|
-| `make setup` | Creates `.venv` with `python3.14` (or reuses it, refusing one of another Python) and runs the three installs above |
+| `make setup` | Creates `.venv` with `python3.14` (or reuses it, refusing one of another Python) and runs the four installs above |
 | `make hooks` | Installs the git pre-commit hook (see below) |
 | `make lint` | `ruff check .` and `zizmor --offline .`, the full-repository equivalent of CI's lint |
 | `make test` | `pytest` |
@@ -48,6 +51,7 @@ The [Makefile](../Makefile) wraps the commands on this page. Its recipes call th
 | `make score` | Scores run date `20250630` with the champion bundle (`deploy/champion.json`) on `SCORE_GOLD_DIR` (default `data/gold/main_200k`, downloaded by `make gold-200k`); override `RUN_DATE`, `SCORE_GOLD_DIR`, extra flags in `SCORE_ARGS` (e.g. `--bundle bundles/<id>`) |
 | `make setup-runtime`, `make test-runtime` | The Dataproc runtime environment, next section |
 | `make lock-main`, `make lock-dev` | Recompile `requirements.txt` / `requirements-dev.txt` under Python 3.14, on macOS (keeps existing pins) |
+| `make lock-dashboard` | Recompiles `requirements-dashboard.txt` inside the dashboard image's base (linux/amd64, Python 3.14; needs Docker) and marks watchdog Linux-only; run after `make lock-main` |
 | `make lock-runtime` | Recompile `requirements-dataproc-3.0.txt` under Python 3.12 (re-resolves to the newest allowed patches) |
 | `make tf-validate` | Checks `infra/` like CI's `terraform-validate` job (`fmt -check`, `init` without a backend, `validate`; no credentials); needs Terraform 1.16.x ([Infrastructure](#infrastructure-terraform)) |
 
@@ -424,6 +428,61 @@ make m3-check                              # metric M3 from the Actions runs + s
 - **Cost:** about 10 BigQuery queries (10 MB minimum each) and 40 MB of GCS egress per tick; about CHF 1-2 for the whole slice. From the weekly retry slots on, up to 72 slot runs a week, of which all but the week's tick skip: one `read_ticks` query each (10 MB minimum billing, inside the free tier) and a few runner minutes (free on a public repository).
 - **Reproducibility across runners:** hosted runners differ in CPU, and on CPUs with AVX-512 numpy takes other SIMD code paths, which changed the last bits of 3 of 156 scores (slice 7, L11; max relative difference 9.3e-16). A replay on the same CPU class is bit-identical; across CPU classes, and between the laptop (macOS) and a runner, the same encounters, ranks, Top-N flags and monitoring metrics come back, and scores agree within 1e-15 relative. That is the idempotency criterion (owner decision 2026-10-19). Each score job logs its CPU and numpy's SIMD support.
 
+## Gold in BigQuery (v3 slice 1)
+
+Design, the two live probes and the results: `notes/eg-new-feature/v3-slice1-gold-bigquery-2026-10-31.md`. `serving.gold` holds the 200k gold table (24 columns, MONTH-partitioned on `index_stop`, filter required, clustered on `admission_reason_code`). It is written by **write-audit-publish**, not by the Spark connector: BigQuery rejects the connector's direct-overwrite `MERGE … ON FALSE … WHEN NOT MATCHED BY SOURCE THEN DELETE` on a filter-required table ("Cannot query over table … without a filter over column(s) 'index_stop'", probe 1, 2026-10-31). Every command runs from the laptop with `export CLOUDSDK_CORE_PROJECT=synthea-readmission-risk` and ADC; the three targets impersonate `gold-publisher` (`GOLD_SA`).
+
+1. **Prove the data tests fire** (scratch_gold only, < CHF 0.01): `make gold-seeded-check`. Every GOLD assertion must fail on its own seeded bad row and the clean pair must pass (`GOLD M5 OK`).
+2. **Prove the access limits** (expected-denied probes): `make gold-access-check`. `gold-publisher` cannot create a table in `serving`, change `serving.predictions` or read `serving.scoring_runs`; `scorer` and `monitor` cannot read `serving.gold`. Exit 3 means a probe was ALLOWED: stop and fix the IAM in `infra/iam.tf`.
+3. **Dry run:** `make gold-publish PUBLISH_ARGS=--dry-run` loads `GOLD_URI` (default `v2/main_200k`) into a `scratch_gold` staging table, runs GOLD-01..07 and the content fingerprint, and stops (`status: dry_run_passed`); `serving.gold` is untouched.
+4. **Publish:** `make gold-publish`. One DML transaction replaces `serving.gold`; the verify step then checks row count, schema, partitioning, description and the content fingerprint of what BigQuery holds (`status: published`). Re-running it is an idempotent full replace.
+
+Each run writes a JSON report under `data/checks/<gold name>/gold_bigquery_<publish id>.json`. Exit codes: 0 published (or dry run passed); 1 refused (bad input, another gold or champion, a schema problem in the load); 3 audit failed or content mismatch (not published); 4 the transaction committed but verify failed (`serving.gold` may NOT equal the audited rows: read the report's failed checks and diagnostic, then re-run); 5 permission, credentials or outcome unknown (a permission error within ~8 minutes of a `terraform apply` is usually IAM propagation: re-run; at the verify step the transaction has already committed, and the message says so: re-run to verify). The publish refuses any gold whose fingerprint is not `SERVING_GOLD_FINGERPRINT` (named in the table's Terraform description) or whose champion was trained on another gold: replacing the population needs a new champion, the constant and the description in one change.
+
+## Dashboard views (v3 slice 2)
+
+Design and results: `notes/eg-new-feature/v3-slice2-authorized-views-2026-10-31.md`. The dataset `dashboard` holds three authorized views, the only data the dashboard's runtime service account `dashboard-runtime` can read (`roles/bigquery.dataViewer` on `dashboard` plus project `roles/bigquery.jobUser`; nothing on `serving`, `scratch` or `scratch_gold`):
+
+- `v_call_sheet`: `serving.predictions` joined to a few `serving.gold` features (age, length of stay, prior inpatient and emergency stays, active conditions), plus the admission reason's historical readmission rate as the "why". No label column (`is_readmitted`, `label_horizon`), no `organization_utilization`, no demographic column. The rate is computed only over discharges before 2023-01-01 whose labels were settled before that date (the champion's test window starts then), so it uses no outcome of any discharge the call sheet shows. A rate over fewer than 30 discharges is withheld; the count is always shown. This population is close to, but not exactly, the champion's training partition, which also drops test-window patients. Only predictions of the serving gold's fingerprint appear.
+- `v_scoring_runs` and `v_monitoring`: the two ops tables without their free-text `error_message` (and, for scoring runs, the internal `gold_uri` and `predictions_table`).
+
+`serving` authorizes the views through a single `google_bigquery_dataset_access` (`target_types = ["VIEWS"]`). Never add an `access` block to a dataset, or a `google_bigquery_dataset_iam_*` resource on `serving`: either one rewrites the dataset's ACL and silently drops the authorization (`tests/test_infra.py` forbids both). The authorization lets every view in `dashboard` read all of `serving`, labels included, so only the owner may create views there.
+
+The dashboard's fixed queries live in `src/readmission_risk/dashboard/queries.py`. Each constrains every filter-required partition column with a query parameter and never uses `CURRENT_DATE`/`CURRENT_TIMESTAMP`, carries `maximum_bytes_billed` (100 MiB) and is labelled `component=dashboard`. The date picker lists, per run date, the newest published run, kept only for the serving gold and only up to the simulated clock (the newest succeeded monitoring tick of the currently monitored bundle). A dispatch dated in the simulated future therefore stays hidden.
+
+Live checks, from the laptop with `export CLOUDSDK_CORE_PROJECT=synthea-readmission-risk` and ADC. Both impersonate `dashboard-runtime` (`DASHBOARD_SA`). There is no run-as-operator mode, because the operator can read `serving` directly and would bypass the views.
+
+1. **Access limits:** `make dashboard-access-check`. Reading any `serving` table, creating a view in `dashboard` and listing `scratch`/`scratch_gold` must each be denied; each view must expose exactly its designed columns. Exit 0 all good; 3 a probe was ALLOWED or a view is wrong (a created probe view is deleted at once; if that fails, `bq rm -f -t synthea-readmission-risk:dashboard.access_probe`); 5 another error. A denial missing within ~10 minutes of a `terraform apply` is usually IAM propagation: re-run.
+2. **Queries:** `make dashboard-query-check` (needs the local 200k gold: `make gold-200k`). It checks:
+   - the dates and the clock, plus controls that the fingerprint and clock rules each exclude a real date;
+   - dry-run bytes under the cap;
+   - that the discharge filter prunes `serving.gold`, and that a query without either partition filter is refused;
+   - that the clock's call sheet matches the local gold row by row.
+
+   Exit 0 all pass; 3 a check failed; 5 an error; 2 nothing ran (no usable local gold, or an empty `--dashboard-sa`).
+
+Reports: `data/checks/dashboard_access_check/` and `data/checks/dashboard_query_check/`.
+
+## Dashboard on Cloud Run (v3 slice 4)
+
+Design, live runbook and results: `notes/eg-new-feature/v3-slice4-cloud-run-deploy-2026-11-03.md`. The Streamlit app runs keyless on Cloud Run as `dashboard-runtime`, public (Terraform's `invoker_iam_disabled`), scaled to zero, at most one instance, gen1 with a startup CPU boost, a 15-minute request timeout. Terraform (`infra/dashboard.tf`) owns every setting; `deploy.yml` only swaps the image.
+
+**Image.** The [Dockerfile](../Dockerfile) builds from `python:3.14.<n>-slim-trixie`, pinned by tag and digest. It installs `requirements-dashboard.txt` alone, hash-checked and binary-only, runs the package from source (`PYTHONPATH`) as uid 10001, and records the build's git commit for the footer. Offline:
+
+- `make dashboard-image` builds it as `readmission-risk-dashboard:local`;
+- `make dashboard-image-check` checks it from inside (IC1-IC7: Python 3.14, non-root, exactly the lockfile's distributions, no pyspark/mlflow/sklearn, the app and its lazily imported google modules load) and against a local container (SC1-SC5: health, the XSRF cookie, CORS, both service hosts of `tests/service_hosts.py` accepted, the deterministic one and the legacy `dashboard-6wf7ihuvwq-uc.a.run.app`; a foreign Origin or Host refused). CI's `dashboard-image` job runs the same checks. A local build of a dirty working tree records no commit (its footer says "Image commit unknown"), and `make dashboard-image-check` then lets IC7 accept that; CI and `deploy.yml` always build a clean checkout and require the commit.
+
+**Deploy.** `gh workflow run deploy.yml --ref main` (dispatch only; WIF as `dashboard-deploy`, which holds `run.developer` on the service, `iam.serviceAccountUser` on `dashboard-runtime` and `artifactregistry.writer` on the `dashboard` repository, no `run.admin`). It builds the image in the runner, pushes it under an immutable tag, deploys that digest, then checks that the served revision runs it and that SC1-SC4 pass. A rollback is a redeploy of an earlier digest by the operator (`gcloud run deploy dashboard --region us-central1 --image <repository>/dashboard@sha256:<digest> --quiet`), never `gcloud run services update-traffic`, which would change the Terraform-owned traffic block. Afterwards `terraform -chdir=infra plan` must say "No changes". `make dashboard-server-check` re-runs SC1-SC4 against every `DASHBOARD_URLS` entry from the laptop (no credentials).
+
+**Kill switch.** The budget "dashboard kill switch" (CHF `dashboard_budget_chf`, default 3, filtered to the label `component=dashboard`) publishes to the Pub/Sub topic `dashboard-budget`. The Cloud Run function `dashboard-kill`, standard library only, reads each message. Once the current US Pacific budget month's cost reaches the amount, it switches the dashboard to manual scaling with 0 instances, and visitors get "Service unavailable". Each message produces exactly one `dashboard-kill: <outcome>` log line. To re-enable:
+
+1. Find out why it fired: `gcloud functions logs read dashboard-kill --region us-central1 --gen2 --limit 20`, and the billing report filtered to the label `component=dashboard`.
+2. In the same calendar month (US Pacific), first raise `dashboard_budget_chf` in `infra/terraform.tfvars`, or wait for the 1st: budget messages arrive several times a day, so the function would disable the service again within hours.
+3. `terraform -chdir=infra plan`: it must show exactly the `scaling` change on `google_cloud_run_v2_service.dashboard` (plus the budget amount, if step 2 raised it). Confirm, then `apply`.
+4. `make dashboard-server-check`: all pass.
+
+Deploys fail at the smoke step while the service is disabled; re-enable first. `make dashboard-kill-test KILL_COST=<CHF>` publishes one synthetic budget message (the amount always follows the Terraform variable), for the live test only.
+
 ## Teardown checklist
 
 Order matters: `prevent_destroy` makes `terraform destroy` refuse while the CHF 20 budget, the state bucket or the bundle bucket is still in state, and the bundle bucket's IAM members must go before the bucket. Start with `export CLOUDSDK_CORE_PROJECT=synthea-readmission-risk`.
@@ -441,7 +500,8 @@ Order matters: `prevent_destroy` makes `terraform destroy` refuse while the CHF 
 5. **Destroy the rest:** `terraform -chdir=infra destroy`. Raw and gold are deleted with their contents; the CHF 5 budget, both service accounts, all IAM members, the pool and the provider go (destroying `default_compute_no_editor` does not restore the default compute SA's roles/editor; to delete or disable that SA later, first remove `default_compute_no_editor` and its data source from `infra/`, because every plan and destroy reads it); the APIs stay enabled. The final state is written to the state bucket, which still exists.
 6. **Delete the state bucket last:** `gcloud storage rm --recursive --all-versions "gs://synthea-readmission-risk-tfstate/**"`, then `gcloud storage buckets delete gs://synthea-readmission-risk-tfstate`. `infra/` needs a new bootstrap after this.
 7. **Slice 5 resources:** no generation VM or Dataproc batch may be running (the three commands above print nothing). Raw and gold `v2/` objects go with their buckets in step 5; the artifacts bucket is `force_destroy` and goes there too (the Dataproc staging bucket was removed on 2026-10-14). The `spark` network, subnet and firewall, the instance template and the `synthea-generator` and `dataproc-runtime` service accounts are destroyed by step 5.
-8. **BigQuery (v2 slices 4 and 7):** set `deletion_protection = false` on `google_bigquery_table.predictions`, `.scoring_runs` and `.monitoring` and apply; `serving` does not delete its contents on destroy, so empty it first (`bq rm -r -f -d serving` as the owner, after exporting anything you want to keep); `scratch` deletes its own tables. The custom role `scorerTableWriter` stays soft-deleted for 7-37 days after `destroy`; re-creating it in that window needs `gcloud iam roles undelete scorerTableWriter --project=synthea-readmission-risk`.
-9. **Check for leftovers:** `gcloud storage buckets list --project=synthea-readmission-risk`, `gcloud dataproc batches list --region=us-central1 --project=synthea-readmission-risk`, `gcloud compute instances list --project=synthea-readmission-risk`, `gcloud compute disks list --project=synthea-readmission-risk`, `gcloud compute instance-templates list --project=synthea-readmission-risk`, `bq ls --project_id=synthea-readmission-risk` (later slices), `gcloud iam service-accounts list --project=synthea-readmission-risk`.
-10. The WIF pool stays soft-deleted for 30 days; re-creating `github` in that window needs `gcloud iam workload-identity-pools undelete github --location=global --project=synthea-readmission-risk`.
-11. The final stop: `gcloud billing projects unlink synthea-readmission-risk`, or delete the project.
+8. **BigQuery (v2 slices 4 and 7, v3 slices 1 and 2):** set `deletion_protection = false` on `google_bigquery_table.predictions`, `.scoring_runs`, `.monitoring`, `.gold`, `.v_call_sheet`, `.v_scoring_runs` and `.v_monitoring` and apply; `serving` and `dashboard` do not delete their contents on destroy, so empty them first (`bq rm -r -f -d serving` and `bq rm -r -f -d dashboard` as the owner, after exporting anything you want to keep; the latter also removes an `access_probe` view a failed access-check undo may have left); `scratch` and `scratch_gold` delete their own tables. The custom role `scorerTableWriter` stays soft-deleted for 7-37 days after `destroy`; re-creating it in that window needs `gcloud iam roles undelete scorerTableWriter --project=synthea-readmission-risk`.
+9. **Dashboard (v3 slice 4):** set `deletion_protection = false` on `google_cloud_run_v2_service.dashboard` and apply; step 5 then destroys the service, the `dashboard` and `functions` repositories (with their images), the `dashboard-budget` topic, the dashboard budget, the `dashboard-kill` function and its source object, and the `dashboard-deploy`, `dashboard-kill`, `dashboard-kill-trigger` and `function-builder` service accounts.
+10. **Check for leftovers:** `gcloud storage buckets list --project=synthea-readmission-risk`, `gcloud dataproc batches list --region=us-central1 --project=synthea-readmission-risk`, `gcloud compute instances list --project=synthea-readmission-risk`, `gcloud compute disks list --project=synthea-readmission-risk`, `gcloud compute instance-templates list --project=synthea-readmission-risk`, `bq ls --project_id=synthea-readmission-risk` (later slices), `gcloud iam service-accounts list --project=synthea-readmission-risk`.
+11. The WIF pool stays soft-deleted for 30 days; re-creating `github` in that window needs `gcloud iam workload-identity-pools undelete github --location=global --project=synthea-readmission-risk`.
+12. The final stop: `gcloud billing projects unlink synthea-readmission-risk`, or delete the project.

@@ -20,23 +20,27 @@ from pathlib import Path
 
 import pytest
 
+from tests.service_hosts import SERVICE_HOSTS
+
 ROOT = Path(__file__).resolve().parents[1]
 MAKEFILE = ROOT / "Makefile"
 PRE_COMMIT_CONFIG = ROOT / ".pre-commit-config.yaml"
 
 EXPECTED_TARGETS = {
     "help", "setup", "hooks", "lint", "test", "pre-commit", "train", "export", "export-portable", "score", "score-bq", "m5-check",
-    "setup-runtime", "test-runtime", "lock-main", "lock-dev", "lock-runtime", "tf-validate", "spark-zip", "generate-vm", "bigjoin-batch",
+    "setup-runtime", "test-runtime", "lock-main", "lock-dev", "lock-dashboard", "lock-runtime", "tf-validate", "spark-zip", "generate-vm", "bigjoin-batch",
     "check-population", "gate", "prereg-lock", "prereg-phase-b",
-    "m5-monitoring", "gold-200k", "monitor-preflight", "monitor-simulate", "monitor-catch-up", "ledger", "m3-check", "burn-in-timer",
+    "m5-monitoring", "gold-publish", "gold-seeded-check", "gold-access-check", "dashboard-access-check", "dashboard-query-check", "gold-200k", "monitor-preflight", "monitor-simulate", "monitor-catch-up", "ledger", "m3-check", "burn-in-timer",
+    "dashboard-image", "dashboard-image-check", "dashboard-server-check", "dashboard-kill-test",  # v3 slice 4
 }
 # Every variable the Makefile reads, plus make's own propagation variables: a pytest started by `make test X=y` (or a
 # shell exporting VENV=...) must not change what these tests see.
 MAKEFILE_VARIABLES = ("PYTHON", "PYTHON312", "VENV", "RUNTIME_VENV", "LOCK_VENV", "LOCK314_VENV", "GOLD_DIR",
                       "REFERENCE_DATE", "TEST_START_DATE", "EXPERIMENT", "RUN_DATE", "TRAIN_EXPERIMENT", "TRAIN_ARGS", "SCORE_ARGS",
                       "EXPORT_MODEL", "EXPORT_ARGS", "SOURCE_BUNDLE", "PORTABLE_ARGS", "TERRAFORM", "GOLD_URI", "SCORER_SA", "RUN", "JDK_TARBALL", "GEN_ARGS", "CHECK_ARGS", "GATE_ARGS", "LOCK_ARGS", "PHASE_B_ARGS",
-                      "BATCH_ARGS", "M5_RUN_DATE", "SCORE_GOLD_DIR", "MONITOR_SA", "LEDGER_SA", "WEEKS", "CHAMPION_BUNDLE_DIR",
-                      "LEDGER_OUT", "BURN_IN_TICKS", "BURN_IN_INTERVAL", "CAFFEINATE")
+                      "BATCH_ARGS", "M5_RUN_DATE", "SCORE_GOLD_DIR", "MONITOR_SA", "LEDGER_SA", "GOLD_SA", "DASHBOARD_SA", "PUBLISH_ARGS", "WEEKS", "CHAMPION_BUNDLE_DIR",
+                      "LEDGER_OUT", "BURN_IN_TICKS", "BURN_IN_INTERVAL", "CAFFEINATE",
+                      "DASHBOARD_BASE_IMAGE", "DASHBOARD_IMAGE", "DASHBOARD_URLS", "KILL_COST")
 SCRUBBED_ENV = ("MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "GNUMAKEFLAGS", "MAKEFILES", *MAKEFILE_VARIABLES)
 EXPECTED_PRE_COMMIT = [
     "repos:",
@@ -137,6 +141,31 @@ def test_make_score_bq_and_m5_check_run_as_the_scorer_sa():
     ) in _dry_run("score-bq")
     assert "--bundle bundles/x" in _dry_run("score-bq", "SCORE_ARGS=--bundle bundles/x")
     assert f".venv/bin/python scripts/seeded_data_test_check.py --run-date 20230417 {sa}" in _dry_run("m5-check")
+
+
+@needs_make
+def test_make_gold_targets_run_as_the_gold_publisher_sa():
+    """v3 slice 1: the gold publish, its seeded check and the access probes; GOLD_URI is the monitored 200k gold."""
+    sa = "--impersonate-service-account gold-publisher@synthea-readmission-risk.iam.gserviceaccount.com"
+    assert (
+        ".venv/bin/python scripts/publish_gold_to_bigquery.py --gold-uri gs://synthea-readmission-risk-gold/v2/main_200k "
+        f"{sa}"
+    ) in _dry_run("gold-publish")
+    assert f"{sa} --dry-run" in _dry_run("gold-publish", "PUBLISH_ARGS=--dry-run")
+    assert f".venv/bin/python scripts/gold_seeded_check.py {sa}" in _dry_run("gold-seeded-check")
+    assert (
+        ".venv/bin/python scripts/gold_access_check.py --gold-sa gold-publisher@synthea-readmission-risk.iam.gserviceaccount.com "
+        "--scorer-sa scorer@synthea-readmission-risk.iam.gserviceaccount.com "
+        "--monitor-sa monitor@synthea-readmission-risk.iam.gserviceaccount.com"
+    ) in _dry_run("gold-access-check")
+
+
+@needs_make
+def test_make_dashboard_targets_run_as_the_dashboard_runtime_sa():
+    """v3 slice 2: both live checks impersonate dashboard-runtime; the query check compares with the local 200k gold."""
+    sa = "--dashboard-sa dashboard-runtime@synthea-readmission-risk.iam.gserviceaccount.com"
+    assert f".venv/bin/python scripts/dashboard_access_check.py {sa}" in _dry_run("dashboard-access-check")
+    assert f".venv/bin/python scripts/dashboard_query_check.py {sa} --gold-dir data/gold/main_200k" in _dry_run("dashboard-query-check")
 
 
 @needs_make
@@ -241,6 +270,16 @@ def test_make_lock_targets_compile_under_the_intended_python():
     assert 'python3.14 -m venv ".venv-lock314"' in main
     assert ".venv-lock314/bin/pip-compile --generate-hashes --output-file=requirements.txt requirements.in" in main
     assert "--upgrade" not in main
+    assert "Then run make lock-dashboard: requirements-dashboard.txt is constrained by requirements.txt." in main
+    # v3 slice 4 (T2, F10): compiled inside the Dockerfile's own base image (linux/amd64), then watchdog marked Linux-only.
+    dashboard = _dry_run("lock-dashboard")
+    base = re.search(r"^FROM (\S+)$", (ROOT / "Dockerfile").read_text(), flags=re.MULTILINE).group(1)
+    assert "docker run --rm --platform linux/amd64 " in dashboard and f" {base} sh -euc " in dashboard
+    assert (
+        "/tmp/lock/bin/pip-compile --generate-hashes --output-file=requirements-dashboard.txt requirements-dashboard.in"
+    ) in dashboard
+    assert "/tmp/lock/bin/python scripts/mark_linux_only_pins.py requirements-dashboard.txt watchdog" in dashboard
+    assert "--upgrade" not in dashboard and "uname" not in dashboard
 
 
 @needs_make
@@ -279,11 +318,17 @@ def test_pre_commit_is_a_hash_pinned_dev_dependency():
     assert lock[at + 1].strip().startswith("--hash=sha256:")
 
 
-def test_dev_and_main_lockfiles_agree_on_shared_pins():
-    # Both are installed into the same .venv by separate `pip install` calls, so a divergence would silently replace the
-    # main lockfile's pin. requirements-dataproc-3.0.txt is never co-installed with them and is not compared.
-    main, dev = _pins(ROOT / "requirements.txt"), _pins(ROOT / "requirements-dev.txt")
-    assert {name: (main[name], dev[name]) for name in main.keys() & dev.keys() if main[name] != dev[name]} == {}
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [("requirements.txt", "requirements-dev.txt"), ("requirements.txt", "requirements-dashboard.txt"),
+     ("requirements-dashboard.txt", "requirements-dev.txt")],
+)  # fmt: skip
+def test_co_installed_lockfiles_agree_on_shared_pins(first, second):
+    # These are installed into the same .venv by separate `pip install` calls (make setup, CI's lint-and-test), so a
+    # divergence would silently replace an earlier lockfile's pin. The dashboard set is `-c requirements.txt` constrained
+    # (tests/test_lockfiles.py D8) but the dev set is not. requirements-dataproc-3.0.txt is never co-installed and is not compared.
+    a, b = _pins(ROOT / first), _pins(ROOT / second)
+    assert {name: (a[name], b[name]) for name in a.keys() & b.keys() if a[name] != b[name]} == {}
 
 
 @pytest.mark.skipif(importlib.util.find_spec("pre_commit") is None, reason="pre-commit is not installed")
@@ -353,3 +398,55 @@ def test_live_targets_refuse_without_required_variables(tmp_path):
         "export-portable", "SOURCE_BUNDLE=bundles/x", "PORTABLE_ARGS=--bundles-dir y"
     )
 
+
+
+# ---------------------------------------------------------------- v3 slice 4: the dashboard image and its live checks
+
+
+@needs_make
+def test_dashboard_base_image_is_the_dockerfile_from_reference():
+    # make -pn, because a $(shell ...) value is invisible to the Makefile-text regexes the other tests use.
+    printed = run_make("-pn", "help").stdout
+    value = re.search(r"^DASHBOARD_BASE_IMAGE := (\S+)$", printed, flags=re.MULTILINE)
+    base = re.search(r"^FROM (\S+)$", (ROOT / "Dockerfile").read_text(), flags=re.MULTILINE)
+    assert value and base and value.group(1) == base.group(1)
+
+
+@needs_make
+def test_setup_installs_the_dashboard_set_binary_only():
+    setup = _dry_run("setup")
+    assert ".venv/bin/pip install --require-hashes --only-binary=:all: -r requirements-dashboard.txt" in setup
+    assert "requirements-dashboard-linux-extras.txt" not in setup
+
+
+@needs_make
+def test_dashboard_image_targets():
+    image = _dry_run("dashboard-image")
+    assert 'commit=$(test -z "$(git status --porcelain)" && git rev-parse HEAD);' in image  # a dirty tree records no commit
+    assert "docker build --platform linux/amd64 --provenance=false --sbom=false --build-arg GIT_COMMIT=$commit" in image
+    assert "-t readmission-risk-dashboard:local ." in image
+    check = _dry_run("dashboard-image-check")
+    assert (
+        'docker run --rm readmission-risk-dashboard:local python -I scripts/dashboard_image_check.py '
+        '$(test -z "$(git status --porcelain)" || echo --allow-missing-commit)'
+    ) in check
+    assert "scripts/dashboard_server_check.py --connect 127.0.0.1:8080 --foreign-host-check" in check
+    assert all(f"--url http://{host}" in check for host in SERVICE_HOSTS) and "--url http://127.0.0.1:8080" in check
+    assert "docker rm -f readmission-risk-dashboard-check" in check
+    server = _dry_run("dashboard-server-check")
+    assert server.strip().endswith(" ".join(f"--url https://{host}" for host in SERVICE_HOSTS))
+    kill = _dry_run("dashboard-kill-test")
+    assert "scripts/publish_budget_message.py --budget-name \"$(terraform -chdir=infra output -raw dashboard_budget_name)\"" in kill
+    assert '--budget-amount "$(terraform -chdir=infra output -raw dashboard_budget_chf)" --cost 0.01' in kill
+
+
+def test_deploy_ci_and_make_check_every_service_host():
+    """The S9 test's other half (v3 slice 4, section 12): every place that checks the service checks exactly its hosts."""
+    run_app = re.compile(r"[a-z0-9-]+\.(?:[a-z0-9-]+\.)*run\.app")
+    deploy = (ROOT / ".github" / "workflows" / "deploy.yml").read_text()
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    ci_job = ci[ci.index("  dashboard-image:"):ci.index("  terraform-validate:")]
+    makefile = re.search(r"^DASHBOARD_URLS\s*\?=\s*(.+)$", (ROOT / "Makefile").read_text(), flags=re.MULTILINE).group(1)
+    for scheme, text in (("https", deploy), ("http", ci_job), ("https", makefile)):
+        assert set(run_app.findall(text)) == set(SERVICE_HOSTS), text[:80]
+        assert all(f"{scheme}://{host}" in text for host in SERVICE_HOSTS)

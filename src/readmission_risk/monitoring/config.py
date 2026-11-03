@@ -13,17 +13,18 @@ from pathlib import Path
 from readmission_risk.bundles.champion import Champion
 from readmission_risk.bundles.manifest import HEX64_RE
 
+# Re-exported: the schedule facts live in freshness.py, which the dashboard imports without this module's bundles imports.
+from .freshness import _PERIODS, WEEKLY_CRON, period_of  # noqa: F401
+
 DEFAULT_CONFIG_PATH = Path("deploy/monitoring.json")
 STEP_DAYS = 7  # consecutive ticks' 7-day windows tile the timeline exactly; any other value is a design change
 WINDOW_DAYS = 7
-WEEKLY_CRON = "17 * * * 1-3"  # weekly tick with hourly retry slots Monday-Wednesday; the clock skips once the week's tick succeeded or 3 attempts failed (weekly.py)
 CADENCES = ("burn_in", "weekly", "dispatch", "catch_up")
 _KEYS = {
     "model_bundle_id", "gold_uri", "first_sim_date", "last_sim_date", "step_days", "window_days", "top_n", "crons", "epoch",
 }  # fmt: skip
 _GS_URI_RE = re.compile(r"gs://[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]/[^\s]+")
 _INT32_MAX = 2**31 - 1
-_PERIODS = {WEEKLY_CRON: timedelta(days=7)}
 
 
 @dataclass(frozen=True)
@@ -130,9 +131,3 @@ def check_champion_matches(config: MonitoringConfig, champion: Champion) -> None
             f"deploy/monitoring.json monitors bundle {config.model_bundle_id}, but the champion is {leaf}: a promotion must "
             "update the monitoring config (and its clock range) in the same change"
         )
-
-
-def period_of(cron: str) -> timedelta:
-    if cron not in _PERIODS:
-        raise ValueError(f"unknown monitoring cron {cron!r}")
-    return _PERIODS[cron]

@@ -11,7 +11,8 @@ from dataclasses import dataclass
 import numpy as np
 from matplotlib.figure import Figure
 
-from .style import MODEL_DISPLAY_NAMES, MODEL_NAMES, Theme, new_axes
+from .palette import Theme
+from .style import MODEL_DISPLAY_NAMES, MODEL_NAMES, new_axes
 
 DEFAULT_POPULATION_LABEL = "development set"
 

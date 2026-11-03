@@ -1,0 +1,12 @@
+# The Streamlit dashboard's own dependency set (v3 slice 3, owner decision S17; recompiled for Linux in v3 slice 4, T2, in
+# notes/eg-new-feature/v3-slice4-cloud-run-deploy-2026-11-03.md): installed by `make setup`, CI's lint-and-test and the dashboard
+# image (Dockerfile), never by the production workflows (score.yml, monitor.yml), which install requirements.txt. The constraint
+# keeps every shared pin (pandas, numpy, pyarrow, google-cloud-bigquery, ...) equal to requirements.txt's; recompile with
+# `make lock-dashboard` after every `make lock-main`. It compiles inside the Dockerfile's base image (linux/amd64), so the
+# lockfile is the image's, and marks watchdog (required by streamlit off macOS; no macOS wheel for Python 3.14) Linux-only (F10).
+# Each pin is a release at least 7 days old when added (the Dependabot cooldown rule): streamlit 1.66.1 (2026-10-21), altair
+# 6.3.0 (2026-09-15); google-cloud-bigquery is requirements.txt's pin.
+-c requirements.txt
+streamlit==1.66.1
+altair==6.3.0
+google-cloud-bigquery==3.46.1

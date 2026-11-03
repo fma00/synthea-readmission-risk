@@ -10,7 +10,8 @@ import re
 
 import pandas as pd
 
-from .config import MonitoringConfig, period_of
+from .config import MonitoringConfig
+from .freshness import cadence_label, stale_after
 
 HEADER = (
     "**Simulated clock.** Each tick advances a simulated date by one week through the held-out 2023–2026 discharges of a "
@@ -26,15 +27,7 @@ HEADER = (
     "events; patients with several stays in a cohort make it somewhat too narrow. Synthetic data, not for clinical use. "
     "Source of truth: BigQuery `serving.scoring_runs` and `serving.monitoring`."
 )
-CADENCE_LABELS = {"weekly": "weekly", "dispatch": "dispatch", "catch_up": "catch-up (laptop)"}
 _CRON_RE = re.compile(r'^\s*-\s*cron:\s*"([^"]+)"\s*$', re.MULTILINE)
-
-
-def cadence_label(cadence, trigger) -> str:
-    """burn_in is labelled by how it was triggered: GitHub's scheduler (2026-10-19/20) or a dispatch (the laptop timer)."""
-    if cadence == "burn_in":
-        return "burn-in (scheduled, accelerated)" if trigger == "schedule" else "burn-in (dispatched, accelerated)"
-    return CADENCE_LABELS.get(cadence, "-")
 
 
 def _missing(value) -> bool:
@@ -124,12 +117,11 @@ def last_tick_badge(monitoring: pd.DataFrame, *, cron: str | None) -> dict:
     if cron is None:
         message += " · dispatch only"
     else:
-        # The newest succeeded weekly tick: retry slots that skip, failed attempts and the 2026-10-19/20 scheduled
-        # burn-in rows do not refresh "stale after".
-        scheduled = ordered[(ordered["trigger"] == "schedule") & (ordered["cadence"] == "weekly") & (ordered["status"] == "succeeded")]
-        if scheduled.empty:
+        # The newest succeeded weekly tick (freshness.stale_after, shared with the dashboard heartbeat): retry slots that skip,
+        # failed attempts and the 2026-10-19/20 scheduled burn-in rows do not refresh "stale after".
+        stale = stale_after(ordered.to_dict("records"), cron=cron)
+        if stale is None:
             message += " · schedule not started"
         else:
-            stale = pd.Timestamp(scheduled.iloc[0]["started_at"]).tz_convert("UTC") + 2 * period_of(cron)
             message += f" · stale after {_wall(stale)}"
     return {**badge, "message": message, "color": "brightgreen" if latest["status"] == "succeeded" else "red"}

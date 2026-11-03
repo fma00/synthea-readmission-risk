@@ -125,3 +125,6 @@ tools/jdk/
 # CLI scratch directories of the monitoring tick (v2 slice 7)
 /monitor_out/
 /ledger_out/
+
+# v3 slice 4: the dashboard-kill function zip Terraform builds (infra/dashboard.tf)
+infra/.build/

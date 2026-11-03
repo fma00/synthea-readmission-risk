@@ -182,3 +182,10 @@ def test_gold_helpers_import_no_mlflow():
     """tests/gold_helpers.py must import in CI's pipeline-dataproc-runtime job, which has no mlflow or sklearn."""
     code = "import sys, tests.gold_helpers; assert 'mlflow' not in sys.modules and 'sklearn' not in sys.modules"
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_canonical_token_is_the_canonicalizers_own_token():
+    """v3 slice 1's column diagnostic compares cells with it; an alias, never a second canonical form."""
+    from readmission_risk.pipeline import fingerprint
+
+    assert fingerprint.canonical_token is fingerprint._token

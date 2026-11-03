@@ -1,0 +1,28 @@
+# Hardened Streamlit configuration of the dashboard (PRD v3 FR17; notes/eg-new-feature/v3-slice3-dashboard-app-2026-11-01.md
+# section 8, owner decision S9 for the dev hosts; v3 slice 4 adds [logger] and the service hosts' test). Streamlit reads it from the working directory; tests/dashboard asserts it.
+
+[global]
+developmentMode = false
+
+[client]
+showErrorDetails = "none"
+toolbarMode = "viewer"
+showSidebarNavigation = false
+
+[browser]
+gatherUsageStats = false
+
+# v3 slice 4 (F11): skip the startup banner, whose "External URL" line makes an outbound IP lookup on every start.
+[logger]
+hideWelcomeMessage = true
+
+[server]
+headless = true
+fileWatcherType = "none"
+runOnSave = false
+enableXsrfProtection = true
+enableCORS = true
+enableStaticServing = false
+maxUploadSize = 1
+maxMessageSize = 16
+allowedHosts = ["dashboard-271458030145.us-central1.run.app", "dashboard-6wf7ihuvwq-uc.a.run.app", "localhost", "127.0.0.1"]
