@@ -1058,4 +1058,39 @@ follow-up PR into `v3` together with L1's two fixes (below); nothing is built fr
   and 1 `alert` on the 161 full cohorts; O/E 0.706-1.309; observed 26-64; `n_label_after_sim` at most 3: identical to slice 7's
   L1 baseline (2026-10-18), so the merge changes nothing in scoring or evaluation (F14). PR #40 merged `v3` into `main` with a
   merge commit at 2026-11-03T13:48:35Z (`92b95ce`) (T1); `v3` kept for slice 5. L16 moved from 2026-12-22 to **2026-12-23**
-  (CLAUDE.md and the two monitoring notes).
+  (CLAUDE.md and the two monitoring notes). PR #52 (these records) merged the same day, so the date stays 2026-12-23.
+- **L4 (2026-11-03, M1 part):** `gh workflow run deploy.yml --ref main` →
+  [run 41655154461](https://github.com/fma00/synthea-readmission-risk/actions/runs/41655154461) at `58d5f3a` (the PR #52 merge):
+  **green at the first attempt, 1 min 41 s**, P2 and P14 not needed (dashboard-deploy's grants suffice). IC1-IC7 pass in the
+  pushed image (python 3.14.10, uid 10001, 52 distributions = the lockfile, no banned packages, `pip check` clean, app + 7 lazy
+  modules import, commit `58d5f3ac…` baked in). Tag `58d5f3ac255b3de4d41b52c7f5b4692ae94efe37-41655154461-1`, digest
+  `sha256:3a69405f0b3ce24e214cbe06df63bb550ac561fb5dc63d23a950bd8d74f28ffc`; revision **`dashboard-00002-rsq`**, 100 % of
+  traffic, deploy 25 s. Smoke: served `status.imageDigest` = the pushed digest; SC1-SC4 pass on both hosts (SC4: 403). Confirmed
+  from the laptop (read-only `gcloud run services/revisions describe`): latest ready revision `dashboard-00002-rsq`, image the
+  same digest.
+- **L5 (2026-11-03):** `make dashboard-server-check` from the laptop: SC1-SC4 pass on both hosts (SC1 200 `ok`, `no-cache`, XSRF
+  cookie; SC2 no `Access-Control-Allow-Origin`; SC3 101; SC4 403), exit 0.
+- **L6 (2026-11-03, M5):** `terraform -chdir=infra plan` after the CI deploy: **"No changes. Your infrastructure matches the
+  configuration."** The `ignore_changes` list (image, `client`, `client_version`, the nonce label and the two client
+  annotations, F15) covers everything `gcloud run deploy` wrote; P6 not needed. **M5 met.**
+- **L7 (2026-11-03/04, owner's manual pass on revision `dashboard-00002-rsq`):**
+  - Pass: the three views render with data; the footer shows commit `58d5f3a…` and the T4 SNOMED CT credit; light and dark mode
+    (page and chart); keyboard-only navigation through the tabs and the run-date picker with a visible focus; status as text +
+    icon; the chart's text table; reconnect after the 900 s request timeout.
+  - **Fail (a11y, contrast; WCAG AA needs 4.5 : 1):** measured in Chrome DevTools: grey captions ("Simulated today", the chart
+    legend; the footer looks the same) **3.69** in light mode (dark fine); links **3.03** light / **3.09** dark; body text and the
+    rest pass. Streamlit 1.66.1's default theme, not slice-4 code: slice 3 assumed the default theme met AA. Owner decision
+    2026-11-04: fix in slice 4 (theme keys in `config.toml` + a test, verified with Lighthouse locally and on the live URL after
+    a redeploy); recorded as L7b below once done. Fix: `[theme.light]` `textColor = "#0e1117"`, `linkColor = "#00137a"`, `[theme.dark]`
+    `linkColor = "#a6d8ff"`, both `linkUnderline = true` (owner decision "config only"; computed at 60 %: captions 4.96, links
+    4.62 light / 5.08 dark). Owner's local check 2026-11-04 on the rebuilt image (no credentials, so the footer and the notice
+    rendered, the data captions did not): all measured elements ≥ 4.5 in both themes, footer links underlined.
+  - Redacted error page: the current image (rebuilt from `main`) running `fail.py` = `raise RuntimeError("secret-detail")`
+    showed only Streamlit's redacted-error message in the browser (owner, screenshot kept locally); the traceback with
+    `secret-detail` appeared only in the server log (`docker logs`).
+  - Logs (window widened from the runbook's 2 h to everything since the L4 deploy, 2026-11-03T14:36Z, because the owner's
+    sessions spanned two days): **no entry with severity ≥ ERROR and no `Traceback`**. 16 WARNINGs, all HTTP request lines: 4× 403
+    on `/_stcore/stream` = SC4's foreign-Origin probes (deploy smoke, L5); 12× 400 on `GET /` on 2026-11-03 15:18-15:45 from
+    `Mozilla/5.0 (compatible)` clients in cloud-provider address ranges, hitting both hosts within ~45 min of the deploy:
+    crawlers finding the new public URL (they also caused cold starts; no server error logged).
+  - Memory: peak p99 `container/memory/utilizations` since the deploy **49 % (~251 MiB of 512 MiB)**; P11 (≥ 90 %) not needed.
