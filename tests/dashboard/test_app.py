@@ -30,7 +30,7 @@ from tests.dashboard.fake_world import (
     published_row,
     sheet_rows,
 )
-from tests.dashboard.test_streamlit_config import EXPECTED
+from tests.dashboard.test_streamlit_config import expected_options
 
 REPO = Path(__file__).resolve().parents[2]
 ENTRYPOINT = str(REPO / "scripts" / "dashboard_app.py")
@@ -78,9 +78,8 @@ def _isolated_config(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))  # no ~/.streamlit/config.toml (re-resolved through HOME on every reparse)
     monkeypatch.delenv("READMISSION_RISK_GIT_COMMIT", raising=False)
     st_config.get_config_options(force_reparse=True)
-    for section, keys in EXPECTED.items():
-        for key, value in keys.items():
-            assert st_config.get_option(f"{section}.{key}") == value, f"{section}.{key}"
+    for name, value in expected_options().items():
+        assert st_config.get_option(name) == value, name
     yield
 
 

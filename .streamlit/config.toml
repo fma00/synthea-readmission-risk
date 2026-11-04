@@ -26,3 +26,16 @@ enableStaticServing = false
 maxUploadSize = 1
 maxMessageSize = 16
 allowedHosts = ["dashboard-271458030145.us-central1.run.app", "dashboard-6wf7ihuvwq-uc.a.run.app", "localhost", "127.0.0.1"]
+
+# v3 slice 4, L7 (owner decision 2026-11-04, "config only"): WCAG AA contrast (4.5 : 1). Streamlit draws st.caption, and the links
+# inside it (the footer), at 60 % of the text/link colour; its defaults measured 3.69 (light captions) and 3.03 / 3.09 (footer
+# links). Computed at 60 % on the theme background: captions 4.96 (light; dark already passed), links 4.62 light / 5.08 dark.
+# The near-black navy link stays distinguishable from body text by its underline (WCAG 1.4.1).
+[theme.light]
+textColor = "#0e1117"
+linkColor = "#00137a"
+linkUnderline = true
+
+[theme.dark]
+linkColor = "#a6d8ff"
+linkUnderline = true
