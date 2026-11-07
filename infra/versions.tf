@@ -6,7 +6,7 @@ terraform {
   required_providers {
     google = {
       source  = "hashicorp/google"
-      version = "8.8.1"
+      version = "8.9.0"
     }
     # v3 slice 4: zips the dashboard-kill function's source (dashboard.tf).
     archive = {
